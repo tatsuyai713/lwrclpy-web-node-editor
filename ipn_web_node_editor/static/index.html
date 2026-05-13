@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>lwrclpy Web Node Editor</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>lwrclpy Web Node Editor</h1>
+      <span id="runtime-status">lwrclpy checking...</span>
+    </div>
+    <nav>
+      <button id="create-node">Create Node</button>
+      <button id="run-once">Run Once</button>
+      <button id="toggle-run">Auto Spin</button>
+      <button id="fit-view">Fit</button>
+      <button id="export-json">Export Graph</button>
+      <label class="file-button">Import Graph<input id="import-json" type="file" accept="application/json"></label>
+      <label class="file-button">Import Python Node<input id="import-python-node" type="file" accept=".py,text/x-python,text/plain"></label>
+      <button id="clear-graph">Clear</button>
+    </nav>
+  </header>
+
+  <main>
+    <aside>
+      <h2>Nodes</h2>
+      <div class="side-actions">
+        <button id="create-node-side">Create Node</button>
+      </div>
+      <h3>Tool Nodes</h3>
+      <div id="tool-node-list" class="tool-node-list"></div>
+      <h3>Graph Nodes</h3>
+      <div id="node-list"></div>
+    </aside>
+
+    <section id="workspace">
+      <svg id="links"></svg>
+      <div id="scene">
+        <div id="nodes"></div>
+      </div>
+      <div id="hud"><span id="zoom-label">100%</span><span id="node-count">0 nodes / 0 links</span></div>
+    </section>
+
+    <aside id="inspector">
+      <h2>Inspector</h2>
+      <div id="inspector-content">Create or select a node.</div>
+    </aside>
+  </main>
+
+  <dialog id="node-dialog">
+    <form method="dialog" id="node-form">
+      <header class="dialog-header">
+        <h2 id="node-dialog-title">Create lwrclpy Node</h2>
+        <button type="button" class="icon-button" data-close-dialog="node-dialog">x</button>
+      </header>
+      <div class="dialog-body">
+        <label class="field">
+          <span>Node Name</span>
+          <input id="config-node-name" required value="custom_ros_node">
+        </label>
+        <div class="count-grid">
+          <label class="field">
+            <span>Input Count</span>
+            <input id="config-input-count" type="number" min="0" max="16" value="1">
+          </label>
+          <label class="field">
+            <span>Output Count</span>
+            <input id="config-output-count" type="number" min="0" max="16" value="1">
+          </label>
+        </div>
+        <div class="port-configs">
+          <section>
+            <h3>Inputs / Subscriptions</h3>
+            <div id="input-configs"></div>
+          </section>
+          <section>
+            <h3>Outputs / Publishers</h3>
+            <div id="output-configs"></div>
+          </section>
+        </div>
+      </div>
+      <footer class="dialog-footer">
+        <button type="button" data-close-dialog="node-dialog">Cancel</button>
+        <button id="save-node-config" type="submit">Save Node</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="code-dialog">
+    <form method="dialog" id="code-form">
+      <header class="dialog-header">
+        <h2 id="code-dialog-title">Edit Code</h2>
+        <button type="button" class="icon-button" data-close-dialog="code-dialog">x</button>
+      </header>
+      <div class="dialog-body">
+        <textarea id="code-editor" spellcheck="false"></textarea>
+        <div class="hint" id="code-hint"></div>
+      </div>
+      <footer class="dialog-footer">
+        <button type="button" data-close-dialog="code-dialog">Cancel</button>
+        <button id="save-code" type="submit">Save Code</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>
