@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-import base64
 import importlib
-import io
 import json
 import pkgutil
+import base64
+import hashlib
+import shutil
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -31,7 +35,6 @@ def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
 
 
 LWRCLPY_TYPE_TREE = discover_lwrclpy_types()
-TOOL_TYPE_PREFIX = "tool/"
 
 
 @dataclass
@@ -54,6 +57,11 @@ class CustomLwrclNodeConfig:
     inputs: list[PortConfig] = field(default_factory=list)
     outputs: list[PortConfig] = field(default_factory=list)
     loop_code: str = ""
+    timer_enabled: bool = False
+    timer_period_sec: float = 1.0
+    timer_code: str = ""
+    import_code: str = ""
+    requirements: str = ""
     tool_type: str = ""
     params: dict[str, Any] = field(default_factory=dict)
 
@@ -67,10 +75,6 @@ def split_type(type_name: str) -> tuple[str, str, str]:
     if len(parts) != 3 or parts[1] not in {"msg", "srv"}:
         raise ValueError(f"Unsupported lwrclpy type: {type_name}")
     return parts[0], parts[1], parts[2]
-
-
-def is_lwrclpy_type(type_name: str) -> bool:
-    return not normalize_type(type_name).startswith(TOOL_TYPE_PREFIX)
 
 
 def import_type_class(type_name: str):
@@ -125,9 +129,18 @@ class CustomLwrclNodeInstance:
         self.last_inputs: dict[str, Any] = {}
         self.input_queues: dict[str, list[Any]] = {}
         self.last_outputs: dict[str, Any] = {}
-        self.displays: dict[str, Any] = {}
         self.logs: list[str] = []
+        self.view: dict[str, Any] = {}
+        self._series: list[float] = []
+        self._last_saved_signature = ""
+        self._next_timer_at = 0.0
+        self._exec_globals: dict[str, Any] | None = None
+        self._import_signature = ""
+        self.env_path: Path | None = None
+        self.env_site_packages: Path | None = None
+        self.env_status = "pending"
         self.publishers: dict[str, list[Any]] = {}
+        self.input_publishers: dict[str, list[Any]] = {}
         self.clients: dict[str, list[Any]] = {}
         self.subscriptions: list[Any] = []
         self.services: list[Any] = []
@@ -139,6 +152,8 @@ class CustomLwrclNodeInstance:
         if self._signature(config) != self.signature:
             self.close()
             self.config = config
+            self._exec_globals = None
+            self._import_signature = ""
             self._setup_transport()
         else:
             self.config = config
@@ -153,18 +168,28 @@ class CustomLwrclNodeInstance:
                 pass
         self.lwrcl_node = None
         self.publishers = {}
+        self.input_publishers = {}
         self.clients = {}
         self.subscriptions = []
         self.services = []
 
     def tick(self, linked_inputs: dict[str, Any]) -> dict[str, Any]:
         self.runtime.spin_once()
-        self.displays = {}
         for key, value in linked_inputs.items():
             if value is not None:
                 self._store_input(key, value)
+                self.publish_input(key, value)
+        if self._execute_tool(linked_inputs):
+            return {
+                "inputs": self._repr_values({**self.last_inputs, **linked_inputs}),
+                "outputs": self._repr_values(self.last_outputs),
+                "logs": self.logs[-20:],
+                "lwrclpy": self.runtime.available,
+                "environment": self.env_status,
+            }
         merged_inputs = {**self.last_inputs, **linked_inputs}
         local_outputs: dict[str, Any] = {}
+        self._execute_timer_if_due(merged_inputs, local_outputs)
         self._execute_loop(merged_inputs, local_outputs)
         for key, value in local_outputs.items():
             self.last_outputs[key] = value
@@ -174,6 +199,7 @@ class CustomLwrclNodeInstance:
             "outputs": self._repr_values(self.last_outputs),
             "logs": self.logs[-20:],
             "lwrclpy": self.runtime.available,
+            "environment": self.env_status,
         }
 
     def publish(self, output_id: str, value: Any) -> None:
@@ -185,6 +211,13 @@ class CustomLwrclNodeInstance:
             request = self._coerce_service_request(self._output_type(output_id), value)
             for client in self.clients[output_id]:
                 client.call_async(request)
+
+    def publish_input(self, input_id: str, value: Any) -> None:
+        if input_id not in self.input_publishers:
+            return
+        msg = self._coerce_message(self._input_type(input_id), value)
+        for publisher in self.input_publishers[input_id]:
+            publisher.publish(msg)
 
     def latest(self, input_id: str, default: Any = None) -> Any:
         return self.last_inputs.get(input_id, default)
@@ -204,13 +237,126 @@ class CustomLwrclNodeInstance:
 
     def _setup_transport(self) -> None:
         self.signature = self._signature(self.config)
-        needs_transport = any(is_lwrclpy_type(port.data_type) and self._port_topics(port) for port in [*self.config.inputs, *self.config.outputs])
+        if self.config.tool_type in {"image_view", "graph_view", "image_file_save"}:
+            return
+        needs_transport = any(self._port_topics(port) for port in [*self.config.inputs, *self.config.outputs])
         if not needs_transport or not self.runtime.ensure_initialized():
             return
         self.lwrcl_node = self.runtime.rclpy.create_node(f"ipn_user_{self.config.id}".replace("-", "_")[:80])
+        if self.config.tool_type == "topic_input":
+            self._setup_topic_input_transport()
+        elif self.config.tool_type == "topic_output":
+            self._setup_topic_output_transport()
+        else:
+            self._setup_custom_transport()
+        if self.runtime.executor is not None:
+            self.runtime.executor.add_node(self.lwrcl_node)
+
+    def _execute_tool(self, linked_inputs: dict[str, Any]) -> bool:
+        tool = self.config.tool_type
+        if tool in {"image_file_input", "video_file_input"}:
+            image = self.config.params.get("imageMessage") or self.config.params.get("frameMessage")
+            if isinstance(image, dict):
+                self.last_outputs["out1"] = image
+                self.publish("out1", image)
+                self.view = {"kind": "image", "dataUrl": self.config.params.get("dataUrl", ""), "status": self.config.params.get("fileName", "")}
+            else:
+                self.view = {"kind": "empty", "status": "No media selected"}
+            return True
+        if tool == "image_view":
+            image = linked_inputs.get("in1") or self.last_inputs.get("in1")
+            data_url = self._image_data_url(image)
+            self.view = {"kind": "image", "dataUrl": data_url, "status": self._image_status(image) if data_url else "No image"}
+            return True
+        if tool == "image_file_save":
+            image = linked_inputs.get("in1") or self.last_inputs.get("in1")
+            path = self._save_image(image)
+            self.view = {"kind": "text", "status": path or "No image to save"}
+            return True
+        if tool == "graph_view":
+            value = linked_inputs.get("in1") or self.last_inputs.get("in1")
+            y = self._extract_number(value, str(self.config.params.get("fieldPath") or "data"))
+            if y is not None:
+                self._series.append(y)
+                limit = int(self.config.params.get("sampleLimit") or 120)
+                del self._series[:-max(8, min(limit, 1000))]
+            self.view = {"kind": "plot", "series": self._series[-240:], "status": str(self.config.params.get("fieldPath") or "data")}
+            return True
+        return False
+
+    def _image_status(self, image: Any) -> str:
+        width = self._field(image, "width")
+        height = self._field(image, "height")
+        encoding = self._field(image, "encoding") or "rgb8"
+        return f"{width} x {height} {encoding}" if width and height else str(encoding)
+
+    def _image_data_url(self, image: Any) -> str:
+        if not image:
+            return ""
+        if isinstance(image, dict) and isinstance(image.get("dataUrl"), str):
+            return image["dataUrl"]
+        width = int(self._field(image, "width") or 0)
+        height = int(self._field(image, "height") or 0)
+        encoding = str(self._field(image, "encoding") or "rgb8").lower()
+        data = self._field(image, "data")
+        if not width or not height or data is None:
+            return ""
+        raw = bytes(data)
+        if encoding in {"rgb8", "bgr8"}:
+            if encoding == "bgr8":
+                raw = bytes(v for i in range(0, len(raw), 3) for v in raw[i:i + 3][::-1])
+            ppm = f"P6\n{width} {height}\n255\n".encode("ascii") + raw[:width * height * 3]
+        elif encoding in {"rgba8", "bgra8"}:
+            rgb = bytearray()
+            for i in range(0, min(len(raw), width * height * 4), 4):
+                px = raw[i:i + 4]
+                rgb.extend((px[2], px[1], px[0]) if encoding == "bgra8" else px[:3])
+            ppm = f"P6\n{width} {height}\n255\n".encode("ascii") + bytes(rgb)
+        elif encoding in {"mono8", "8uc1"}:
+            ppm = f"P5\n{width} {height}\n255\n".encode("ascii") + raw[:width * height]
+        else:
+            return ""
+        return "data:image/x-portable-pixmap;base64," + base64.b64encode(ppm).decode("ascii")
+
+    def _save_image(self, image: Any) -> str:
+        data_url = self._image_data_url(image)
+        if not data_url:
+            return ""
+        signature = data_url[-80:]
+        if signature == self._last_saved_signature:
+            return str(self.config.params.get("lastSavedPath") or "")
+        payload = data_url.split(",", 1)[1]
+        out_dir = Path.cwd() / "saved_images"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{self.config.name}_{int(time.time() * 1000)}.ppm"
+        path.write_bytes(base64.b64decode(payload))
+        self._last_saved_signature = signature
+        self.config.params["lastSavedPath"] = str(path)
+        return str(path)
+
+    def _extract_number(self, value: Any, path: str) -> float | None:
+        current = value
+        for part in [item for item in path.replace("/", ".").split(".") if item]:
+            if isinstance(current, dict):
+                current = current.get(part)
+            elif isinstance(current, (list, tuple)) and part.isdigit():
+                current = current[int(part)]
+            else:
+                current = getattr(current, part, None)
+        if isinstance(current, (int, float)):
+            return float(current)
+        try:
+            return float(current)
+        except Exception:
+            return None
+
+    def _field(self, value: Any, key: str) -> Any:
+        if isinstance(value, dict):
+            return value.get(key)
+        return getattr(value, key, None)
+
+    def _setup_custom_transport(self) -> None:
         for output in self.config.outputs:
-            if not is_lwrclpy_type(output.data_type):
-                continue
             topics = self._port_topics(output)
             type_cls = import_type_class(output.data_type)
             _, kind, _ = split_type(output.data_type)
@@ -220,8 +366,6 @@ class CustomLwrclNodeInstance:
                 else:
                     self.clients.setdefault(output.id, []).append(self.lwrcl_node.create_client(type_cls, topic))
         for input_port in self.config.inputs:
-            if not is_lwrclpy_type(input_port.data_type):
-                continue
             topics = self._port_topics(input_port)
             type_cls = import_type_class(input_port.data_type)
             _, kind, _ = split_type(input_port.data_type)
@@ -232,8 +376,25 @@ class CustomLwrclNodeInstance:
                 else:
                     srv = self.lwrcl_node.create_service(type_cls, topic, self._make_service_callback(input_port.id))
                     self.services.append(srv)
-        if self.runtime.executor is not None:
-            self.runtime.executor.add_node(self.lwrcl_node)
+
+    def _setup_topic_input_transport(self) -> None:
+        for output in self.config.outputs:
+            type_cls = import_type_class(output.data_type)
+            _, kind, _ = split_type(output.data_type)
+            if kind != "msg":
+                continue
+            for topic in self._port_topics(output):
+                sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_output_subscription_callback(output.id), 10)
+                self.subscriptions.append(sub)
+
+    def _setup_topic_output_transport(self) -> None:
+        for input_port in self.config.inputs:
+            type_cls = import_type_class(input_port.data_type)
+            _, kind, _ = split_type(input_port.data_type)
+            if kind != "msg":
+                continue
+            for topic in self._port_topics(input_port):
+                self.input_publishers.setdefault(input_port.id, []).append(self.lwrcl_node.create_publisher(type_cls, topic, 10))
 
     def _port_topics(self, port: PortConfig) -> tuple[str, ...]:
         if port.topics:
@@ -251,6 +412,13 @@ class CustomLwrclNodeInstance:
             for key, value in outputs.items():
                 self.last_outputs[key] = value
                 self.publish(key, value)
+
+        return callback
+
+    def _make_output_subscription_callback(self, output_id: str):
+        def callback(msg):
+            self.last_outputs[output_id] = msg
+            self.log("received", output_id)
 
         return callback
 
@@ -301,9 +469,40 @@ class CustomLwrclNodeInstance:
         except Exception as exc:
             self.log(f"loop error: {exc}")
 
+    def _execute_timer_if_due(self, inputs: dict[str, Any], outputs: dict[str, Any]) -> None:
+        if not self.config.timer_enabled:
+            return
+        code = self.config.timer_code.strip()
+        if not code:
+            return
+        now = time.time()
+        period = max(0.001, float(self.config.timer_period_sec or 1.0))
+        if self._next_timer_at <= 0:
+            self._next_timer_at = now
+        if now < self._next_timer_at:
+            return
+        self._next_timer_at = now + period
+        local = self._locals({
+            "inputs": inputs,
+            "outputs": outputs,
+            "now": now,
+            "period": period,
+            "latest": self.latest,
+            "take": self.take,
+            "has_input": self.has_input,
+        })
+        try:
+            exec(code, self._globals(), local)
+        except Exception as exc:
+            self.log(f"timer callback error: {exc}")
+
     def _globals(self) -> dict[str, Any]:
-        return {
+        signature = f"{self.env_site_packages}|{self.config.import_code}"
+        if self._exec_globals is not None and self._import_signature == signature:
+            return self._exec_globals
+        self._exec_globals = {
             "__builtins__": {
+                "__import__": __import__,
                 "abs": abs,
                 "bool": bool,
                 "dict": dict,
@@ -324,87 +523,28 @@ class CustomLwrclNodeInstance:
                 "sum": sum,
             },
         }
+        code = self.config.import_code.strip()
+        if code:
+            original_path = list(sys.path)
+            try:
+                if self.env_site_packages:
+                    sys.path.insert(0, str(self.env_site_packages))
+                exec(code, self._exec_globals, self._exec_globals)
+            except Exception as exc:
+                self.log(f"import setup error: {exc}")
+            finally:
+                sys.path[:] = original_path
+        self._import_signature = signature
+        return self._exec_globals
 
     def _locals(self, extra: dict[str, Any]) -> dict[str, Any]:
         return {
             "params": self.config.params,
             "state": self.state,
             "publish": self.publish,
-            "show_image": self.show_image,
-            "show_video": self.show_video,
-            "show_plot": self.show_plot,
-            "show_text": self.show_text,
-            "image_grayscale": self.image_grayscale,
-            "image_resize": self.image_resize,
-            "image_blur": self.image_blur,
-            "image_brightness": self.image_brightness,
-            "image_contrast": self.image_contrast,
             "log": self.log,
             **extra,
         }
-
-    def show_image(self, value: Any, title: str = "Image") -> Any:
-        self.displays["image"] = {"kind": "image", "title": title, "value": value}
-        return value
-
-    def show_video(self, value: Any, title: str = "Video") -> Any:
-        self.displays["video"] = {"kind": "video", "title": title, "value": value}
-        return value
-
-    def show_plot(self, series: Any, title: str = "Plot") -> Any:
-        self.displays["plot"] = {"kind": "plot", "title": title, "series": series}
-        return series
-
-    def show_text(self, value: Any, title: str = "Data") -> Any:
-        self.displays["text"] = {"kind": "text", "title": title, "value": self._repr_value(value)}
-        return value
-
-    def image_grayscale(self, value: Any) -> Any:
-        image = self._open_data_url_image(value)
-        return self._image_to_data_url(image.convert("L").convert("RGB"))
-
-    def image_resize(self, value: Any, width: int, height: int) -> Any:
-        image = self._open_data_url_image(value)
-        return self._image_to_data_url(image.resize((int(width), int(height))))
-
-    def image_blur(self, value: Any, radius: float = 2.0) -> Any:
-        pillow = self._pillow_modules()
-        image = self._open_data_url_image(value)
-        return self._image_to_data_url(image.filter(pillow["ImageFilter"].GaussianBlur(float(radius))))
-
-    def image_brightness(self, value: Any, factor: float = 1.2) -> Any:
-        pillow = self._pillow_modules()
-        image = self._open_data_url_image(value)
-        return self._image_to_data_url(pillow["ImageEnhance"].Brightness(image).enhance(float(factor)))
-
-    def image_contrast(self, value: Any, factor: float = 1.2) -> Any:
-        pillow = self._pillow_modules()
-        image = self._open_data_url_image(value)
-        return self._image_to_data_url(pillow["ImageEnhance"].Contrast(image).enhance(float(factor)))
-
-    def _pillow_modules(self) -> dict[str, Any]:
-        try:
-            return {
-                "Image": importlib.import_module("PIL.Image"),
-                "ImageEnhance": importlib.import_module("PIL.ImageEnhance"),
-                "ImageFilter": importlib.import_module("PIL.ImageFilter"),
-            }
-        except Exception as exc:
-            raise RuntimeError("Pillow is required for image processing nodes. Install it with: .venv/bin/python -m pip install Pillow") from exc
-
-    def _open_data_url_image(self, value: Any) -> Any:
-        pillow = self._pillow_modules()
-        text = str(value or "")
-        if "," not in text:
-            raise ValueError("Expected an image data URL")
-        _, encoded = text.split(",", 1)
-        return pillow["Image"].open(io.BytesIO(base64.b64decode(encoded))).convert("RGB")
-
-    def _image_to_data_url(self, image: Any) -> str:
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-        return f"data:image/png;base64,{encoded}"
 
     def _store_input(self, input_id: str, value: Any) -> None:
         self.last_inputs[input_id] = value
@@ -417,6 +557,12 @@ class CustomLwrclNodeInstance:
             if port.id == input_id:
                 return port
         return None
+
+    def _input_type(self, input_id: str) -> str:
+        for input_port in self.config.inputs:
+            if input_port.id == input_id:
+                return input_port.data_type
+        return ""
 
     def _output_type(self, output_id: str) -> str:
         for output in self.config.outputs:
@@ -464,6 +610,8 @@ class CustomLwrclNodeInstance:
         return (
             config.tool_type,
             json.dumps(config.params, sort_keys=True, default=str),
+            config.import_code,
+            config.requirements,
             tuple((p.id, p.data_type, p.topic, p.topics, p.receive_mode) for p in config.inputs),
             tuple((p.id, p.data_type, p.topic, p.topics) for p in config.outputs),
         )
@@ -492,26 +640,103 @@ class GraphRuntime:
             if node_id not in active_ids:
                 self.instances.pop(node_id).close()
 
-        outputs: dict[str, dict[str, Any]] = {}
         response_nodes: dict[str, Any] = {}
+        for config in configs:
+            instance = self._instance_for(config)
+            setup_ok = self._ensure_node_environment(config, instance)
+            response_nodes[config.id] = {"meta": {"environment": instance.env_status, "logs": instance.logs[-20:]}, "values": {}, "view": instance.view}
+            if not setup_ok:
+                return {
+                    "nodes": response_nodes,
+                    "lwrclpy": {"available": self.runtime.available, "error": self.runtime.error or instance.env_status},
+                    "setup": {"complete": False},
+                }
+
+        outputs: dict[str, dict[str, Any]] = {}
         for config in self._sort(configs, links):
-            instance = self.instances.get(config.id)
-            if instance is None:
-                instance = CustomLwrclNodeInstance(config, self.runtime)
-                self.instances[config.id] = instance
-            else:
-                instance.update_config(config)
+            instance = self._instance_for(config)
             linked_inputs = {}
             for link in links:
                 if link.get("toNode") == config.id:
                     linked_inputs[str(link.get("toPort"))] = outputs.get(str(link.get("fromNode")), {}).get(str(link.get("fromPort")))
             meta = instance.tick(linked_inputs)
             outputs[config.id] = instance.last_outputs
-            response_nodes[config.id] = {"meta": meta, "values": meta.get("outputs", {}), "images": instance.displays}
+            response_nodes[config.id] = {"meta": meta, "values": meta.get("outputs", {}), "view": instance.view}
         return {
             "nodes": response_nodes,
             "lwrclpy": {"available": self.runtime.available, "error": self.runtime.error},
+            "setup": {"complete": True},
         }
+
+    def _instance_for(self, config: CustomLwrclNodeConfig) -> CustomLwrclNodeInstance:
+        instance = self.instances.get(config.id)
+        if instance is None:
+            instance = CustomLwrclNodeInstance(config, self.runtime)
+            self.instances[config.id] = instance
+        else:
+            instance.update_config(config)
+        return instance
+
+    def _ensure_node_environment(self, config: CustomLwrclNodeConfig, instance: CustomLwrclNodeInstance) -> bool:
+        if config.tool_type:
+            instance.env_status = "built-in node"
+            return True
+        uv = self._uv_command()
+        if not uv:
+            instance.env_status = "uv command not found"
+            instance.log(instance.env_status)
+            return False
+        env_root = Path.cwd() / ".node_envs" / config.id
+        req_text = config.requirements.strip() + "\n"
+        req_hash = hashlib.sha256(req_text.encode("utf-8")).hexdigest()
+        hash_file = env_root / ".requirements.sha256"
+        req_file = env_root / "requirements.txt"
+        python_bin = env_root / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
+        try:
+            env_root.mkdir(parents=True, exist_ok=True)
+            if not python_bin.exists():
+                instance.env_status = "creating venv"
+                subprocess.run([uv, "venv", str(env_root)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
+            req_file.write_text(req_text, encoding="utf-8")
+            current_hash = hash_file.read_text(encoding="utf-8") if hash_file.exists() else ""
+            if current_hash != req_hash:
+                instance.env_status = "installing requirements"
+                if req_text.strip():
+                    subprocess.run([uv, "pip", "install", "--python", str(python_bin), "-r", str(req_file)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
+                hash_file.write_text(req_hash, encoding="utf-8")
+            instance.env_path = env_root
+            instance.env_site_packages = self._site_packages_for(env_root)
+            instance.env_status = "ready"
+            return True
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()[-1:]
+            instance.env_status = "setup failed: " + (detail[0] if detail else str(exc))
+            instance.log(instance.env_status)
+            return False
+        except Exception as exc:
+            instance.env_status = f"setup failed: {exc}"
+            instance.log(instance.env_status)
+            return False
+
+    def _site_packages_for(self, env_root: Path) -> Path | None:
+        if sys.platform.startswith("win"):
+            path = env_root / "Lib" / "site-packages"
+            return path if path.exists() else None
+        lib_dir = env_root / "lib"
+        if not lib_dir.exists():
+            return None
+        for item in lib_dir.iterdir():
+            candidate = item / "site-packages"
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _uv_command(self) -> str | None:
+        direct = shutil.which("uv")
+        if direct:
+            return direct
+        sibling = Path(sys.executable).parent / ("uv.exe" if sys.platform.startswith("win") else "uv")
+        return str(sibling) if sibling.exists() else None
 
     def _parse_node(self, node: dict[str, Any]) -> CustomLwrclNodeConfig:
         return CustomLwrclNodeConfig(
@@ -522,6 +747,11 @@ class GraphRuntime:
             inputs=[self._parse_port(port) for port in node.get("inputs", [])],
             outputs=[self._parse_port(port) for port in node.get("outputs", [])],
             loop_code=str(node.get("loopCode", "")),
+            timer_enabled=bool(node.get("timerEnabled", False)),
+            timer_period_sec=float(node.get("timerPeriodSec", 1.0) or 1.0),
+            timer_code=str(node.get("timerCode", "")),
+            import_code=str(node.get("importCode", "")),
+            requirements=str(node.get("requirements", "")),
             tool_type=str(node.get("toolType", "")),
             params=dict(node.get("params", {}) if isinstance(node.get("params", {}), dict) else {}),
         )
@@ -541,6 +771,15 @@ class GraphRuntime:
         input_topics: dict[tuple[str, str], set[str]] = {}
         output_topics: dict[tuple[str, str], set[str]] = {}
         for link in links:
+            src = by_id.get(str(link.get("fromNode")))
+            dst = by_id.get(str(link.get("toNode")))
+            src_port = next((port for port in (src.outputs if src else []) if port.id == str(link.get("fromPort"))), None)
+            dst_port = next((port for port in (dst.inputs if dst else []) if port.id == str(link.get("toPort"))), None)
+            if src and dst and src_port and dst_port:
+                if src.tool_type == "topic_input" and not src_port.data_type:
+                    src_port.data_type = dst_port.data_type
+                if dst.tool_type == "topic_output" and not dst_port.data_type:
+                    dst_port.data_type = src_port.data_type
             topic = self._link_topic(link, by_id)
             if not topic:
                 continue
@@ -596,4 +835,18 @@ class GraphRuntime:
             return False
         src_port = next((port for port in src.outputs if port.id == str(link.get("fromPort"))), None)
         dst_port = next((port for port in dst.inputs if port.id == str(link.get("toPort"))), None)
-        return bool(src_port and dst_port and src_port.data_type == dst_port.data_type)
+        if not src_port or not dst_port:
+            return False
+        src_interface = src.tool_type == "topic_input"
+        dst_interface = dst.tool_type == "topic_output"
+        if src.tool_type and src.tool_type != "topic_input" and not src_port.data_type:
+            return True
+        if dst.tool_type and dst.tool_type != "topic_output" and not dst_port.data_type:
+            return True
+        if src_interface and dst_interface:
+            return False
+        if src_interface:
+            return bool(dst_port.data_type)
+        if dst_interface:
+            return bool(src_port.data_type)
+        return src_port.data_type == dst_port.data_type

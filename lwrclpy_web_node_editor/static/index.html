@@ -12,15 +12,24 @@
       <h1>lwrclpy Web Node Editor</h1>
       <span id="runtime-status">lwrclpy checking...</span>
     </div>
-    <nav>
-      <button id="create-node">Create Node</button>
-      <button id="run-once">Run Once</button>
-      <button id="toggle-run">Auto Spin</button>
-      <button id="fit-view">Fit</button>
-      <button id="export-json">Export Graph</button>
-      <label class="file-button">Import Graph<input id="import-json" type="file" accept="application/json"></label>
-      <label class="file-button">Import Python Node<input id="import-python-node" type="file" accept=".py,text/x-python,text/plain"></label>
-      <button id="clear-graph">Clear</button>
+    <nav class="model-menu">
+      <section class="menu-group">
+        <span>Simulation</span>
+        <button id="run-model">Run</button>
+        <button id="stop-model">Stop</button>
+        <label class="menu-field">Duration <input id="run-duration" type="number" min="0.1" step="0.1" value="5"></label>
+        <button id="run-duration-model">Run For</button>
+      </section>
+      <section class="menu-group">
+        <span>Project</span>
+        <button id="save-project">Save</button>
+        <label class="file-button">Load<input id="load-project" type="file" accept="application/json"></label>
+      </section>
+      <section class="menu-group">
+        <span>Code Generation</span>
+        <button id="export-project-python">Export lwrclpy Code</button>
+        <button id="export-project-launch">Export ROS2 Launch</button>
+      </section>
     </nav>
   </header>
 
@@ -30,8 +39,8 @@
       <div class="side-actions">
         <button id="create-node-side">Create Node</button>
       </div>
-      <h3>Tool Nodes</h3>
-      <div id="tool-node-list" class="tool-node-list"></div>
+      <h3>Built-in Nodes</h3>
+      <div id="interface-node-list" class="interface-node-list"></div>
       <h3>Graph Nodes</h3>
       <div id="node-list"></div>
     </aside>
@@ -69,6 +78,26 @@
           <label class="field">
             <span>Output Count</span>
             <input id="config-output-count" type="number" min="0" max="16" value="1">
+          </label>
+        </div>
+        <div class="timer-config">
+          <label class="field checkbox-field">
+            <input id="config-timer-enabled" type="checkbox">
+            <span>Enable Timer Callback</span>
+          </label>
+          <label class="field">
+            <span>Timer Period Seconds</span>
+            <input id="config-timer-period" type="number" min="0.001" step="0.001" value="1.0">
+          </label>
+        </div>
+        <div class="environment-config">
+          <label class="field">
+            <span>Import Code</span>
+            <textarea id="config-import-code" spellcheck="false"></textarea>
+          </label>
+          <label class="field">
+            <span>requirements.txt</span>
+            <textarea id="config-requirements" spellcheck="false" placeholder="numpy&#10;opencv-python"></textarea>
           </label>
         </div>
         <div class="port-configs">

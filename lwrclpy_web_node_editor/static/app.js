@@ -8,9 +8,11 @@ const state = {
   editingCode: null,
   nextId: 1,
   autoTimer: null,
+  runStopTimer: null,
   view: { x: 0, y: 0, scale: 1 },
   dragLink: null,
   lastRunAt: 0,
+  nodeViews: {},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -25,7 +27,7 @@ log("received", input_id, msg)
 # outputs["out1"] = msg.data
 `;
 
-const DEFAULT_LOOP_CODE = `# Runs on every Auto Spin / Run Once tick.
+const DEFAULT_LOOP_CODE = `# Runs on every Run / Run For tick.
 # Available: inputs, outputs, state, now, latest(input_id), take(input_id), has_input(input_id), publish(...), log(...)
 
 # Example:
@@ -34,195 +36,96 @@ const DEFAULT_LOOP_CODE = `# Runs on every Auto Spin / Run Once tick.
 #     outputs["out1"] = msg.data
 `;
 
-const TOOL_NODE_TEMPLATES = [
+const DEFAULT_TIMER_CODE = `# Runs when the node timer period elapses.
+# Available: inputs, outputs, state, now, period, latest(input_id), take(input_id), has_input(input_id), publish(...), log(...)
+
+# Example:
+# state["count"] = state.get("count", 0) + 1
+# outputs["out1"] = state["count"]
+`;
+
+const DEFAULT_IMPORT_CODE = `# Node-level imports run after this node's venv is ready.
+# Example:
+# import cv2
+# import numpy as np
+`;
+
+const INTERFACE_NODE_TEMPLATES = [
+  {
+    label: 'Topic Input',
+    toolType: 'topic_input',
+    node: {
+      name: 'topic_input',
+      inputs: [],
+      outputs: [{ id: 'out1', name: 'topic', dataType: '' }],
+      params: {},
+      loopCode: '',
+    },
+  },
+  {
+    label: 'Topic Output',
+    toolType: 'topic_output',
+    node: {
+      name: 'topic_output',
+      inputs: [{ id: 'in1', name: 'topic', dataType: '', receiveMode: 'manual', callbackCode: '' }],
+      outputs: [],
+      params: {},
+      loopCode: '',
+    },
+  },
   {
     label: 'Image File Input',
-    toolType: 'image_input',
+    toolType: 'image_file_input',
     node: {
       name: 'image_file_input',
       inputs: [],
-      outputs: [{ id: 'image', name: 'image', dataType: 'tool/image' }],
-      params: { imageDataUrl: '', fileName: '' },
-      loopCode: `image = params.get("imageDataUrl", "")
-if image:
-    outputs["image"] = show_image(image, "Source Image")
-else:
-    log("Select an image file in the Inspector.")
-`,
+      outputs: [{ id: 'out1', name: 'image', dataType: 'sensor_msgs/msg/Image' }],
+      params: {},
+      loopCode: '',
     },
   },
   {
     label: 'Video File Input',
-    toolType: 'video_input',
+    toolType: 'video_file_input',
     node: {
       name: 'video_file_input',
       inputs: [],
-      outputs: [{ id: 'video', name: 'video', dataType: 'tool/video' }],
-      params: { videoDataUrl: '', fileName: '' },
-      loopCode: `video = params.get("videoDataUrl", "")
-if video:
-    outputs["video"] = show_video(video, "Source Video")
-else:
-    log("Select a video file in the Inspector.")
-`,
+      outputs: [{ id: 'out1', name: 'frame', dataType: 'sensor_msgs/msg/Image' }],
+      params: {},
+      loopCode: '',
     },
   },
   {
-    label: 'Image Display',
-    toolType: 'image_display',
+    label: 'Image Viewer',
+    toolType: 'image_view',
     node: {
-      name: 'image_display',
-      inputs: [{ id: 'image', name: 'image', dataType: 'tool/image', receiveMode: 'manual', callbackCode: '' }],
+      name: 'image_view',
+      inputs: [{ id: 'in1', name: 'image', dataType: 'sensor_msgs/msg/Image', receiveMode: 'manual', callbackCode: '' }],
       outputs: [],
       params: {},
-      loopCode: `image = latest("image")
-if image:
-    show_image(image, "Image Display")
-`,
+      loopCode: '',
     },
   },
   {
-    label: 'Grayscale',
-    toolType: 'image_grayscale',
+    label: 'Image File Save',
+    toolType: 'image_file_save',
     node: {
-      name: 'grayscale',
-      inputs: [{ id: 'image', name: 'image', dataType: 'tool/image', receiveMode: 'manual', callbackCode: '' }],
-      outputs: [{ id: 'image', name: 'image', dataType: 'tool/image' }],
-      params: {},
-      loopCode: `image = latest("image")
-if image:
-    result = image_grayscale(image)
-    outputs["image"] = show_image(result, "Grayscale")
-`,
-    },
-  },
-  {
-    label: 'Resize Image',
-    toolType: 'image_resize',
-    node: {
-      name: 'resize_image',
-      inputs: [{ id: 'image', name: 'image', dataType: 'tool/image', receiveMode: 'manual', callbackCode: '' }],
-      outputs: [{ id: 'image', name: 'image', dataType: 'tool/image' }],
-      params: { width: 640, height: 360 },
-      loopCode: `image = latest("image")
-if image:
-    result = image_resize(image, int(params.get("width", 640)), int(params.get("height", 360)))
-    outputs["image"] = show_image(result, "Resized Image")
-`,
-    },
-  },
-  {
-    label: 'Blur Image',
-    toolType: 'image_blur',
-    node: {
-      name: 'blur_image',
-      inputs: [{ id: 'image', name: 'image', dataType: 'tool/image', receiveMode: 'manual', callbackCode: '' }],
-      outputs: [{ id: 'image', name: 'image', dataType: 'tool/image' }],
-      params: { radius: 2 },
-      loopCode: `image = latest("image")
-if image:
-    result = image_blur(image, float(params.get("radius", 2)))
-    outputs["image"] = show_image(result, "Blurred Image")
-`,
-    },
-  },
-  {
-    label: 'Brightness',
-    toolType: 'image_brightness',
-    node: {
-      name: 'brightness',
-      inputs: [{ id: 'image', name: 'image', dataType: 'tool/image', receiveMode: 'manual', callbackCode: '' }],
-      outputs: [{ id: 'image', name: 'image', dataType: 'tool/image' }],
-      params: { factor: 1.2 },
-      loopCode: `image = latest("image")
-if image:
-    result = image_brightness(image, float(params.get("factor", 1.2)))
-    outputs["image"] = show_image(result, "Brightness")
-`,
-    },
-  },
-  {
-    label: 'Contrast',
-    toolType: 'image_contrast',
-    node: {
-      name: 'contrast',
-      inputs: [{ id: 'image', name: 'image', dataType: 'tool/image', receiveMode: 'manual', callbackCode: '' }],
-      outputs: [{ id: 'image', name: 'image', dataType: 'tool/image' }],
-      params: { factor: 1.2 },
-      loopCode: `image = latest("image")
-if image:
-    result = image_contrast(image, float(params.get("factor", 1.2)))
-    outputs["image"] = show_image(result, "Contrast")
-`,
-    },
-  },
-  {
-    label: 'Video Display',
-    toolType: 'video_display',
-    node: {
-      name: 'video_display',
-      inputs: [{ id: 'video', name: 'video', dataType: 'tool/video', receiveMode: 'manual', callbackCode: '' }],
+      name: 'image_file_save',
+      inputs: [{ id: 'in1', name: 'image', dataType: 'sensor_msgs/msg/Image', receiveMode: 'manual', callbackCode: '' }],
       outputs: [],
       params: {},
-      loopCode: `video = latest("video")
-if video:
-    show_video(video, "Video Display")
-`,
+      loopCode: '',
     },
   },
   {
-    label: 'Data Source',
-    toolType: 'data_source',
+    label: 'Graph Viewer',
+    toolType: 'graph_view',
     node: {
-      name: 'data_source',
-      inputs: [],
-      outputs: [{ id: 'data', name: 'data', dataType: 'tool/data' }],
-      params: { dataText: '1, 2, 3, 5, 8, 13' },
-      loopCode: `outputs["data"] = params.get("dataText", "")
-show_text(outputs["data"], "Data Source")
-`,
-    },
-  },
-  {
-    label: 'Counter Data',
-    toolType: 'counter_data',
-    node: {
-      name: 'counter_data',
-      inputs: [],
-      outputs: [{ id: 'data', name: 'data', dataType: 'tool/data' }],
-      params: {},
-      loopCode: `state["count"] = state.get("count", 0) + 1
-outputs["data"] = state["count"]
-show_text(outputs["data"], "Counter")
-`,
-    },
-  },
-  {
-    label: 'Data Plot',
-    toolType: 'data_plot',
-    node: {
-      name: 'data_plot',
-      inputs: [{ id: 'data', name: 'data', dataType: 'tool/data', receiveMode: 'manual', callbackCode: '' }],
+      name: 'graph_view',
+      inputs: [{ id: 'in1', name: 'value', dataType: '', receiveMode: 'manual', callbackCode: '' }],
       outputs: [],
-      params: {},
-      loopCode: `data = latest("data")
-if data is not None:
-    show_plot(data, "Data Plot")
-`,
-    },
-  },
-  {
-    label: 'Data Display',
-    toolType: 'data_display',
-    node: {
-      name: 'data_display',
-      inputs: [{ id: 'data', name: 'data', dataType: 'tool/data', receiveMode: 'manual', callbackCode: '' }],
-      outputs: [],
-      params: {},
-      loopCode: `data = latest("data")
-if data is not None:
-    show_text(data, "Data Display")
-`,
+      params: { fieldPath: 'data', sampleLimit: 120 },
+      loopCode: '',
     },
   },
 ];
@@ -232,23 +135,26 @@ async function init() {
   state.messageTypes = data.types || {};
   bindToolbar();
   bindCanvas();
-  renderToolNodeList();
+  renderInterfaceNodeList();
   renderAll();
   runGraph();
 }
 
 function bindToolbar() {
-  $('create-node').onclick = () => openNodeDialog();
   $('create-node-side').onclick = () => openNodeDialog();
-  $('run-once').onclick = runGraph;
-  $('toggle-run').onclick = toggleAuto;
-  $('fit-view').onclick = fitView;
-  $('clear-graph').onclick = clearGraph;
-  $('export-json').onclick = exportJson;
-  $('import-json').onchange = importJson;
-  $('import-python-node').onchange = importPythonNode;
+  $('run-model').onclick = startRun;
+  $('stop-model').onclick = stopRun;
+  $('run-duration-model').onclick = runForDuration;
+  $('save-project').onclick = saveProject;
+  $('load-project').onchange = loadProject;
+  $('export-project-python').onclick = exportProjectPython;
+  $('export-project-launch').onclick = exportProjectLaunch;
   $('config-input-count').oninput = renderConfigPorts;
   $('config-output-count').oninput = renderConfigPorts;
+  $('config-timer-enabled').oninput = updateTimerDraft;
+  $('config-timer-period').oninput = updateTimerDraft;
+  $('config-import-code').oninput = updateEnvironmentDraft;
+  $('config-requirements').oninput = updateEnvironmentDraft;
   $('node-form').addEventListener('submit', saveNodeDialog);
   $('code-form').addEventListener('submit', saveCodeDialog);
   document.addEventListener('selectstart', (ev) => {
@@ -291,10 +197,15 @@ function createDefaultNode(pos = centerWorld()) {
     inputs: [{ id: 'in1', name: 'in1', dataType: firstDataType(), receiveMode: 'callback', callbackCode: DEFAULT_CALLBACK_CODE }],
     outputs: [{ id: 'out1', name: 'out1', dataType: firstDataType() }],
     loopCode: DEFAULT_LOOP_CODE,
+    timerEnabled: false,
+    timerPeriodSec: 1.0,
+    timerCode: DEFAULT_TIMER_CODE,
+    importCode: DEFAULT_IMPORT_CODE,
+    requirements: '',
   };
 }
 
-function createToolNode(template, pos = centerWorld()) {
+function createInterfaceNode(template, pos = centerWorld()) {
   const node = structuredClone(template.node);
   node.id = `n${state.nextId++}`;
   node.toolType = template.toolType;
@@ -304,15 +215,15 @@ function createToolNode(template, pos = centerWorld()) {
   return node;
 }
 
-function renderToolNodeList() {
-  const list = $('tool-node-list');
+function renderInterfaceNodeList() {
+  const list = $('interface-node-list');
   list.innerHTML = '';
-  TOOL_NODE_TEMPLATES.forEach((template) => {
+  INTERFACE_NODE_TEMPLATES.forEach((template) => {
     const button = document.createElement('button');
-    button.className = 'tool-node-item';
+    button.className = 'interface-node-item';
     button.textContent = template.label;
     button.onclick = () => {
-      const node = createToolNode(template);
+      const node = createInterfaceNode(template);
       state.nodes.push(node);
       state.selectedNode = node.id;
       state.selectedLink = null;
@@ -331,6 +242,10 @@ function openNodeDialog(node = null) {
   $('config-node-name').value = draft.name;
   $('config-input-count').value = draft.inputs.length;
   $('config-output-count').value = draft.outputs.length;
+  $('config-timer-enabled').checked = Boolean(draft.timerEnabled);
+  $('config-timer-period').value = Number(draft.timerPeriodSec || 1.0);
+  $('config-import-code').value = draft.importCode || DEFAULT_IMPORT_CODE;
+  $('config-requirements').value = draft.requirements || '';
   renderConfigPorts();
   $('node-dialog').showModal();
 }
@@ -341,9 +256,31 @@ function renderConfigPorts() {
   draft.name = $('config-node-name').value || draft.name;
   draft.inputs = resizePorts(draft.inputs || [], Number($('config-input-count').value || 0), 'in');
   draft.outputs = resizePorts(draft.outputs || [], Number($('config-output-count').value || 0), 'out');
+  draft.timerEnabled = $('config-timer-enabled').checked;
+  draft.timerPeriodSec = Math.max(0.001, Number($('config-timer-period').value || 1.0));
+  draft.timerCode = draft.timerCode || DEFAULT_TIMER_CODE;
+  draft.importCode = $('config-import-code').value || '';
+  draft.requirements = $('config-requirements').value || '';
   dialog.dataset.draft = JSON.stringify(draft);
   renderPortConfigList('input-configs', draft.inputs, 'Input');
   renderPortConfigList('output-configs', draft.outputs, 'Output');
+}
+
+function updateEnvironmentDraft() {
+  const draft = JSON.parse($('node-dialog').dataset.draft || JSON.stringify(createDefaultNode()));
+  draft.importCode = $('config-import-code').value || '';
+  draft.requirements = $('config-requirements').value || '';
+  $('node-dialog').dataset.draft = JSON.stringify(draft);
+}
+
+function updateTimerDraft() {
+  const draft = JSON.parse($('node-dialog').dataset.draft || JSON.stringify(createDefaultNode()));
+  draft.timerEnabled = $('config-timer-enabled').checked;
+  draft.timerPeriodSec = Math.max(0.001, Number($('config-timer-period').value || 1.0));
+  draft.timerCode = draft.timerCode || DEFAULT_TIMER_CODE;
+  draft.importCode = $('config-import-code').value || '';
+  draft.requirements = $('config-requirements').value || '';
+  $('node-dialog').dataset.draft = JSON.stringify(draft);
 }
 
 function resizePorts(ports, count, prefix) {
@@ -449,6 +386,9 @@ function saveNodeDialog(ev) {
   ev.preventDefault();
   const draft = JSON.parse($('node-dialog').dataset.draft);
   draft.name = $('config-node-name').value || 'custom_ros_node';
+  draft.timerEnabled = $('config-timer-enabled').checked;
+  draft.timerPeriodSec = Math.max(0.001, Number($('config-timer-period').value || 1.0));
+  draft.timerCode = draft.timerCode || DEFAULT_TIMER_CODE;
   if (state.editingNode) {
     const index = state.nodes.findIndex((node) => node.id === state.editingNode);
     const previous = state.nodes[index];
@@ -469,11 +409,24 @@ function saveNodeDialog(ev) {
 function openCodeDialog(node, kind) {
   state.editingCode = { nodeId: node.id, kind };
   const callbackPort = kind.startsWith('callback:') ? node.inputs.find((port) => port.id === kind.slice('callback:'.length)) : null;
-  $('code-dialog-title').textContent = callbackPort ? `${node.name}.${callbackPort.name}: Callback Code` : `${node.name}: Main Loop Code`;
-  $('code-editor').value = callbackPort ? (callbackPort.callbackCode || '') : (node.loopCode || '');
+  const isTimer = kind === 'timerCode';
+  const isImport = kind === 'importCode';
+  const isRequirements = kind === 'requirements';
+  $('code-dialog-title').textContent = callbackPort
+    ? `${node.name}.${callbackPort.name}: Callback Code`
+    : (isTimer ? `${node.name}: Timer Callback Code` : (isImport ? `${node.name}: Import Code` : (isRequirements ? `${node.name}: requirements.txt` : `${node.name}: Main Loop Code`)));
+  $('code-editor').value = callbackPort
+    ? (callbackPort.callbackCode || '')
+    : (isTimer ? (node.timerCode || DEFAULT_TIMER_CODE) : (isImport ? (node.importCode || DEFAULT_IMPORT_CODE) : (isRequirements ? (node.requirements || '') : (node.loopCode || ''))));
   $('code-hint').textContent = callbackPort
     ? 'Callback scope: input_id, msg, request, response, state, outputs, publish(output_id, value), log(...).'
-    : 'Main loop scope: inputs, outputs, latest(input_id), take(input_id), has_input(input_id), state, now, publish(...), log(...).';
+    : (isTimer
+      ? 'Timer callback scope: inputs, outputs, latest(input_id), take(input_id), has_input(input_id), state, now, period, publish(...), log(...).'
+      : (isImport
+        ? 'Import code runs once after this node venv is ready. Put imports such as import cv2 and import numpy as np here.'
+        : (isRequirements
+          ? 'One requirement per line. uv creates this node venv and installs these packages before execution.'
+          : 'Main loop scope: inputs, outputs, latest(input_id), take(input_id), has_input(input_id), state, now, publish(...), log(...).')));
   $('code-dialog').showModal();
 }
 
@@ -484,6 +437,12 @@ function saveCodeDialog(ev) {
   if (node && kind.startsWith('callback:')) {
     const port = node.inputs.find((item) => item.id === kind.slice('callback:'.length));
     if (port) port.callbackCode = $('code-editor').value;
+  } else if (node && kind === 'timerCode') {
+    node.timerCode = $('code-editor').value;
+  } else if (node && kind === 'importCode') {
+    node.importCode = $('code-editor').value;
+  } else if (node && kind === 'requirements') {
+    node.requirements = $('code-editor').value;
   } else if (node) {
     node.loopCode = $('code-editor').value;
   }
@@ -528,52 +487,124 @@ function renderNodes() {
     el.style.top = `${node.y}px`;
     el.innerHTML = `
       <div class="node-title">
-        <div><strong>${escapeHtml(node.name)}</strong><small>${node.toolType ? 'Tool Node' : 'lwrclpy Custom Node'}</small></div>
+        <div><strong>${escapeHtml(node.name)}</strong><small>${escapeHtml(nodeKindLabel(node))}</small></div>
         <button class="delete" title="Delete">x</button>
       </div>
       <div class="ports">
         <div class="port-list inputs"></div>
         <div class="port-list outputs"></div>
       </div>
-      <div class="node-actions">
-        <button data-action="config">Configure</button>
-        <button data-action="loop">Main Loop Code</button>
-        <button data-action="export-python">Export Python</button>
-        ${node.inputs.map((input) => `<button data-callback-input="${escapeAttr(input.id)}">Callback: ${escapeHtml(input.name)}</button>`).join('')}
-      </div>
-      <pre class="meta"></pre>`;
+      ${toolActionHtml(node)}
+      ${viewNodeHtml(node)}
+      ${node.toolType ? '' : `<div class="node-actions">
+          <button data-action="config">Configure</button>
+          <button data-action="imports">Import Code</button>
+          <button data-action="requirements">Requirements</button>
+          <button data-action="loop">Main Loop Code</button>
+          <button data-action="timer">Timer Callback Code</button>
+          ${node.inputs.map((input) => `<button data-callback-input="${escapeAttr(input.id)}">Callback: ${escapeHtml(input.name)}</button>`).join('')}
+        </div>`}`;
     root.appendChild(el);
-    if (node.toolType) {
-      el.querySelector('[data-action="config"]').disabled = true;
-      el.querySelector('[data-action="config"]').title = 'Tool node ports are fixed.';
-    }
     el.onclick = (ev) => selectNode(ev, node.id);
     el.querySelector('.delete').onclick = (ev) => {
       ev.stopPropagation();
       deleteNode(node.id);
     };
-    el.querySelector('[data-action="config"]').onclick = (ev) => {
-      ev.stopPropagation();
-      openNodeDialog(node);
-    };
-    el.querySelector('[data-action="loop"]').onclick = (ev) => {
-      ev.stopPropagation();
-      openCodeDialog(node, 'loopCode');
-    };
-    el.querySelector('[data-action="export-python"]').onclick = (ev) => {
-      ev.stopPropagation();
-      exportPythonNode(node);
-    };
+    const configButton = el.querySelector('[data-action="config"]');
+    if (configButton) {
+      configButton.onclick = (ev) => {
+        ev.stopPropagation();
+        openNodeDialog(node);
+      };
+    }
+    const loopButton = el.querySelector('[data-action="loop"]');
+    if (loopButton) {
+      loopButton.onclick = (ev) => {
+        ev.stopPropagation();
+        openCodeDialog(node, 'loopCode');
+      };
+    }
+    const importsButton = el.querySelector('[data-action="imports"]');
+    if (importsButton) {
+      importsButton.onclick = (ev) => {
+        ev.stopPropagation();
+        openCodeDialog(node, 'importCode');
+      };
+    }
+    const requirementsButton = el.querySelector('[data-action="requirements"]');
+    if (requirementsButton) {
+      requirementsButton.onclick = (ev) => {
+        ev.stopPropagation();
+        openCodeDialog(node, 'requirements');
+      };
+    }
+    const timerButton = el.querySelector('[data-action="timer"]');
+    if (timerButton) {
+      timerButton.onclick = (ev) => {
+        ev.stopPropagation();
+        openCodeDialog(node, 'timerCode');
+      };
+    }
     el.querySelectorAll('[data-callback-input]').forEach((button) => {
       button.onclick = (ev) => {
         ev.stopPropagation();
         openCodeDialog(node, `callback:${button.dataset.callbackInput}`);
       };
     });
+    bindToolActions(el, node);
     makeNodeDraggable(el, node);
     renderPorts(el.querySelector('.inputs'), node, node.inputs, 'input');
     renderPorts(el.querySelector('.outputs'), node, node.outputs, 'output');
   });
+}
+
+function nodeKindLabel(node) {
+  if (!node.toolType) return 'lwrclpy Custom Node';
+  if (['topic_input', 'topic_output'].includes(node.toolType)) return 'Interface Node';
+  return 'Tool Node';
+}
+
+function toolActionHtml(node) {
+  if (node.toolType === 'image_file_input') {
+    return `<div class="node-actions tool-actions">
+      <label class="file-button">Load Image<input data-tool-file="image" type="file" accept="image/*"></label>
+    </div>`;
+  }
+  if (node.toolType === 'video_file_input') {
+    return `<div class="node-actions tool-actions">
+      <label class="file-button">Load Video<input data-tool-file="video" type="file" accept="video/*"></label>
+    </div>`;
+  }
+  if (node.toolType === 'graph_view') {
+    return `<div class="node-actions tool-actions">
+      <button data-action="plot-field">Plot Field: ${escapeHtml(node.params?.fieldPath || 'data')}</button>
+    </div>`;
+  }
+  return '';
+}
+
+function viewNodeHtml(node) {
+  if (!['image_file_input', 'video_file_input', 'image_view', 'image_file_save', 'graph_view'].includes(node.toolType)) return '';
+  return `<div class="node-view" data-node-view="${escapeAttr(node.id)}">${renderViewContent(state.nodeViews[node.id])}</div>`;
+}
+
+function bindToolActions(el, node) {
+  const imageInput = el.querySelector('[data-tool-file="image"]');
+  if (imageInput) imageInput.onchange = (ev) => loadImageFile(node, ev.target.files[0]);
+  const videoInput = el.querySelector('[data-tool-file="video"]');
+  if (videoInput) videoInput.onchange = (ev) => loadVideoFile(node, ev.target.files[0]);
+  const plotField = el.querySelector('[data-action="plot-field"]');
+  if (plotField) {
+    plotField.onclick = (ev) => {
+      ev.stopPropagation();
+      const value = prompt('Field path to plot', node.params?.fieldPath || 'data');
+      if (value === null) return;
+      node.params = node.params || {};
+      node.params.fieldPath = value.trim() || 'data';
+      renderAll();
+      scheduleRun();
+    };
+  }
 }
 
 function renderPorts(container, node, ports, kind) {
@@ -586,10 +617,10 @@ function renderPorts(container, node, ports, kind) {
     row.dataset.type = port.dataType;
     const dot = document.createElement('span');
     dot.className = 'dot';
-    dot.title = `${port.name}: ${port.dataType}`;
+    dot.title = port.dataType ? `${port.name}: ${port.dataType}` : `${port.name}: any connected topic type`;
     const label = document.createElement('span');
     label.className = 'port-label';
-    label.innerHTML = `<b>${escapeHtml(port.name)}</b><small>${escapeHtml(port.dataType)}</small>`;
+    label.innerHTML = `<b>${escapeHtml(port.name)}</b>${port.dataType ? `<small>${escapeHtml(port.dataType)}</small>` : '<small>connected topic type</small>'}`;
     if (kind === 'input') {
       row.append(dot, label);
       dot.addEventListener('pointerup', (ev) => finishLinkDrag(ev, row));
@@ -624,27 +655,34 @@ function renderInspector() {
   }
   box.innerHTML = `
     <div class="inspector-title">${escapeHtml(node.name)}</div>
-    <div class="hint">${node.toolType ? 'Tool node' : `${node.inputs.length} subscriptions / ${node.outputs.length} publishers`}</div>
-    <div class="inspector-actions">
-      ${node.toolType ? '' : '<button id="inspect-config">Configure Ports</button>'}
-      <button id="inspect-callback">Subscribe Callback Code</button>
-      <button id="inspect-loop">Main Loop Code</button>
-      <button id="inspect-export-python">Export Python Node</button>
-    </div>
-    ${toolParamControls(node)}
+    <div class="hint">${node.toolType ? 'Terminal topic node. Type is inferred from the connected node.' : `${node.inputs.length} subscriptions / ${node.outputs.length} publishers${node.timerEnabled ? ` / timer ${node.timerPeriodSec || 1}s` : ''}`}</div>
+    ${node.toolType ? '' : `<div class="inspector-actions">
+        <button id="inspect-config">Configure Ports</button>
+        <button id="inspect-imports">Import Code</button>
+        <button id="inspect-requirements">Requirements</button>
+        <button id="inspect-callback">Subscribe Callback Code</button>
+        <button id="inspect-timer">Timer Callback Code</button>
+        <button id="inspect-loop">Main Loop Code</button>
+      </div>`}
     <h3>Inputs</h3>
     ${inputSummary(node)}
     <h3>Outputs</h3>
     ${portSummary(node.outputs)}`;
   const inspectConfig = $('inspect-config');
   if (inspectConfig) inspectConfig.onclick = () => openNodeDialog(node);
-  $('inspect-callback').onclick = () => {
+  const inspectCallback = $('inspect-callback');
+  if (inspectCallback) inspectCallback.onclick = () => {
     const firstInput = node.inputs[0];
     if (firstInput) openCodeDialog(node, `callback:${firstInput.id}`);
   };
-  $('inspect-loop').onclick = () => openCodeDialog(node, 'loopCode');
-  $('inspect-export-python').onclick = () => exportPythonNode(node);
-  bindToolParamControls(node);
+  const inspectLoop = $('inspect-loop');
+  if (inspectLoop) inspectLoop.onclick = () => openCodeDialog(node, 'loopCode');
+  const inspectImports = $('inspect-imports');
+  if (inspectImports) inspectImports.onclick = () => openCodeDialog(node, 'importCode');
+  const inspectRequirements = $('inspect-requirements');
+  if (inspectRequirements) inspectRequirements.onclick = () => openCodeDialog(node, 'requirements');
+  const inspectTimer = $('inspect-timer');
+  if (inspectTimer) inspectTimer.onclick = () => openCodeDialog(node, 'timerCode');
   box.querySelectorAll('[data-callback-port]').forEach((button) => {
     button.onclick = () => openCodeDialog(node, `callback:${button.dataset.callbackPort}`);
   });
@@ -652,90 +690,12 @@ function renderInspector() {
 
 function portSummary(ports) {
   if (!ports.length) return '<div class="hint">None</div>';
-  return ports.map((p) => `<div class="port-summary"><b>${escapeHtml(p.name)}</b><span>${escapeHtml(p.dataType)}</span></div>`).join('');
+  return ports.map((p) => `<div class="port-summary"><b>${escapeHtml(p.name)}</b><span>${escapeHtml(p.dataType || 'connected topic type')}</span></div>`).join('');
 }
 
 function inputSummary(node) {
   if (!node.inputs.length) return '<div class="hint">None</div>';
-  return node.inputs.map((p) => `<div class="port-summary"><b>${escapeHtml(p.name)}</b><span>${escapeHtml(p.dataType)}</span><small>${escapeHtml(p.receiveMode || 'callback')}</small><button data-callback-port="${escapeAttr(p.id)}">Edit Callback</button></div>`).join('');
-}
-
-function toolParamControls(node) {
-  if (!node.toolType) return '';
-  if (node.toolType === 'image_input') {
-    return `<h3>Tool Settings</h3>
-      <label class="field"><span>Image File</span><input id="tool-image-file" type="file" accept="image/*"></label>
-      <div class="hint">${escapeHtml(node.params?.fileName || 'No image selected.')}</div>`;
-  }
-  if (node.toolType === 'video_input') {
-    return `<h3>Tool Settings</h3>
-      <label class="field"><span>Video File</span><input id="tool-video-file" type="file" accept="video/*"></label>
-      <div class="hint">${escapeHtml(node.params?.fileName || 'No video selected.')}</div>`;
-  }
-  if (node.toolType === 'data_source') {
-    return `<h3>Tool Settings</h3>
-      <label class="field"><span>Data Text</span><textarea id="tool-data-text" spellcheck="false">${escapeHtml(node.params?.dataText || '')}</textarea></label>`;
-  }
-  if (node.toolType === 'image_resize') {
-    return `<h3>Tool Settings</h3>
-      <label class="field"><span>Width</span><input id="tool-width" type="number" min="1" max="8192" value="${escapeAttr(node.params?.width || 640)}"></label>
-      <label class="field"><span>Height</span><input id="tool-height" type="number" min="1" max="8192" value="${escapeAttr(node.params?.height || 360)}"></label>`;
-  }
-  if (node.toolType === 'image_blur') {
-    return `<h3>Tool Settings</h3>
-      <label class="field"><span>Radius</span><input id="tool-radius" type="number" min="0" max="64" step="0.1" value="${escapeAttr(node.params?.radius || 2)}"></label>`;
-  }
-  if (node.toolType === 'image_brightness' || node.toolType === 'image_contrast') {
-    return `<h3>Tool Settings</h3>
-      <label class="field"><span>Factor</span><input id="tool-factor" type="number" min="0" max="4" step="0.05" value="${escapeAttr(node.params?.factor || 1.2)}"></label>`;
-  }
-  return '';
-}
-
-function bindToolParamControls(node) {
-  const imageFile = $('tool-image-file');
-  if (imageFile) {
-    imageFile.onchange = () => readToolFile(node, imageFile.files[0], 'imageDataUrl');
-  }
-  const videoFile = $('tool-video-file');
-  if (videoFile) {
-    videoFile.onchange = () => readToolFile(node, videoFile.files[0], 'videoDataUrl');
-  }
-  const dataText = $('tool-data-text');
-  if (dataText) {
-    dataText.oninput = () => {
-      node.params = node.params || {};
-      node.params.dataText = dataText.value;
-      scheduleRun();
-    };
-  }
-  bindNumberParam(node, 'tool-width', 'width');
-  bindNumberParam(node, 'tool-height', 'height');
-  bindNumberParam(node, 'tool-radius', 'radius');
-  bindNumberParam(node, 'tool-factor', 'factor');
-}
-
-function bindNumberParam(node, elementId, paramName) {
-  const input = $(elementId);
-  if (!input) return;
-  input.oninput = () => {
-    node.params = node.params || {};
-    node.params[paramName] = Number(input.value);
-    scheduleRun();
-  };
-}
-
-function readToolFile(node, file, paramName) {
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    node.params = node.params || {};
-    node.params[paramName] = String(reader.result || '');
-    node.params.fileName = file.name;
-    renderAll();
-    scheduleRun();
-  };
-  reader.readAsDataURL(file);
+  return node.inputs.map((p) => `<div class="port-summary"><b>${escapeHtml(p.name)}</b><span>${escapeHtml(p.dataType || 'connected topic type')}</span>${node.toolType ? '' : `<small>${escapeHtml(p.receiveMode || 'callback')}</small><button data-callback-port="${escapeAttr(p.id)}">Edit Callback</button>`}</div>`).join('');
 }
 
 function startPan(ev) {
@@ -811,7 +771,7 @@ function startLinkDrag(ev, row) {
 function finishLinkDrag(ev, inputRow) {
   ev.stopPropagation();
   if (!state.dragLink) return;
-  if (inputRow.dataset.type !== state.dragLink.type || inputRow.dataset.node === state.dragLink.fromNode) {
+  if (!canConnect(state.dragLink.fromNode, state.dragLink.fromPort, inputRow.dataset.node, inputRow.dataset.port)) {
     flashPort(inputRow, 'invalid');
     return;
   }
@@ -844,7 +804,7 @@ function clearLinkDrag() {
 function updateDropTargets() {
   if (!state.dragLink) return;
   document.querySelectorAll('.port.input').forEach((row) => {
-    const ok = row.dataset.type === state.dragLink.type && row.dataset.node !== state.dragLink.fromNode;
+    const ok = canConnect(state.dragLink.fromNode, state.dragLink.fromPort, row.dataset.node, row.dataset.port);
     row.classList.toggle('drop-ok', ok);
     row.classList.toggle('drop-bad', !ok);
   });
@@ -972,7 +932,7 @@ async function runGraph() {
       body: JSON.stringify(payload),
     }).then((res) => res.json());
     updateStatus(data);
-    updateNodeMeta(data.nodes || {});
+    updateNodeViews(data.nodes || {});
   } catch (err) {
     $('runtime-status').textContent = `API error: ${err.message}`;
   }
@@ -980,65 +940,126 @@ async function runGraph() {
 
 function updateStatus(data) {
   const runtime = data.lwrclpy || {};
-  $('runtime-status').textContent = runtime.available ? 'lwrclpy available' : `lwrclpy unavailable${runtime.error ? ': ' + runtime.error : ''}`;
+  const setup = data.setup?.complete === false ? ` / setup blocked${runtime.error ? ': ' + runtime.error : ''}` : '';
+  $('runtime-status').textContent = (runtime.available ? 'lwrclpy available' : `lwrclpy unavailable${runtime.error ? ': ' + runtime.error : ''}`) + setup;
   $('node-count').textContent = `${state.nodes.length} nodes / ${state.links.length} links`;
 }
 
-function updateNodeMeta(nodes) {
-  state.nodes.forEach((node) => {
-    const el = document.querySelector(`.node[data-id="${node.id}"]`);
-    const meta = nodes[node.id]?.meta;
-    if (!el || !meta) return;
-    const displays = nodes[node.id]?.images || {};
-    el.querySelector('.meta').innerHTML = `${renderDisplays(displays)}<code>${escapeHtml(JSON.stringify({
-      inputs: meta.inputs,
-      outputs: meta.outputs,
-      logs: meta.logs,
-    }, null, 2).slice(0, 900))}</code>`;
+function updateNodeViews(nodes) {
+  Object.entries(nodes).forEach(([nodeId, payload]) => {
+    if (payload?.view) state.nodeViews[nodeId] = payload.view;
+  });
+  document.querySelectorAll('[data-node-view]').forEach((el) => {
+    el.innerHTML = renderViewContent(state.nodeViews[el.dataset.nodeView]);
   });
 }
 
-function renderDisplays(displays) {
-  return Object.values(displays || {}).map((display) => {
-    if (display.kind === 'image' && typeof display.value === 'string') {
-      return `<figure class="node-display"><figcaption>${escapeHtml(display.title || 'Image')}</figcaption><img src="${escapeAttr(display.value)}" alt=""></figure>`;
-    }
-    if (display.kind === 'video' && typeof display.value === 'string') {
-      return `<figure class="node-display"><figcaption>${escapeHtml(display.title || 'Video')}</figcaption><video src="${escapeAttr(display.value)}" controls muted loop></video></figure>`;
-    }
-    if (display.kind === 'plot') {
-      return `<figure class="node-display"><figcaption>${escapeHtml(display.title || 'Plot')}</figcaption>${renderPlotSvg(display.series)}</figure>`;
-    }
-    if (display.kind === 'text') {
-      return `<div class="node-display text-display"><b>${escapeHtml(display.title || 'Data')}</b><span>${escapeHtml(display.value || '')}</span></div>`;
-    }
-    return '';
-  }).join('');
+function renderViewContent(view) {
+  if (!view) return '<div class="view-empty">No data</div>';
+  if (view.kind === 'image' && view.dataUrl) {
+    return `<figure class="image-view"><img src="${escapeAttr(view.dataUrl)}" alt=""><figcaption>${escapeHtml(view.status || '')}</figcaption></figure>`;
+  }
+  if (view.kind === 'plot') {
+    return renderPlot(view.series || [], view.status || '');
+  }
+  return `<div class="view-empty">${escapeHtml(view.status || 'No data')}</div>`;
 }
 
-function renderPlotSvg(series) {
-  const values = parseSeries(series).slice(-80);
-  if (!values.length) return '<div class="hint">No numeric data.</div>';
+function renderPlot(series, label) {
   const width = 280;
   const height = 120;
+  const values = series.map(Number).filter((value) => Number.isFinite(value));
+  if (values.length < 2) {
+    return `<div class="plot-view"><svg viewBox="0 0 ${width} ${height}"></svg><span>${escapeHtml(label || 'Waiting for values')}</span></div>`;
+  }
   const min = Math.min(...values);
   const max = Math.max(...values);
   const span = max - min || 1;
   const points = values.map((value, index) => {
-    const x = values.length === 1 ? width / 2 : (index / (values.length - 1)) * width;
-    const y = height - ((value - min) / span) * height;
+    const x = values.length === 1 ? 0 : (index / (values.length - 1)) * width;
+    const y = height - ((value - min) / span) * (height - 12) - 6;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
-  return `<svg class="plot-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
-    <polyline points="${points}" />
-  </svg>`;
+  return `<div class="plot-view"><svg viewBox="0 0 ${width} ${height}"><polyline points="${points}"></polyline></svg><span>${escapeHtml(label)} ${min.toFixed(3)} .. ${max.toFixed(3)}</span></div>`;
 }
 
-function parseSeries(series) {
-  if (Array.isArray(series)) return series.map(Number).filter(Number.isFinite);
-  if (typeof series === 'number') return [series];
-  const text = String(series ?? '');
-  return text.split(/[\s,;]+/).map(Number).filter(Number.isFinite);
+function loadImageFile(node, file) {
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => {
+    const frame = imageElementToMessage(img);
+    node.params = {
+      ...(node.params || {}),
+      fileName: file.name,
+      dataUrl: frame.dataUrl,
+      imageMessage: frame.message,
+    };
+    URL.revokeObjectURL(img.src);
+    renderAll();
+    scheduleRun();
+  };
+  img.src = URL.createObjectURL(file);
+}
+
+function loadVideoFile(node, file) {
+  if (!file) return;
+  const video = document.createElement('video');
+  video.muted = true;
+  video.loop = true;
+  video.playsInline = true;
+  video.onloadeddata = async () => {
+    await video.play().catch(() => {});
+    captureVideoFrame(node, video, file.name);
+    if (node.params?.videoTimer) clearInterval(node.params.videoTimer);
+    node.params.videoTimer = setInterval(() => captureVideoFrame(node, video, file.name), 250);
+  };
+  video.src = URL.createObjectURL(file);
+}
+
+function captureVideoFrame(node, video, fileName) {
+  if (!video.videoWidth || !video.videoHeight) return;
+  const frame = imageElementToMessage(video);
+  node.params = {
+    ...(node.params || {}),
+    fileName,
+    dataUrl: frame.dataUrl,
+    frameMessage: frame.message,
+  };
+  renderAll();
+  scheduleRun();
+}
+
+function imageElementToMessage(source) {
+  const maxSide = 640;
+  const naturalWidth = source.videoWidth || source.naturalWidth || source.width;
+  const naturalHeight = source.videoHeight || source.naturalHeight || source.height;
+  const scale = Math.min(1, maxSide / Math.max(naturalWidth, naturalHeight));
+  const width = Math.max(1, Math.round(naturalWidth * scale));
+  const height = Math.max(1, Math.round(naturalHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0, width, height);
+  const image = ctx.getImageData(0, 0, width, height);
+  const rgb = new Array(width * height * 3);
+  for (let src = 0, dst = 0; src < image.data.length; src += 4) {
+    rgb[dst++] = image.data[src];
+    rgb[dst++] = image.data[src + 1];
+    rgb[dst++] = image.data[src + 2];
+  }
+  return {
+    dataUrl: canvas.toDataURL('image/png'),
+    message: {
+      width,
+      height,
+      encoding: 'rgb8',
+      is_bigendian: 0,
+      step: width * 3,
+      data: rgb,
+      dataUrl: canvas.toDataURL('image/png'),
+    },
+  };
 }
 
 function scheduleRun() {
@@ -1051,17 +1072,30 @@ function scheduleRun() {
   state.runTimer = setTimeout(runGraph, 120);
 }
 
-function toggleAuto() {
+function startRun() {
+  if (state.autoTimer) return;
+  state.autoTimer = setInterval(runGraph, 100);
+  $('run-model').classList.add('active');
+  runGraph();
+}
+
+function stopRun() {
   if (state.autoTimer) {
     clearInterval(state.autoTimer);
     state.autoTimer = null;
-    $('toggle-run').textContent = 'Auto Spin';
-    $('toggle-run').classList.remove('active');
-    return;
   }
-  state.autoTimer = setInterval(runGraph, 100);
-  $('toggle-run').textContent = 'Stop';
-  $('toggle-run').classList.add('active');
+  if (state.runStopTimer) {
+    clearTimeout(state.runStopTimer);
+    state.runStopTimer = null;
+  }
+  $('run-model').classList.remove('active');
+}
+
+function runForDuration() {
+  stopRun();
+  startRun();
+  const seconds = Math.max(0.1, Number($('run-duration').value || 5));
+  state.runStopTimer = setTimeout(stopRun, seconds * 1000);
 }
 
 function clearGraph() {
@@ -1106,12 +1140,24 @@ function renderSelection() {
   document.querySelectorAll('.link-label').forEach((el) => el.classList.toggle('selected', el.dataset.link === state.selectedLink));
 }
 
-function exportJson() {
-  downloadText('lwrclpy_web_node_graph.json', JSON.stringify({ nodes: state.nodes, links: state.links, view: state.view, nextId: state.nextId }, null, 2), 'application/json');
+function projectConfig() {
+  return {
+    format: 'lwrclpy-web-node-editor-project',
+    version: 1,
+    nodes: state.nodes,
+    links: state.links,
+    view: state.view,
+    nextId: state.nextId,
+  };
 }
 
-async function importJson(event) {
+function saveProject() {
+  downloadText('lwrclpy_web_node_project.json', JSON.stringify(projectConfig(), null, 2), 'application/json');
+}
+
+async function loadProject(event) {
   const file = event.target.files[0];
+  event.target.value = '';
   if (!file) return;
   const imported = JSON.parse(await file.text());
   state.nodes = imported.nodes || [];
@@ -1121,6 +1167,14 @@ async function importJson(event) {
   state.nextId = imported.nextId || Math.max(1, ...state.nodes.map((node) => Number(String(node.id).replace('n', '')) + 1));
   renderAll();
   scheduleRun();
+}
+
+function exportProjectPython() {
+  downloadText('lwrclpy_project.py', renderProjectPythonFile(projectPythonConfig()), 'text/x-python');
+}
+
+function exportProjectLaunch() {
+  downloadText('lwrclpy_project.launch.py', renderProjectLaunchFile(), 'text/x-python');
 }
 
 function exportPythonNode(node) {
@@ -1170,6 +1224,307 @@ function nodePythonConfig(node) {
   };
 }
 
+function projectPythonConfig() {
+  return {
+    format: 'lwrclpy-web-node-editor-project-code',
+    version: 1,
+    nodes: state.nodes.filter((node) => !node.toolType).map((node) => nodePythonConfig(node)),
+    skippedNodes: state.nodes.filter((node) => node.toolType).map((node) => ({ id: node.id, name: node.name, toolType: node.toolType })),
+  };
+}
+
+function renderProjectPythonFile(config) {
+  const metadata = JSON.stringify(config, null, 2);
+  return `#!/usr/bin/env python3
+# Generated by lwrclpy Web Node Editor.
+# This file runs exported custom lwrclpy nodes from one saved project.
+
+import importlib
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import rclpy
+from rclpy.executors import MultiThreadedExecutor
+
+
+CONFIG = json.loads(${JSON.stringify(metadata)})
+
+
+def import_type_class(type_name):
+    package, kind, name = type_name.split("/")
+    module = importlib.import_module(f"{package}.{kind}")
+    return getattr(module, name)
+
+
+def split_kind(type_name):
+    return type_name.split("/")[1]
+
+
+class ProjectNode:
+    def __init__(self, config):
+        self.config = config
+        self.node_config = config["node"]
+        self.port_topics = config.get("portTopics", {"inputs": {}, "outputs": {}})
+        self.state = {}
+        self.last_inputs = {}
+        self.input_queues = {}
+        self.last_outputs = {}
+        self.next_timer_at = 0.0
+        self.publishers = {}
+        self.clients = {}
+        self.subscriptions = []
+        self.services = []
+        self.env_path = None
+        self.env_site_packages = None
+        self.node = rclpy.create_node(self.node_config["name"])
+        self._setup_environment()
+        self._setup_transport()
+
+    def _setup_environment(self):
+        uv = shutil.which("uv")
+        if not uv:
+            sibling = Path(sys.executable).parent / ("uv.exe" if sys.platform.startswith("win") else "uv")
+            uv = str(sibling) if sibling.exists() else None
+        if not uv:
+            raise RuntimeError("uv command not found")
+        env_root = Path.cwd() / ".node_envs" / self.node_config["id"]
+        req_text = (self.node_config.get("requirements") or "").strip() + "\\n"
+        req_hash = hashlib.sha256(req_text.encode("utf-8")).hexdigest()
+        hash_file = env_root / ".requirements.sha256"
+        req_file = env_root / "requirements.txt"
+        python_bin = env_root / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
+        env_root.mkdir(parents=True, exist_ok=True)
+        if not python_bin.exists():
+            subprocess.run([uv, "venv", str(env_root)], check=True)
+        req_file.write_text(req_text, encoding="utf-8")
+        current_hash = hash_file.read_text(encoding="utf-8") if hash_file.exists() else ""
+        if current_hash != req_hash:
+            if req_text.strip():
+                subprocess.run([uv, "pip", "install", "--python", str(python_bin), "-r", str(req_file)], check=True)
+            hash_file.write_text(req_hash, encoding="utf-8")
+        self.env_path = env_root
+        self.env_site_packages = self._site_packages_for(env_root)
+
+    def _site_packages_for(self, env_root):
+        if sys.platform.startswith("win"):
+            return env_root / "Lib" / "site-packages"
+        for item in (env_root / "lib").iterdir():
+            candidate = item / "site-packages"
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _setup_transport(self):
+        for output in self.node_config.get("outputs", []):
+            type_cls = import_type_class(output["dataType"])
+            for topic in self.port_topics.get("outputs", {}).get(output["id"], []):
+                if split_kind(output["dataType"]) == "msg":
+                    self.publishers.setdefault(output["id"], []).append(self.node.create_publisher(type_cls, topic, 10))
+                else:
+                    self.clients.setdefault(output["id"], []).append(self.node.create_client(type_cls, topic))
+        for input_port in self.node_config.get("inputs", []):
+            type_cls = import_type_class(input_port["dataType"])
+            for topic in self.port_topics.get("inputs", {}).get(input_port["id"], []):
+                if split_kind(input_port["dataType"]) == "msg":
+                    self.subscriptions.append(self.node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port), 10))
+                else:
+                    self.services.append(self.node.create_service(type_cls, topic, self._make_service_callback(input_port)))
+
+    def publish(self, output_id, value):
+        output = self._output_port(output_id)
+        if output is None:
+            return
+        if output_id in self.publishers:
+            msg = self._coerce_message(output["dataType"], value)
+            for publisher in self.publishers[output_id]:
+                publisher.publish(msg)
+        if output_id in self.clients:
+            request = self._coerce_service_request(output["dataType"], value)
+            for client in self.clients[output_id]:
+                client.call_async(request)
+
+    def latest(self, input_id, default=None):
+        return self.last_inputs.get(input_id, default)
+
+    def take(self, input_id, default=None):
+        queue = self.input_queues.get(input_id) or []
+        if not queue:
+            return default
+        return queue.pop(0)
+
+    def has_input(self, input_id):
+        return bool(self.input_queues.get(input_id))
+
+    def log(self, *values):
+        print(f"[{self.node_config['name']}]", *values)
+
+    def spin_tick(self):
+        outputs = {}
+        inputs = dict(self.last_inputs)
+        self._execute_timer_if_due(inputs, outputs)
+        self._execute_loop(inputs, outputs)
+        self._flush_outputs(outputs)
+
+    def _make_subscription_callback(self, input_port):
+        def callback(msg):
+            self._store_input(input_port["id"], msg)
+            if input_port.get("receiveMode", "callback") != "callback":
+                return
+            outputs = {}
+            self._execute_callback(input_port, msg, None, outputs)
+            self._flush_outputs(outputs)
+        return callback
+
+    def _make_service_callback(self, input_port):
+        def callback(request, response):
+            self._store_input(input_port["id"], request)
+            outputs = {}
+            if input_port.get("receiveMode", "callback") == "callback":
+                self._execute_callback(input_port, request, response, outputs)
+            self._flush_outputs(outputs)
+            return response
+        return callback
+
+    def _execute_callback(self, input_port, msg, response, outputs):
+        code = input_port.get("callbackCode", "").strip()
+        if not code:
+            return
+        local = self._locals({"input_id": input_port["id"], "msg": msg, "request": msg, "response": response, "outputs": outputs})
+        exec(code, self._globals(), local)
+
+    def _execute_loop(self, inputs, outputs):
+        code = self.node_config.get("loopCode", "").strip()
+        if not code:
+            return
+        local = self._locals({"inputs": inputs, "outputs": outputs, "now": time.time(), "latest": self.latest, "take": self.take, "has_input": self.has_input})
+        exec(code, self._globals(), local)
+
+    def _execute_timer_if_due(self, inputs, outputs):
+        if not self.node_config.get("timerEnabled", False):
+            return
+        code = self.node_config.get("timerCode", "").strip()
+        if not code:
+            return
+        now = time.time()
+        period = max(0.001, float(self.node_config.get("timerPeriodSec", 1.0) or 1.0))
+        if self.next_timer_at <= 0:
+            self.next_timer_at = now
+        if now < self.next_timer_at:
+            return
+        self.next_timer_at = now + period
+        local = self._locals({"inputs": inputs, "outputs": outputs, "now": now, "period": period, "latest": self.latest, "take": self.take, "has_input": self.has_input})
+        exec(code, self._globals(), local)
+
+    def _flush_outputs(self, outputs):
+        for key, value in outputs.items():
+            self.last_outputs[key] = value
+            self.publish(key, value)
+
+    def _globals(self):
+        globals_dict = {"__builtins__": {"__import__": __import__, "abs": abs, "bool": bool, "dict": dict, "enumerate": enumerate, "float": float, "getattr": getattr, "hasattr": hasattr, "int": int, "len": len, "list": list, "max": max, "min": min, "print": self.log, "range": range, "round": round, "setattr": setattr, "str": str, "sum": sum}}
+        import_code = self.node_config.get("importCode", "").strip()
+        if import_code:
+            original_path = list(sys.path)
+            try:
+                if self.env_site_packages:
+                    sys.path.insert(0, str(self.env_site_packages))
+                exec(import_code, globals_dict, globals_dict)
+            finally:
+                sys.path[:] = original_path
+        return globals_dict
+
+    def _locals(self, extra):
+        return {"params": self.node_config.get("params", {}), "state": self.state, "publish": self.publish, "log": self.log, **extra}
+
+    def _store_input(self, input_id, value):
+        self.last_inputs[input_id] = value
+        queue = self.input_queues.setdefault(input_id, [])
+        queue.append(value)
+        del queue[:-100]
+
+    def _output_port(self, output_id):
+        for output in self.node_config.get("outputs", []):
+            if output["id"] == output_id:
+                return output
+        return None
+
+    def _coerce_message(self, data_type, value):
+        msg_cls = import_type_class(data_type)
+        if hasattr(value, "_fields_and_field_types"):
+            return value
+        msg = msg_cls()
+        if hasattr(msg, "data"):
+            msg.data = value
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if hasattr(msg, key):
+                    setattr(msg, key, item)
+        return msg
+
+    def _coerce_service_request(self, data_type, value):
+        srv_cls = import_type_class(data_type)
+        request = srv_cls.Request()
+        if hasattr(value, "_fields_and_field_types"):
+            return value
+        if hasattr(request, "data"):
+            request.data = value
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if hasattr(request, key):
+                    setattr(request, key, item)
+        return request
+
+
+def main():
+    rclpy.init(args=None)
+    nodes = [ProjectNode(item) for item in CONFIG.get("nodes", [])]
+    executor = MultiThreadedExecutor()
+    for item in nodes:
+        executor.add_node(item.node)
+    try:
+        while rclpy.ok():
+            executor.spin_once(timeout_sec=0.05)
+            for item in nodes:
+                item.spin_tick()
+    finally:
+        for item in nodes:
+            executor.remove_node(item.node)
+            item.node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
+`;
+}
+
+function renderProjectLaunchFile() {
+  return `#!/usr/bin/env python3
+from launch import LaunchDescription
+from launch.actions import ExecuteProcess
+from launch.substitutions import PathJoinSubstitution, ThisLaunchFileDir
+
+
+def generate_launch_description():
+    # Put lwrclpy_project.py next to this launch file or edit this path.
+    project_script = PathJoinSubstitution([
+        ThisLaunchFileDir(),
+        'lwrclpy_project.py',
+    ])
+    return LaunchDescription([
+        ExecuteProcess(
+            cmd=['python3', project_script],
+            output='screen',
+        )
+    ])
+`;
+}
+
 function renderPythonNodeFile(config) {
   const metadata = JSON.stringify(config, null, 2);
   return `#!/usr/bin/env python3
@@ -1179,8 +1534,6 @@ ${metadata.split('\n').map((line) => `# ${line}`).join('\n')}
 # LWRCLPY_WEB_NODE_EDITOR_CONFIG_END
 
 import importlib
-import base64
-import io
 import json
 import time
 
@@ -1210,7 +1563,7 @@ class ExportedNode:
         self.last_inputs = {}
         self.input_queues = {}
         self.last_outputs = {}
-        self.displays = {}
+        self.next_timer_at = 0.0
         self.publishers = {}
         self.clients = {}
         self.subscriptions = []
@@ -1220,8 +1573,6 @@ class ExportedNode:
 
     def _setup_transport(self):
         for output in self.node_config.get("outputs", []):
-            if output["dataType"].startswith("tool/"):
-                continue
             type_cls = import_type_class(output["dataType"])
             for topic in self.port_topics.get("outputs", {}).get(output["id"], []):
                 if split_kind(output["dataType"]) == "msg":
@@ -1229,8 +1580,6 @@ class ExportedNode:
                 else:
                     self.clients.setdefault(output["id"], []).append(self.node.create_client(type_cls, topic))
         for input_port in self.node_config.get("inputs", []):
-            if input_port["dataType"].startswith("tool/"):
-                continue
             type_cls = import_type_class(input_port["dataType"])
             for topic in self.port_topics.get("inputs", {}).get(input_port["id"], []):
                 if split_kind(input_port["dataType"]) == "msg":
@@ -1240,7 +1589,7 @@ class ExportedNode:
 
     def publish(self, output_id, value):
         output = self._output_port(output_id)
-        if output is None or output["dataType"].startswith("tool/"):
+        if output is None:
             return
         if output_id in self.publishers:
             msg = self._coerce_message(output["dataType"], value)
@@ -1267,9 +1616,10 @@ class ExportedNode:
         print(*values)
 
     def spin_tick(self):
-        self.displays = {}
         outputs = {}
-        self._execute_loop(dict(self.last_inputs), outputs)
+        inputs = dict(self.last_inputs)
+        self._execute_timer_if_due(inputs, outputs)
+        self._execute_loop(inputs, outputs)
         self._flush_outputs(outputs)
 
     def _make_subscription_callback(self, input_port):
@@ -1319,6 +1669,30 @@ class ExportedNode:
         })
         exec(code, self._globals(), local)
 
+    def _execute_timer_if_due(self, inputs, outputs):
+        if not self.node_config.get("timerEnabled", False):
+            return
+        code = self.node_config.get("timerCode", "").strip()
+        if not code:
+            return
+        now = time.time()
+        period = max(0.001, float(self.node_config.get("timerPeriodSec", 1.0) or 1.0))
+        if self.next_timer_at <= 0:
+            self.next_timer_at = now
+        if now < self.next_timer_at:
+            return
+        self.next_timer_at = now + period
+        local = self._locals({
+            "inputs": inputs,
+            "outputs": outputs,
+            "now": now,
+            "period": period,
+            "latest": self.latest,
+            "take": self.take,
+            "has_input": self.has_input,
+        })
+        exec(code, self._globals(), local)
+
     def _flush_outputs(self, outputs):
         for key, value in outputs.items():
             self.last_outputs[key] = value
@@ -1353,78 +1727,9 @@ class ExportedNode:
             "params": self.node_config.get("params", {}),
             "state": self.state,
             "publish": self.publish,
-            "show_image": self.show_image,
-            "show_video": self.show_video,
-            "show_plot": self.show_plot,
-            "show_text": self.show_text,
-            "image_grayscale": self.image_grayscale,
-            "image_resize": self.image_resize,
-            "image_blur": self.image_blur,
-            "image_brightness": self.image_brightness,
-            "image_contrast": self.image_contrast,
             "log": self.log,
             **extra,
         }
-
-    def show_image(self, value, title="Image"):
-        self.displays["image"] = {"kind": "image", "title": title, "value": value}
-        return value
-
-    def show_video(self, value, title="Video"):
-        self.displays["video"] = {"kind": "video", "title": title, "value": value}
-        return value
-
-    def show_plot(self, series, title="Plot"):
-        self.displays["plot"] = {"kind": "plot", "title": title, "series": series}
-        return series
-
-    def show_text(self, value, title="Data"):
-        self.displays["text"] = {"kind": "text", "title": title, "value": str(value)}
-        print(f"{title}: {value}")
-        return value
-
-    def image_grayscale(self, value):
-        image = self._open_data_url_image(value)
-        return self._image_to_data_url(image.convert("L").convert("RGB"))
-
-    def image_resize(self, value, width, height):
-        image = self._open_data_url_image(value)
-        return self._image_to_data_url(image.resize((int(width), int(height))))
-
-    def image_blur(self, value, radius=2.0):
-        pillow = self._pillow_modules()
-        image = self._open_data_url_image(value)
-        return self._image_to_data_url(image.filter(pillow["ImageFilter"].GaussianBlur(float(radius))))
-
-    def image_brightness(self, value, factor=1.2):
-        pillow = self._pillow_modules()
-        image = self._open_data_url_image(value)
-        return self._image_to_data_url(pillow["ImageEnhance"].Brightness(image).enhance(float(factor)))
-
-    def image_contrast(self, value, factor=1.2):
-        pillow = self._pillow_modules()
-        image = self._open_data_url_image(value)
-        return self._image_to_data_url(pillow["ImageEnhance"].Contrast(image).enhance(float(factor)))
-
-    def _pillow_modules(self):
-        return {
-            "Image": importlib.import_module("PIL.Image"),
-            "ImageEnhance": importlib.import_module("PIL.ImageEnhance"),
-            "ImageFilter": importlib.import_module("PIL.ImageFilter"),
-        }
-
-    def _open_data_url_image(self, value):
-        text = str(value or "")
-        if "," not in text:
-            raise ValueError("Expected an image data URL")
-        _, encoded = text.split(",", 1)
-        return self._pillow_modules()["Image"].open(io.BytesIO(base64.b64decode(encoded))).convert("RGB")
-
-    def _image_to_data_url(self, image):
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-        return f"data:image/png;base64,{encoded}"
 
     def _store_input(self, input_id, value):
         self.last_inputs[input_id] = value
@@ -1515,6 +1820,11 @@ function normalizeImportedNode(node) {
       dataType: port.dataType || firstDataType(),
     })),
     loopCode: node.loopCode || '',
+    timerEnabled: Boolean(node.timerEnabled),
+    timerPeriodSec: Number(node.timerPeriodSec || 1.0),
+    timerCode: node.timerCode || DEFAULT_TIMER_CODE,
+    importCode: node.importCode || DEFAULT_IMPORT_CODE,
+    requirements: node.requirements || '',
     toolType: node.toolType || '',
     params: node.params || {},
   };
@@ -1553,9 +1863,22 @@ function nodeFor(id) {
 }
 
 function isValidLink(link) {
-  const from = nodeFor(link.fromNode)?.outputs.find((port) => port.id === link.fromPort);
-  const to = nodeFor(link.toNode)?.inputs.find((port) => port.id === link.toPort);
-  return Boolean(from && to && from.dataType === to.dataType && link.fromNode !== link.toNode);
+  return canConnect(link.fromNode, link.fromPort, link.toNode, link.toPort);
+}
+
+function canConnect(fromNodeId, fromPortId, toNodeId, toPortId) {
+  if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) return false;
+  const fromNode = nodeFor(fromNodeId);
+  const toNode = nodeFor(toNodeId);
+  const from = fromNode?.outputs.find((port) => port.id === fromPortId);
+  const to = toNode?.inputs.find((port) => port.id === toPortId);
+  if (!from || !to) return false;
+  const fromInterface = fromNode?.toolType === 'topic_input';
+  const toInterface = toNode?.toolType === 'topic_output';
+  if (fromInterface && toInterface) return false;
+  if (fromInterface || toInterface) return true;
+  if (!from.dataType || !to.dataType) return true;
+  return from.dataType === to.dataType;
 }
 
 function defaultLinkTopic(fromNode, fromPort, toNode, toPort) {

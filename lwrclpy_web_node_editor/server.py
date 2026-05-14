@@ -24,7 +24,7 @@ class Handler(BaseHTTPRequestHandler):
     runtime = GraphRuntime()
 
     def log_message(self, fmt: str, *args) -> None:
-        print("[ipn_web_node_editor]", fmt % args)
+        print("[lwrclpy_web_node_editor]", fmt % args)
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None):
             print(f"Port {args.port} is already in use. Stop the existing server or run with --port {args.port + 1}.", file=sys.stderr)
             return 1
         raise
-    print(f"IPN Web Node Editor: http://{args.host}:{args.port}")
+    print(f"lwrclpy Web Node Editor: http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
