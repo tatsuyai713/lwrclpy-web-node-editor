@@ -12,36 +12,37 @@ const state = {
   view: { x: 0, y: 0, scale: 1 },
   dragLink: null,
   lastRunAt: 0,
+  runInFlight: false,
+  tickCount: 0,
+  runState: 'idle',
   nodeViews: {},
+  videoInputs: {},
+  embeddedVideoInputs: {},
 };
 
 const $ = (id) => document.getElementById(id);
 const workspace = () => $('workspace');
 const scene = () => $('scene');
 
-const DEFAULT_CALLBACK_CODE = `# Runs when this input receives a message/request and Receive Mode is Callback.
-# Available: input_id, msg, request, response, state, outputs, publish(output_id, value), log(...)
-log("received", input_id, msg)
+const DEFAULT_CALLBACK_CODE = `# lwrclpy subscription/service callback body.
+# Available: node, input_id, msg, request, response, state, publish(output_id, value), log(...)
+node.get_logger().info(f"received {input_id}")
 
 # Example for std_msgs/msg/String:
-# outputs["out1"] = msg.data
+# publish("out1", msg.data)
 `;
 
-const DEFAULT_LOOP_CODE = `# Runs on every Run / Run For tick.
-# Available: inputs, outputs, state, now, latest(input_id), take(input_id), has_input(input_id), publish(...), log(...)
-
-# Example:
-# while has_input("in1"):
-#     msg = take("in1")
-#     outputs["out1"] = msg.data
+const DEFAULT_LOOP_CODE = `# Optional lwrclpy-compatible spin tick body.
+# Prefer input callback code for data-dependent processing.
+# Available: node, state, now, publish(output_id, value), log(...)
 `;
 
-const DEFAULT_TIMER_CODE = `# Runs when the node timer period elapses.
-# Available: inputs, outputs, state, now, period, latest(input_id), take(input_id), has_input(input_id), publish(...), log(...)
+const DEFAULT_TIMER_CODE = `# lwrclpy timer callback body.
+# Available: node, state, now, period, publish(output_id, value), log(...)
 
 # Example:
 # state["count"] = state.get("count", 0) + 1
-# outputs["out1"] = state["count"]
+# publish("out1", state["count"])
 `;
 
 const DEFAULT_IMPORT_CODE = `# Node-level imports run after this node's venv is ready.
@@ -80,7 +81,7 @@ const INTERFACE_NODE_TEMPLATES = [
       name: 'image_file_input',
       inputs: [],
       outputs: [{ id: 'out1', name: 'image', dataType: 'sensor_msgs/msg/Image' }],
-      params: {},
+      params: { publishMode: 'oneshot', publishHz: 1 },
       loopCode: '',
     },
   },
@@ -91,7 +92,7 @@ const INTERFACE_NODE_TEMPLATES = [
       name: 'video_file_input',
       inputs: [],
       outputs: [{ id: 'out1', name: 'frame', dataType: 'sensor_msgs/msg/Image' }],
-      params: {},
+      params: { loop: false },
       loopCode: '',
     },
   },
@@ -137,6 +138,7 @@ async function init() {
   bindCanvas();
   renderInterfaceNodeList();
   renderAll();
+  setExecutionStatus('idle', 'Ready');
   runGraph();
 }
 
@@ -147,8 +149,7 @@ function bindToolbar() {
   $('run-duration-model').onclick = runForDuration;
   $('save-project').onclick = saveProject;
   $('load-project').onchange = loadProject;
-  $('export-project-python').onclick = exportProjectPython;
-  $('export-project-launch').onclick = exportProjectLaunch;
+  $('export-ros2-package').onclick = exportRos2Package;
   $('config-input-count').oninput = renderConfigPorts;
   $('config-output-count').oninput = renderConfigPorts;
   $('config-timer-enabled').oninput = updateTimerDraft;
@@ -419,14 +420,14 @@ function openCodeDialog(node, kind) {
     ? (callbackPort.callbackCode || '')
     : (isTimer ? (node.timerCode || DEFAULT_TIMER_CODE) : (isImport ? (node.importCode || DEFAULT_IMPORT_CODE) : (isRequirements ? (node.requirements || '') : (node.loopCode || ''))));
   $('code-hint').textContent = callbackPort
-    ? 'Callback scope: input_id, msg, request, response, state, outputs, publish(output_id, value), log(...).'
+    ? 'lwrclpy callback scope: node, input_id, msg/request, response, state, publish(output_id, value), log(...). Use publish(...) instead of direct graph outputs.'
     : (isTimer
-      ? 'Timer callback scope: inputs, outputs, latest(input_id), take(input_id), has_input(input_id), state, now, period, publish(...), log(...).'
+      ? 'lwrclpy timer scope: node, state, now, period, publish(output_id, value), log(...).'
       : (isImport
         ? 'Import code runs once after this node venv is ready. Put imports such as import cv2 and import numpy as np here.'
         : (isRequirements
           ? 'One requirement per line. uv creates this node venv and installs these packages before execution.'
-          : 'Main loop scope: inputs, outputs, latest(input_id), take(input_id), has_input(input_id), state, now, publish(...), log(...).')));
+          : 'Optional lwrclpy-compatible spin tick scope: node, state, now, publish(output_id, value), log(...). Prefer input callbacks for data-dependent processing.')));
   $('code-dialog').showModal();
 }
 
@@ -566,13 +567,19 @@ function nodeKindLabel(node) {
 
 function toolActionHtml(node) {
   if (node.toolType === 'image_file_input') {
+    const mode = node.params?.publishMode || 'oneshot';
+    const hz = Number(node.params?.publishHz || 1);
     return `<div class="node-actions tool-actions">
       <label class="file-button">Load Image<input data-tool-file="image" type="file" accept="image/*"></label>
+      <label class="tool-field"><span>Send</span><select data-tool-image-mode><option value="oneshot" ${mode === 'oneshot' ? 'selected' : ''}>One Shot</option><option value="rate" ${mode === 'rate' ? 'selected' : ''}>Rate</option></select></label>
+      <label class="tool-field"><span>Hz</span><input data-tool-image-hz type="number" min="0.01" step="0.1" value="${escapeAttr(hz)}"></label>
     </div>`;
   }
   if (node.toolType === 'video_file_input') {
+    const loopChecked = node.params?.loop ? 'checked' : '';
     return `<div class="node-actions tool-actions">
       <label class="file-button">Load Video<input data-tool-file="video" type="file" accept="video/*"></label>
+      <label class="tool-check"><input data-tool-video-loop type="checkbox" ${loopChecked}> Loop</label>
     </div>`;
   }
   if (node.toolType === 'graph_view') {
@@ -585,14 +592,43 @@ function toolActionHtml(node) {
 
 function viewNodeHtml(node) {
   if (!['image_file_input', 'video_file_input', 'image_view', 'image_file_save', 'graph_view'].includes(node.toolType)) return '';
-  return `<div class="node-view" data-node-view="${escapeAttr(node.id)}">${renderViewContent(state.nodeViews[node.id])}</div>`;
+  const viewClass = node.toolType === 'video_file_input' ? ' node-view-video' : '';
+  return `<div class="node-view${viewClass}" data-node-view="${escapeAttr(node.id)}">${renderViewContent(state.nodeViews[node.id])}</div>`;
 }
 
 function bindToolActions(el, node) {
   const imageInput = el.querySelector('[data-tool-file="image"]');
   if (imageInput) imageInput.onchange = (ev) => loadImageFile(node, ev.target.files[0]);
+  const imageMode = el.querySelector('[data-tool-image-mode]');
+  if (imageMode) {
+    imageMode.onchange = (ev) => {
+      node.params = { ...(node.params || {}), publishMode: ev.target.value === 'rate' ? 'rate' : 'oneshot' };
+      renderAll();
+      scheduleRun();
+    };
+  }
+  const imageHz = el.querySelector('[data-tool-image-hz]');
+  if (imageHz) {
+    imageHz.onchange = (ev) => {
+      node.params = { ...(node.params || {}), publishHz: Math.max(0.01, Number(ev.target.value || 1)) };
+      renderAll();
+      scheduleRun();
+    };
+  }
   const videoInput = el.querySelector('[data-tool-file="video"]');
   if (videoInput) videoInput.onchange = (ev) => loadVideoFile(node, ev.target.files[0]);
+  const videoLoop = el.querySelector('[data-tool-video-loop]');
+  if (videoLoop) {
+    videoLoop.onchange = (ev) => {
+      node.params = { ...(node.params || {}), loop: ev.target.checked };
+      const controller = state.videoInputs[node.id];
+      if (controller) {
+        controller.loop = ev.target.checked;
+        controller.video.loop = false;
+      }
+      renderAll();
+    };
+  }
   const plotField = el.querySelector('[data-action="plot-field"]');
   if (plotField) {
     plotField.onclick = (ev) => {
@@ -642,7 +678,8 @@ function renderInspector() {
       <label class="field"><span>Topic Name</span><input id="link-name" value="${escapeAttr(link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort))}"></label>
       <button id="delete-link">Delete Link</button>`;
     $('link-name').oninput = () => {
-      link.name = $('link-name').value;
+      const fallback = defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort);
+      syncSourceTopicNames(link.fromNode, link.fromPort, $('link-name').value.trim() || fallback);
       renderLinks();
     };
     $('delete-link').onclick = () => deleteLink(link.id);
@@ -775,9 +812,10 @@ function finishLinkDrag(ev, inputRow) {
     flashPort(inputRow, 'invalid');
     return;
   }
-  const defaultTopic = defaultLinkTopic(state.dragLink.fromNode, state.dragLink.fromPort, inputRow.dataset.node, inputRow.dataset.port);
-  const topic = prompt('Topic name for this edge', defaultTopic);
+  const defaultTopic = sourceTopicName(state.dragLink.fromNode, state.dragLink.fromPort) || defaultLinkTopic(state.dragLink.fromNode, state.dragLink.fromPort, inputRow.dataset.node, inputRow.dataset.port);
+  const topic = prompt('Topic name for this output topic', defaultTopic);
   if (topic === null) return;
+  const topicName = topic.trim() || defaultTopic;
   state.links = state.links.filter((link) => !(link.toNode === inputRow.dataset.node && link.toPort === inputRow.dataset.port));
   state.links.push({
     id: `l${Date.now()}${Math.random().toString(16).slice(2)}`,
@@ -785,8 +823,9 @@ function finishLinkDrag(ev, inputRow) {
     fromPort: state.dragLink.fromPort,
     toNode: inputRow.dataset.node,
     toPort: inputRow.dataset.port,
-    name: topic.trim() || defaultTopic,
+    name: topicName,
   });
+  syncSourceTopicNames(state.dragLink.fromNode, state.dragLink.fromPort, topicName);
   state.selectedNode = null;
   state.selectedLink = state.links[state.links.length - 1].id;
   clearLinkDrag();
@@ -920,7 +959,13 @@ function fitView() {
 }
 
 async function runGraph() {
-  state.lastRunAt = performance.now();
+  if (state.runInFlight) return;
+  state.runInFlight = true;
+  normalizeSourceTopicNames();
+  const startedAt = performance.now();
+  state.lastRunAt = startedAt;
+  if (!state.autoTimer) setExecutionStatus('tick', 'Running one tick');
+  if (state.autoTimer) updateVideoInputsForRun();
   const payload = {
     nodes: state.nodes,
     links: state.links.map(({ fromNode, fromPort, toNode, toPort, name }) => ({ fromNode, fromPort, toNode, toPort, name })),
@@ -933,25 +978,74 @@ async function runGraph() {
     }).then((res) => res.json());
     updateStatus(data);
     updateNodeViews(data.nodes || {});
+    updateExecutionStatus(data, performance.now() - startedAt);
   } catch (err) {
     $('runtime-status').textContent = `API error: ${err.message}`;
+    setExecutionStatus('error', `API error: ${err.message}`);
+  } finally {
+    state.runInFlight = false;
   }
 }
 
 function updateStatus(data) {
   const runtime = data.lwrclpy || {};
   const setup = data.setup?.complete === false ? ` / setup blocked${runtime.error ? ': ' + runtime.error : ''}` : '';
-  $('runtime-status').textContent = (runtime.available ? 'lwrclpy available' : `lwrclpy unavailable${runtime.error ? ': ' + runtime.error : ''}`) + setup;
+  const text = (runtime.available ? 'lwrclpy available' : `lwrclpy unavailable${runtime.error ? ': ' + runtime.error : ''}`) + setup;
+  $('runtime-status').textContent = text;
+  $('runtime-detail').textContent = text;
   $('node-count').textContent = `${state.nodes.length} nodes / ${state.links.length} links`;
+}
+
+function updateExecutionStatus(data, elapsedMs) {
+  state.tickCount += 1;
+  const nodeErrors = Object.values(data.nodes || {}).flatMap((node) => {
+    const logs = node?.meta?.logs || [];
+    return logs.filter((line) => /error|failed/i.test(String(line)));
+  });
+  if (data.setup?.complete === false) {
+    setExecutionStatus('error', `Setup blocked after ${elapsedMs.toFixed(0)} ms`);
+    return;
+  }
+  if (nodeErrors.length) {
+    setExecutionStatus('error', `Node error after ${elapsedMs.toFixed(0)} ms: ${nodeErrors[0]}`);
+    return;
+  }
+  const label = state.autoTimer ? 'running' : state.runState === 'stopped' ? 'stopped' : 'tick';
+  setExecutionStatus(label, `Tick ${state.tickCount} completed in ${elapsedMs.toFixed(0)} ms`);
+}
+
+function setExecutionStatus(kind, detail) {
+  state.runState = kind;
+  const label = $('execution-state');
+  const tick = $('tick-status');
+  if (!label || !tick) return;
+  label.className = `status-pill ${kind}`;
+  label.textContent = {
+    idle: 'Idle',
+    tick: 'Tick',
+    running: 'Running',
+    stopped: 'Stopped',
+    error: 'Error',
+  }[kind] || kind;
+  tick.textContent = detail;
 }
 
 function updateNodeViews(nodes) {
   Object.entries(nodes).forEach(([nodeId, payload]) => {
-    if (payload?.view) state.nodeViews[nodeId] = payload.view;
+    if (payload?.view) state.nodeViews[nodeId] = normalizedNodeView(nodeId, payload.view);
   });
   document.querySelectorAll('[data-node-view]').forEach((el) => {
     el.innerHTML = renderViewContent(state.nodeViews[el.dataset.nodeView]);
   });
+}
+
+function normalizedNodeView(nodeId, view) {
+  const node = nodeFor(nodeId);
+  const controller = state.videoInputs[nodeId];
+  if (node?.toolType === 'video_file_input' && controller && view?.kind === 'image') {
+    return { ...view, status: videoStatus(controller) };
+  }
+  return view;
 }
 
 function renderViewContent(view) {
@@ -993,6 +1087,8 @@ function loadImageFile(node, file) {
       fileName: file.name,
       dataUrl: frame.dataUrl,
       imageMessage: frame.message,
+      publishMode: node.params?.publishMode || 'oneshot',
+      publishHz: Math.max(0.01, Number(node.params?.publishHz || 1)),
     };
     URL.revokeObjectURL(img.src);
     renderAll();
@@ -1003,34 +1099,190 @@ function loadImageFile(node, file) {
 
 function loadVideoFile(node, file) {
   if (!file) return;
+  stopVideoInput(node.id);
   const video = document.createElement('video');
   video.muted = true;
-  video.loop = true;
+  video.loop = false;
   video.playsInline = true;
-  video.onloadeddata = async () => {
-    await video.play().catch(() => {});
-    captureVideoFrame(node, video, file.name);
-    if (node.params?.videoTimer) clearInterval(node.params.videoTimer);
-    node.params.videoTimer = setInterval(() => captureVideoFrame(node, video, file.name), 250);
+  video.preload = 'auto';
+  const controller = {
+    nodeId: node.id,
+    video,
+    url: URL.createObjectURL(file),
+    fileName: file.name,
+    loop: Boolean(node.params?.loop),
+    ended: false,
   };
-  video.src = URL.createObjectURL(file);
+  state.videoInputs[node.id] = controller;
+  video.onloadeddata = () => {
+    video.pause();
+    captureVideoFrame(node, controller, { updateGraph: false });
+    renderAll();
+  };
+  video.onended = () => handleVideoEnded(controller);
+  video.src = controller.url;
 }
 
-function captureVideoFrame(node, video, fileName) {
-  if (!video.videoWidth || !video.videoHeight) return;
-  const frame = imageElementToMessage(video);
+function captureVideoFrame(node, controller, options = {}) {
+  const video = controller.video;
+  if (!video.videoWidth || !video.videoHeight || video.readyState < 2 || video.seeking) return;
+  const frame = imageElementToMessage(video, 360);
   node.params = {
     ...(node.params || {}),
-    fileName,
+    fileName: controller.fileName,
     dataUrl: frame.dataUrl,
     frameMessage: frame.message,
+    loop: controller.loop,
+    duration: Number.isFinite(video.duration) ? video.duration : 0,
+    currentTime: video.currentTime || 0,
+    ended: controller.ended,
   };
-  renderAll();
-  scheduleRun();
+  state.nodeViews[node.id] = { kind: 'image', dataUrl: frame.dataUrl, status: videoStatus(controller) };
+  updateNodeViews({ [node.id]: { view: state.nodeViews[node.id] } });
+  if (options.renderAll) renderAll();
+  if (options.updateGraph) scheduleRun();
 }
 
-function imageElementToMessage(source) {
-  const maxSide = 640;
+function videoStatus(controller) {
+  const video = controller.video;
+  const duration = Number.isFinite(video.duration) && video.duration > 0 ? ` / ${video.duration.toFixed(1)}s` : '';
+  const stateText = controller.ended ? 'ended' : video.paused ? 'paused' : 'playing';
+  return `${controller.fileName} ${stateText} ${video.currentTime.toFixed(1)}s${duration}`;
+}
+
+function updateVideoInputsForRun() {
+  Object.values(state.videoInputs).forEach((controller) => {
+    if (controller.ended && !controller.loop) return;
+    const node = nodeFor(controller.nodeId);
+    if (!node) return;
+    captureVideoFrame(node, controller, { updateGraph: false });
+  });
+  updateEmbeddedVideoInputsForRun();
+}
+
+function updateEmbeddedVideoInputsForRun() {
+  const now = performance.now();
+  state.nodes.forEach((node) => {
+    if (node.toolType !== 'video_file_input' || state.videoInputs[node.id]) return;
+    const params = node.params || {};
+    const baseFrame = params.baseFrameMessage || params.frameMessage;
+    if (!params.embeddedVideo || !baseFrame) return;
+    const duration = Math.max(0.1, Number(params.duration || 10));
+    const fps = Math.max(1, Number(params.embeddedFps || 12));
+    const loop = Boolean(params.loop ?? true);
+    let controller = state.embeddedVideoInputs[node.id];
+    if (!controller || controller.baseFrame !== baseFrame) {
+      controller = {
+        nodeId: node.id,
+        baseFrame,
+        startedAt: now,
+        duration,
+        fps,
+        loop,
+        ended: false,
+        fileName: params.fileName || `${node.name || node.id}.embedded`,
+      };
+      state.embeddedVideoInputs[node.id] = controller;
+    }
+    controller.duration = duration;
+    controller.fps = fps;
+    controller.loop = loop;
+    let elapsed = (now - controller.startedAt) / 1000;
+    if (elapsed >= duration) {
+      if (loop) {
+        controller.startedAt = now - ((elapsed % duration) * 1000);
+        elapsed = elapsed % duration;
+      } else {
+        elapsed = duration;
+        controller.ended = true;
+      }
+    }
+    const frameIndex = Math.floor(elapsed * fps);
+    const frame = syntheticVideoFrame(controller.baseFrame, frameIndex);
+    if (!frame) return;
+    node.params = {
+      ...params,
+      fileName: controller.fileName,
+      dataUrl: frame.dataUrl,
+      frameMessage: frame.message,
+      baseFrameMessage: controller.baseFrame,
+      embeddedVideo: true,
+      embeddedFps: fps,
+      duration,
+      currentTime: elapsed,
+      ended: controller.ended,
+      loop,
+    };
+    const stateText = controller.ended ? 'ended' : 'playing';
+    state.nodeViews[node.id] = { kind: 'image', dataUrl: frame.dataUrl, status: `${controller.fileName} ${stateText} ${elapsed.toFixed(1)}s / ${duration.toFixed(1)}s` };
+    updateNodeViews({ [node.id]: { view: state.nodeViews[node.id] } });
+  });
+}
+
+function startVideoInputs() {
+  Object.values(state.videoInputs).forEach((controller) => {
+    if (controller.ended && controller.loop) {
+      controller.video.currentTime = 0;
+      controller.ended = false;
+    }
+    if (!controller.ended) controller.video.play().catch(() => {});
+  });
+}
+
+function pauseVideoInputs() {
+  Object.values(state.videoInputs).forEach((controller) => controller.video.pause());
+}
+
+function stopVideoInput(nodeId) {
+  const controller = state.videoInputs[nodeId];
+  if (!controller) return;
+  controller.video.pause();
+  controller.video.removeAttribute('src');
+  controller.video.load();
+  if (controller.url) URL.revokeObjectURL(controller.url);
+  delete state.videoInputs[nodeId];
+}
+
+function stopAllVideoInputs() {
+  Object.keys(state.videoInputs).forEach(stopVideoInput);
+  state.embeddedVideoInputs = {};
+}
+
+function startEmbeddedVideoInputs() {
+  const now = performance.now();
+  state.nodes.forEach((node) => {
+    if (node.toolType !== 'video_file_input' || state.videoInputs[node.id]) return;
+    if (!node.params?.embeddedVideo || !(node.params.baseFrameMessage || node.params.frameMessage)) return;
+    state.embeddedVideoInputs[node.id] = {
+      nodeId: node.id,
+      baseFrame: node.params.baseFrameMessage || node.params.frameMessage,
+      startedAt: now,
+      duration: Math.max(0.1, Number(node.params.duration || 10)),
+      fps: Math.max(1, Number(node.params.embeddedFps || 12)),
+      loop: Boolean(node.params.loop ?? true),
+      ended: false,
+      fileName: node.params.fileName || `${node.name || node.id}.embedded`,
+    };
+  });
+}
+
+function handleVideoEnded(controller) {
+  const node = nodeFor(controller.nodeId);
+  if (controller.loop) {
+    controller.ended = false;
+    controller.video.currentTime = 0;
+    if (state.autoTimer) controller.video.play().catch(() => {});
+    return;
+  }
+  controller.ended = true;
+  if (node) captureVideoFrame(node, controller, { updateGraph: false });
+  const anyPlaying = Object.values(state.videoInputs).some((item) => !item.ended && !item.video.paused);
+  if (state.autoTimer && !anyPlaying) {
+    stopRun(`Video playback completed after ${state.tickCount} ticks`);
+  }
+}
+
+function imageElementToMessage(source, maxSide = 640) {
   const naturalWidth = source.videoWidth || source.naturalWidth || source.width;
   const naturalHeight = source.videoHeight || source.naturalHeight || source.height;
   const scale = Math.min(1, maxSide / Math.max(naturalWidth, naturalHeight));
@@ -1042,22 +1294,95 @@ function imageElementToMessage(source) {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(source, 0, 0, width, height);
   const image = ctx.getImageData(0, 0, width, height);
-  const rgb = new Array(width * height * 3);
+  const rgb = new Uint8Array(width * height * 3);
   for (let src = 0, dst = 0; src < image.data.length; src += 4) {
     rgb[dst++] = image.data[src];
     rgb[dst++] = image.data[src + 1];
     rgb[dst++] = image.data[src + 2];
   }
+  const dataUrl = canvas.toDataURL('image/png');
   return {
-    dataUrl: canvas.toDataURL('image/png'),
+    dataUrl,
     message: {
       width,
       height,
       encoding: 'rgb8',
       is_bigendian: 0,
       step: width * 3,
-      data: rgb,
-      dataUrl: canvas.toDataURL('image/png'),
+      data: bytesToBase64(rgb),
+      dataEncoding: 'base64',
+    },
+  };
+}
+
+function bytesToBase64(bytes) {
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(text) {
+  const binary = atob(text || '');
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function messageRgbBytes(message) {
+  if (!message) return null;
+  if (message.dataEncoding === 'base64' && typeof message.data === 'string') return base64ToBytes(message.data);
+  if (Array.isArray(message.data)) return Uint8Array.from(message.data.map((value) => clamp(Number(value) || 0, 0, 255)));
+  return null;
+}
+
+function rgbBytesToDataUrl(bytes, width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const image = ctx.createImageData(width, height);
+  for (let src = 0, dst = 0; src < bytes.length && dst < image.data.length; src += 3, dst += 4) {
+    image.data[dst] = bytes[src];
+    image.data[dst + 1] = bytes[src + 1] || 0;
+    image.data[dst + 2] = bytes[src + 2] || 0;
+    image.data[dst + 3] = 255;
+  }
+  ctx.putImageData(image, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
+function syntheticVideoFrame(baseFrame, frameIndex) {
+  const width = Number(baseFrame?.width || 0);
+  const height = Number(baseFrame?.height || 0);
+  const source = messageRgbBytes(baseFrame);
+  if (!width || !height || !source) return null;
+  const output = new Uint8Array(width * height * 3);
+  const shift = frameIndex % Math.max(1, width);
+  const band = (frameIndex * 3) % Math.max(1, width + height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const srcX = (x + shift) % width;
+      const src = (y * width + srcX) * 3;
+      const dst = (y * width + x) * 3;
+      const highlight = Math.abs((x + y) - band) < 4 ? 34 : 0;
+      output[dst] = clamp((source[src] || 0) + highlight, 0, 255);
+      output[dst + 1] = clamp((source[src + 1] || 0) + Math.floor(highlight / 2), 0, 255);
+      output[dst + 2] = clamp(source[src + 2] || 0, 0, 255);
+    }
+  }
+  return {
+    dataUrl: rgbBytesToDataUrl(output, width, height),
+    message: {
+      width,
+      height,
+      encoding: 'rgb8',
+      is_bigendian: 0,
+      step: width * 3,
+      data: bytesToBase64(output),
+      dataEncoding: 'base64',
     },
   };
 }
@@ -1076,10 +1401,13 @@ function startRun() {
   if (state.autoTimer) return;
   state.autoTimer = setInterval(runGraph, 100);
   $('run-model').classList.add('active');
+  setExecutionStatus('running', 'Continuous run started');
+  startVideoInputs();
+  startEmbeddedVideoInputs();
   runGraph();
 }
 
-function stopRun() {
+function stopRun(message = null) {
   if (state.autoTimer) {
     clearInterval(state.autoTimer);
     state.autoTimer = null;
@@ -1088,7 +1416,9 @@ function stopRun() {
     clearTimeout(state.runStopTimer);
     state.runStopTimer = null;
   }
+  pauseVideoInputs();
   $('run-model').classList.remove('active');
+  setExecutionStatus('stopped', message || `Stopped after ${state.tickCount} ticks`);
 }
 
 function runForDuration() {
@@ -1099,6 +1429,7 @@ function runForDuration() {
 }
 
 function clearGraph() {
+  stopAllVideoInputs();
   state.nodes = [];
   state.links = [];
   state.selectedNode = null;
@@ -1116,6 +1447,8 @@ function selectNode(ev, id) {
 }
 
 function deleteNode(id) {
+  stopVideoInput(id);
+  delete state.embeddedVideoInputs[id];
   state.nodes = state.nodes.filter((node) => node.id !== id);
   state.links = state.links.filter((link) => link.fromNode !== id && link.toNode !== id);
   if (state.selectedNode === id) state.selectedNode = null;
@@ -1141,6 +1474,7 @@ function renderSelection() {
 }
 
 function projectConfig() {
+  normalizeSourceTopicNames();
   return {
     format: 'lwrclpy-web-node-editor-project',
     version: 1,
@@ -1159,22 +1493,27 @@ async function loadProject(event) {
   const file = event.target.files[0];
   event.target.value = '';
   if (!file) return;
+  stopAllVideoInputs();
   const imported = JSON.parse(await file.text());
   state.nodes = imported.nodes || [];
   state.links = (imported.links || []).map((link) => ({ id: link.id || `l${Date.now()}${Math.random()}`, ...link }));
   state.links = state.links.filter(isValidLink);
+  normalizeSourceTopicNames();
   state.view = imported.view || { x: 0, y: 0, scale: 1 };
   state.nextId = imported.nextId || Math.max(1, ...state.nodes.map((node) => Number(String(node.id).replace('n', '')) + 1));
   renderAll();
   scheduleRun();
 }
 
-function exportProjectPython() {
-  downloadText('lwrclpy_project.py', renderProjectPythonFile(projectPythonConfig()), 'text/x-python');
-}
-
-function exportProjectLaunch() {
-  downloadText('lwrclpy_project.launch.py', renderProjectLaunchFile(), 'text/x-python');
+function exportRos2Package() {
+  const config = projectRos2PackageConfig();
+  if (!config.nodes.length) {
+    alert('No custom ROS 2 nodes to export. Built-in browser tool nodes are not exported.');
+    return;
+  }
+  const files = renderRos2PackageFiles(config);
+  const zip = makeZip(files);
+  downloadBlob(`${config.packageName}.zip`, zip, 'application/zip');
 }
 
 function exportPythonNode(node) {
@@ -1206,6 +1545,7 @@ async function importPythonNode(event) {
 }
 
 function nodePythonConfig(node) {
+  normalizeSourceTopicNames();
   const portTopics = { inputs: {}, outputs: {} };
   state.links.forEach((link) => {
     const topic = normalizeTopic(link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort));
@@ -1232,6 +1572,459 @@ function projectPythonConfig() {
     skippedNodes: state.nodes.filter((node) => node.toolType).map((node) => ({ id: node.id, name: node.name, toolType: node.toolType })),
   };
 }
+
+  function projectRos2PackageConfig() {
+    const baseName = safePackageName(projectConfig().name || 'lwrclpy_exported_nodes');
+    const usedModules = new Set();
+    const nodes = state.nodes.filter((node) => !node.toolType).map((node) => {
+    const config = nodePythonConfig(node);
+    const moduleName = uniqueModuleName(safePythonIdentifier(node.name || node.id), usedModules);
+    return { ...config, moduleName, executableName: moduleName };
+    });
+    return {
+    format: 'lwrclpy-web-node-editor-ros2-package',
+    version: 1,
+    packageName: baseName,
+    nodes,
+    skippedNodes: state.nodes.filter((node) => node.toolType).map((node) => ({ id: node.id, name: node.name, toolType: node.toolType })),
+    dependencies: ros2PackageDependencies(nodes),
+    };
+  }
+
+  function renderRos2PackageFiles(config) {
+    const packageName = config.packageName;
+    const files = [];
+    files.push({ path: `${packageName}/package.xml`, content: renderRos2PackageXml(config) });
+    files.push({ path: `${packageName}/setup.py`, content: renderRos2SetupPy(config) });
+    files.push({ path: `${packageName}/setup.cfg`, content: renderRos2SetupCfg(config) });
+    files.push({ path: `${packageName}/resource/${packageName}`, content: '' });
+    files.push({ path: `${packageName}/${packageName}/__init__.py`, content: '' });
+    files.push({ path: `${packageName}/${packageName}/runtime.py`, content: renderRos2RuntimePy() });
+    files.push({ path: `${packageName}/launch/project.launch.py`, content: renderRos2LaunchPy(config) });
+    files.push({ path: `${packageName}/README.md`, content: renderRos2PackageReadme(config) });
+    const requirements = aggregateRequirements(config.nodes);
+    if (requirements) files.push({ path: `${packageName}/requirements.txt`, content: requirements });
+    config.nodes.forEach((nodeConfig) => {
+    files.push({ path: `${packageName}/${packageName}/${nodeConfig.moduleName}.py`, content: renderRos2NodePy(nodeConfig) });
+    });
+    return files.map((file) => ({
+      ...file,
+      content: typeof file.content === 'string' ? normalizeGeneratedFile(file.content) : file.content,
+    }));
+  }
+
+  function normalizeGeneratedFile(text) {
+    return String(text).replace(/\n {2}/g, '\n').trimEnd() + '\n';
+  }
+
+  function renderRos2PackageXml(config) {
+    const deps = config.dependencies.map((dep) => `  <exec_depend>${escapeXml(dep)}</exec_depend>`).join('\n');
+    return `<?xml version="1.0"?>
+  <package format="3">
+    <name>${escapeXml(config.packageName)}</name>
+    <version>0.0.0</version>
+    <description>ROS 2 package exported from lwrclpy Web Node Editor.</description>
+    <maintainer email="user@example.com">user</maintainer>
+    <license>TODO</license>
+
+    <buildtool_depend>ament_python</buildtool_depend>
+  ${deps}
+
+    <export>
+    <build_type>ament_python</build_type>
+    </export>
+  </package>
+  `;
+  }
+
+  function renderRos2SetupPy(config) {
+    const consoleScripts = config.nodes.map((node) => `            '${node.executableName} = ${config.packageName}.${node.moduleName}:main',`).join('\n');
+    return `from setuptools import find_packages, setup
+
+  package_name = '${config.packageName}'
+
+  setup(
+    name=package_name,
+    version='0.0.0',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+      ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+      ('share/' + package_name, ['package.xml']),
+      ('share/' + package_name + '/launch', ['launch/project.launch.py']),
+    ],
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='user',
+    maintainer_email='user@example.com',
+    description='ROS 2 package exported from lwrclpy Web Node Editor.',
+    license='TODO',
+    tests_require=['pytest'],
+    entry_points={
+      'console_scripts': [
+  ${consoleScripts}
+      ],
+    },
+  )
+  `;
+  }
+
+  function renderRos2SetupCfg(config) {
+    return `[develop]
+  script_dir=$base/lib/${config.packageName}
+  [install]
+  install_scripts=$base/lib/${config.packageName}
+  `;
+  }
+
+  function renderRos2LaunchPy(config) {
+    const nodes = config.nodes.map((node) => `        Node(
+        package='${config.packageName}',
+        executable='${node.executableName}',
+        name='${safeRosName(node.node.name || node.moduleName)}',
+        output='screen',
+      ),`).join('\n');
+    return `from launch import LaunchDescription
+  from launch_ros.actions import Node
+
+
+  def generate_launch_description():
+    return LaunchDescription([
+  ${nodes}
+    ])
+  `;
+  }
+
+  function renderRos2NodePy(config) {
+    const metadata = JSON.stringify(config, null, 2);
+    return `#!/usr/bin/env python3
+  import json
+
+  from .runtime import run_node
+
+
+  CONFIG = json.loads(${JSON.stringify(metadata)})
+
+
+  def main(args=None):
+    run_node(CONFIG, args=args)
+
+
+  if __name__ == '__main__':
+    main()
+  `;
+  }
+
+  function renderRos2RuntimePy() {
+    return `import importlib
+  import sys
+  import time
+
+  import rclpy
+  from rclpy.executors import MultiThreadedExecutor
+
+
+  def import_type_class(type_name):
+    package, kind, name = type_name.split('/')
+    module = importlib.import_module(f'{package}.{kind}')
+    return getattr(module, name)
+
+
+  def split_kind(type_name):
+    return type_name.split('/')[1]
+
+
+  class ExportedNode:
+    def __init__(self, config):
+      self.config = config
+      self.node_config = config['node']
+      self.port_topics = config.get('portTopics', {'inputs': {}, 'outputs': {}})
+      self.state = {}
+      self.last_inputs = {}
+      self.input_queues = {}
+      self.last_outputs = {}
+      self.next_timer_at = 0.0
+      self.publishers = {}
+      self.clients = {}
+      self.subscriptions = []
+      self.services = []
+      self._globals_cache = None
+      self.node = rclpy.create_node(self.node_config['name'])
+      self._setup_transport()
+
+    def _setup_transport(self):
+      for output in self.node_config.get('outputs', []):
+        type_cls = import_type_class(output['dataType'])
+        for topic in self.port_topics.get('outputs', {}).get(output['id'], []):
+          if split_kind(output['dataType']) == 'msg':
+            self.publishers.setdefault(output['id'], []).append(self.node.create_publisher(type_cls, topic, 10))
+          else:
+            self.clients.setdefault(output['id'], []).append(self.node.create_client(type_cls, topic))
+      for input_port in self.node_config.get('inputs', []):
+        type_cls = import_type_class(input_port['dataType'])
+        for topic in self.port_topics.get('inputs', {}).get(input_port['id'], []):
+          if split_kind(input_port['dataType']) == 'msg':
+            self.subscriptions.append(self.node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port), 10))
+          else:
+            self.services.append(self.node.create_service(type_cls, topic, self._make_service_callback(input_port)))
+
+    def publish(self, output_id, value):
+      self.last_outputs[output_id] = value
+      output = self._output_port(output_id)
+      if output is None:
+        return
+      if output_id in self.publishers:
+        msg = self._coerce_message(output['dataType'], value)
+        for publisher in self.publishers[output_id]:
+          publisher.publish(msg)
+      if output_id in self.clients:
+        request = self._coerce_service_request(output['dataType'], value)
+        for client in self.clients[output_id]:
+          client.call_async(request)
+
+    def latest(self, input_id, default=None):
+      return self.last_inputs.get(input_id, default)
+
+    def take(self, input_id, default=None):
+      queue = self.input_queues.get(input_id) or []
+      if not queue:
+        return default
+      return queue.pop(0)
+
+    def has_input(self, input_id):
+      return bool(self.input_queues.get(input_id))
+
+    def log(self, *values):
+      print(f'[{self.node_config["name"]}]', *values)
+
+    def spin_tick(self):
+      outputs = {}
+      inputs = dict(self.last_inputs)
+      self._execute_timer_if_due(inputs, outputs)
+      self._execute_loop(inputs, outputs)
+      self._flush_outputs(outputs)
+
+    def _make_subscription_callback(self, input_port):
+      def callback(msg):
+        self._store_input(input_port['id'], msg)
+        if input_port.get('receiveMode', 'callback') != 'callback':
+          return
+        outputs = {}
+        self._execute_callback(input_port, msg, None, outputs)
+        self._flush_outputs(outputs)
+      return callback
+
+    def _make_service_callback(self, input_port):
+      def callback(request, response):
+        self._store_input(input_port['id'], request)
+        outputs = {}
+        if input_port.get('receiveMode', 'callback') == 'callback':
+          self._execute_callback(input_port, request, response, outputs)
+        self._flush_outputs(outputs)
+        return response
+      return callback
+
+    def _execute_callback(self, input_port, msg, response, outputs):
+      code = input_port.get('callbackCode', '').strip()
+      if not code:
+        return
+      local = self._locals({'input_id': input_port['id'], 'msg': msg, 'request': msg, 'response': response, 'outputs': outputs})
+      exec(code, self._globals(), local)
+
+    def _execute_loop(self, inputs, outputs):
+      code = self.node_config.get('loopCode', '').strip()
+      if not code:
+        return
+      local = self._locals({'inputs': inputs, 'outputs': outputs, 'now': time.time(), 'latest': self.latest, 'take': self.take, 'has_input': self.has_input})
+      exec(code, self._globals(), local)
+
+    def _execute_timer_if_due(self, inputs, outputs):
+      if not self.node_config.get('timerEnabled', False):
+        return
+      code = self.node_config.get('timerCode', '').strip()
+      if not code:
+        return
+      now = time.time()
+      period = max(0.001, float(self.node_config.get('timerPeriodSec', 1.0) or 1.0))
+      if self.next_timer_at <= 0:
+        self.next_timer_at = now
+      if now < self.next_timer_at:
+        return
+      self.next_timer_at = now + period
+      local = self._locals({'inputs': inputs, 'outputs': outputs, 'now': now, 'period': period, 'latest': self.latest, 'take': self.take, 'has_input': self.has_input})
+      exec(code, self._globals(), local)
+
+    def _flush_outputs(self, outputs):
+      for key, value in outputs.items():
+        self.last_outputs[key] = value
+        self.publish(key, value)
+
+    def _globals(self):
+      if self._globals_cache is not None:
+        return self._globals_cache
+      globals_dict = {
+        '__builtins__': {
+          '__import__': __import__,
+          'abs': abs,
+          'bool': bool,
+          'bytes': bytes,
+          'dict': dict,
+          'enumerate': enumerate,
+          'float': float,
+          'getattr': getattr,
+          'hasattr': hasattr,
+          'int': int,
+          'len': len,
+          'list': list,
+          'max': max,
+          'min': min,
+          'print': self.log,
+          'range': range,
+          'round': round,
+          'setattr': setattr,
+          'str': str,
+          'sum': sum,
+        }
+      }
+      import_code = self.node_config.get('importCode', '').strip()
+      if import_code:
+        exec(import_code, globals_dict, globals_dict)
+      self._globals_cache = globals_dict
+      return globals_dict
+
+    def _locals(self, extra):
+      return {'node': self.node, 'params': self.node_config.get('params', {}), 'state': self.state, 'publish': self.publish, 'log': self.log, **extra}
+
+    def _store_input(self, input_id, value):
+      self.last_inputs[input_id] = value
+      queue = self.input_queues.setdefault(input_id, [])
+      queue.append(value)
+      del queue[:-100]
+
+    def _output_port(self, output_id):
+      for output in self.node_config.get('outputs', []):
+        if output['id'] == output_id:
+          return output
+      return None
+
+    def _coerce_message(self, data_type, value):
+      msg_cls = import_type_class(data_type)
+      if hasattr(value, '_fields_and_field_types'):
+        return value
+      msg = msg_cls()
+      if hasattr(msg, 'data'):
+        msg.data = value
+      elif isinstance(value, dict):
+        for key, item in value.items():
+          if hasattr(msg, key):
+            setattr(msg, key, item)
+      return msg
+
+    def _coerce_service_request(self, data_type, value):
+      srv_cls = import_type_class(data_type)
+      request = srv_cls.Request()
+      if hasattr(value, '_fields_and_field_types'):
+        return value
+      if hasattr(request, 'data'):
+        request.data = value
+      elif isinstance(value, dict):
+        for key, item in value.items():
+          if hasattr(request, key):
+            setattr(request, key, item)
+      return request
+
+
+  def run_node(config, args=None):
+    rclpy.init(args=args)
+    exported = ExportedNode(config)
+    executor = MultiThreadedExecutor()
+    executor.add_node(exported.node)
+    try:
+      while rclpy.ok():
+        executor.spin_once(timeout_sec=0.05)
+        exported.spin_tick()
+    finally:
+      executor.remove_node(exported.node)
+      exported.node.destroy_node()
+      rclpy.shutdown()
+  `;
+  }
+
+  function renderRos2PackageReadme(config) {
+    const nodes = config.nodes.map((node) => `- \`${node.executableName}\`: \`${node.node.name}\``).join('\n');
+    const skipped = config.skippedNodes.length
+    ? `\n\nThe following browser-only nodes were not exported as ROS 2 executables:\n${config.skippedNodes.map((node) => `- ${node.name} (${node.toolType})`).join('\n')}\n`
+    : '';
+    return `# ${config.packageName}
+
+  ROS 2 Python package exported from lwrclpy Web Node Editor.
+
+  ## Nodes
+
+  ${nodes}
+  ${skipped}
+  ## Build and run
+
+  Copy this package into a ROS 2 workspace ` + '`src`' + ` directory, then run:
+
+  ` + '```bash' + `
+  colcon build --packages-select ${config.packageName}
+  source install/setup.bash
+  ros2 launch ${config.packageName} project.launch.py
+  ` + '```' + `
+
+  If node code imports extra Python packages, install the generated ` + '`requirements.txt`' + ` in the same environment before launching.
+  `;
+  }
+
+  function ros2PackageDependencies(nodes) {
+    const deps = new Set(['rclpy', 'launch', 'launch_ros']);
+    nodes.forEach((item) => {
+    const node = item.node || {};
+    [...(node.inputs || []), ...(node.outputs || [])].forEach((port) => {
+      const packageName = String(port.dataType || '').split('/')[0];
+      if (packageName) deps.add(packageName);
+    });
+    });
+    return [...deps].sort();
+  }
+
+  function aggregateRequirements(nodes) {
+    const lines = new Set();
+    nodes.forEach((item) => {
+    String(item.node?.requirements || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean).forEach((line) => lines.add(line));
+    });
+    return [...lines].join('\n') + (lines.size ? '\n' : '');
+  }
+
+  function safePackageName(value) {
+    let name = String(value || 'lwrclpy_exported_nodes').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+    if (!name || /^[0-9]/.test(name)) name = `ros2_${name || 'exported_nodes'}`;
+    return name;
+  }
+
+  function safePythonIdentifier(value) {
+    let name = String(value || 'node').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+    if (!name || /^[0-9]/.test(name)) name = `node_${name || 'exported'}`;
+    return name;
+  }
+
+  function safeRosName(value) {
+    return safePythonIdentifier(value).replace(/_+/g, '_');
+  }
+
+  function uniqueModuleName(base, used) {
+    let name = base || 'node';
+    let index = 2;
+    while (used.has(name)) {
+    name = `${base}_${index++}`;
+    }
+    used.add(name);
+    return name;
+  }
+
+  function escapeXml(value) {
+    return String(value).replace(/[<>&"']/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[ch]));
+  }
 
 function renderProjectPythonFile(config) {
   const metadata = JSON.stringify(config, null, 2);
@@ -1851,11 +2644,85 @@ function safeFileName(value) {
 
 function downloadText(filename, text, type) {
   const blob = new Blob([text], { type });
+  downloadBlob(filename, blob, type);
+}
+
+function downloadBlob(filename, blob, type) {
+  const payload = blob instanceof Blob ? blob : new Blob([blob], { type });
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
+  a.href = URL.createObjectURL(payload);
   a.download = filename;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+function makeZip(files) {
+  const encoder = new TextEncoder();
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  const now = new Date();
+  const dosTime = ((now.getHours() & 31) << 11) | ((now.getMinutes() & 63) << 5) | ((Math.floor(now.getSeconds() / 2)) & 31);
+  const dosDate = (((now.getFullYear() - 1980) & 127) << 9) | (((now.getMonth() + 1) & 15) << 5) | (now.getDate() & 31);
+  files.forEach((file) => {
+    const nameBytes = encoder.encode(file.path);
+    const data = typeof file.content === 'string' ? encoder.encode(file.content) : file.content;
+    const crc = crc32(data);
+    const localHeader = concatBytes([
+      u32(0x04034b50), u16(20), u16(0), u16(0), u16(dosTime), u16(dosDate),
+      u32(crc), u32(data.length), u32(data.length), u16(nameBytes.length), u16(0), nameBytes,
+    ]);
+    localParts.push(localHeader, data);
+    centralParts.push(concatBytes([
+      u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(dosTime), u16(dosDate),
+      u32(crc), u32(data.length), u32(data.length), u16(nameBytes.length), u16(0), u16(0),
+      u16(0), u16(0), u32(0), u32(offset), nameBytes,
+    ]));
+    offset += localHeader.length + data.length;
+  });
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const end = concatBytes([
+    u32(0x06054b50), u16(0), u16(0), u16(files.length), u16(files.length), u32(centralSize), u32(offset), u16(0),
+  ]);
+  return new Blob([...localParts, ...centralParts, end], { type: 'application/zip' });
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function u16(value) {
+  const bytes = new Uint8Array(2);
+  bytes[0] = value & 255;
+  bytes[1] = (value >>> 8) & 255;
+  return bytes;
+}
+
+function u32(value) {
+  const bytes = new Uint8Array(4);
+  bytes[0] = value & 255;
+  bytes[1] = (value >>> 8) & 255;
+  bytes[2] = (value >>> 16) & 255;
+  bytes[3] = (value >>> 24) & 255;
+  return bytes;
+}
+
+function concatBytes(parts) {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  parts.forEach((part) => {
+    output.set(part, offset);
+    offset += part.length;
+  });
+  return output;
 }
 
 function nodeFor(id) {
@@ -1883,17 +2750,44 @@ function canConnect(fromNodeId, fromPortId, toNodeId, toPortId) {
 
 function defaultLinkTopic(fromNode, fromPort, toNode, toPort) {
   const src = nodeFor(fromNode)?.outputs.find((port) => port.id === fromPort);
-  const dst = nodeFor(toNode)?.inputs.find((port) => port.id === toPort);
-  return `/${src?.name || fromPort}_to_${dst?.name || toPort}`;
+  return `/${src?.name || fromPort || 'topic'}`;
+}
+
+function sourceTopicKey(fromNode, fromPort) {
+  return `${fromNode || ''}:${fromPort || ''}`;
+}
+
+function sourceTopicName(fromNode, fromPort) {
+  const link = state.links.find((item) => item.fromNode === fromNode && item.fromPort === fromPort && item.name);
+  return link?.name || '';
+}
+
+function syncSourceTopicNames(fromNode, fromPort, name) {
+  const fallback = defaultLinkTopic(fromNode, fromPort, '', '');
+  const topic = name || fallback;
+  state.links.forEach((link) => {
+    if (link.fromNode === fromNode && link.fromPort === fromPort) link.name = topic;
+  });
+}
+
+function normalizeSourceTopicNames() {
+  const topics = new Map();
+  state.links.forEach((link) => {
+    const key = sourceTopicKey(link.fromNode, link.fromPort);
+    if (!topics.has(key)) topics.set(key, link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort));
+  });
+  state.links.forEach((link) => {
+    link.name = topics.get(sourceTopicKey(link.fromNode, link.fromPort)) || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort);
+  });
 }
 
 function editLinkName(linkId) {
   const link = state.links.find((item) => item.id === linkId);
   if (!link) return;
   const fallback = defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort);
-  const next = prompt('Topic name for this edge', link.name || fallback);
+  const next = prompt('Topic name for this output topic', link.name || fallback);
   if (next === null) return;
-  link.name = next.trim() || fallback;
+  syncSourceTopicNames(link.fromNode, link.fromPort, next.trim() || fallback);
   renderLinks();
   renderInspector();
   scheduleRun();

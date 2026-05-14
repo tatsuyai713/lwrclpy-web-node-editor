@@ -4,3 +4,5 @@
 __pycache__/
 *.pyc
 .test_image.jpg
+.node_workers/
+.node_envs/

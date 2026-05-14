@@ -14,6 +14,11 @@
     </div>
     <nav class="model-menu">
       <section class="menu-group">
+        <span>File</span>
+        <button id="save-project">Save</button>
+        <label class="file-button">Load<input id="load-project" type="file" accept="application/json"></label>
+      </section>
+      <section class="menu-group">
         <span>Simulation</span>
         <button id="run-model">Run</button>
         <button id="stop-model">Stop</button>
@@ -21,14 +26,8 @@
         <button id="run-duration-model">Run For</button>
       </section>
       <section class="menu-group">
-        <span>Project</span>
-        <button id="save-project">Save</button>
-        <label class="file-button">Load<input id="load-project" type="file" accept="application/json"></label>
-      </section>
-      <section class="menu-group">
-        <span>Code Generation</span>
-        <button id="export-project-python">Export lwrclpy Code</button>
-        <button id="export-project-launch">Export ROS2 Launch</button>
+        <span>Export</span>
+        <button id="export-ros2-package">Export ROS2 Package</button>
       </section>
     </nav>
   </header>
@@ -51,6 +50,11 @@
         <div id="nodes"></div>
       </div>
       <div id="hud"><span id="zoom-label">100%</span><span id="node-count">0 nodes / 0 links</span></div>
+      <div id="status-bar" class="status-bar">
+        <span id="execution-state" class="status-pill idle">Idle</span>
+        <span id="tick-status">Last tick: none</span>
+        <span id="runtime-detail">lwrclpy checking...</span>
+      </div>
     </section>
 
     <aside id="inspector">

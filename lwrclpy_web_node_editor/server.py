@@ -24,6 +24,8 @@ class Handler(BaseHTTPRequestHandler):
     runtime = GraphRuntime()
 
     def log_message(self, fmt: str, *args) -> None:
+        if self.path == "/api/run" and args and str(args[1]) == "200":
+            return
         print("[lwrclpy_web_node_editor]", fmt % args)
 
     def do_GET(self):
@@ -46,16 +48,21 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             result = self.runtime.run(payload)
             self._send_json(result)
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
 
     def _send_json(self, payload, status=200):
         data = json.dumps(payload, ensure_ascii=False, default=_json_default).encode("utf-8")
-        self.send_response(status)
-        self.send_header("content-type", "application/json; charset=utf-8")
-        self.send_header("content-length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("content-type", "application/json; charset=utf-8")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def _send_static(self, path: str):
         if path == "/":

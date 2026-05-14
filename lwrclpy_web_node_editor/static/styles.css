@@ -171,6 +171,45 @@ body.panning, body.panning * {
   background: rgba(20, 23, 26, .86);
   color: var(--muted);
 }
+.status-bar {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(680px, calc(100% - 24px));
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid #3b424b;
+  border-radius: 6px;
+  background: rgba(20, 23, 26, .92);
+  color: var(--muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+.status-bar span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.status-pill {
+  flex: 0 0 auto;
+  min-width: 76px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  text-align: center;
+  color: #101316;
+  font-weight: 700;
+}
+.status-pill.idle { background: var(--muted); }
+.status-pill.tick { background: var(--warn); }
+.status-pill.running { background: var(--accent); }
+.status-pill.stopped { background: #7f8ea3; }
+.status-pill.error { background: var(--danger); color: #fff; }
+#tick-status { flex: 0 0 auto; }
+#runtime-detail { min-width: 0; }
 .node {
   position: absolute;
   width: 320px;
@@ -244,6 +283,34 @@ body.panning, body.panning * {
   width: 100%;
   justify-content: center;
 }
+.tool-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.tool-check input { margin: 0; }
+.tool-field {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.tool-field select,
+.tool-field input {
+  min-width: 0;
+  height: 28px;
+  border: 1px solid #3b424b;
+  border-radius: 6px;
+  background: #14171a;
+  color: var(--text);
+  padding: 0 6px;
+}
 .node-view {
   margin: 0 8px 8px;
   border: 1px solid #30363d;
@@ -251,8 +318,16 @@ body.panning, body.panning * {
   background: #101316;
   overflow: hidden;
 }
+.node-view-video {
+  height: 248px;
+}
 .image-view {
   margin: 0;
+}
+.node-view-video .image-view {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 28px;
+  height: 100%;
 }
 .image-view img {
   display: block;
@@ -261,6 +336,10 @@ body.panning, body.panning * {
   object-fit: contain;
   background: #050607;
 }
+.node-view-video .image-view img {
+  height: 100%;
+  max-height: none;
+}
 .image-view figcaption,
 .plot-view span,
 .view-empty {
@@ -268,6 +347,16 @@ body.panning, body.panning * {
   padding: 6px 8px;
   color: var(--muted);
   font-size: 11px;
+}
+.node-view-video .image-view figcaption {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.node-view-video .view-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
 }
 .plot-view svg {
   display: block;

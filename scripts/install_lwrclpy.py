@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import platform
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -33,7 +34,12 @@ def main() -> int:
         return 1
     asset = prefer_latest(candidates)
     print(f"Installing {asset['name']}")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", asset["browser_download_url"]])
+    uv = shutil.which("uv")
+    if uv:
+        subprocess.check_call([uv, "pip", "install", "--python", sys.executable, asset["browser_download_url"]])
+    else:
+        subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", asset["browser_download_url"]])
     return 0
 
 

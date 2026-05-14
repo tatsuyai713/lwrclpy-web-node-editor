@@ -1,92 +1,246 @@
 # lwrclpy Web Node Editor
 
-A ComfyUI-style web GUI for creating, connecting, editing, exporting, and importing user-defined `lwrclpy` nodes. It runs in a Python venv with `lwrclpy`; a full ROS 2 installation is not required.
+`lwrclpy Web Node Editor` は、ブラウザ上で画像処理・動画処理・数値処理のノードグラフを作り、`lwrclpy` のAPIに近い書き方で各ノードのPythonコードを編集・実行・保存・エクスポートできるWebアプリです。
 
-## Run
+ROS 2本体のインストールは不要です。`lwrclpy` が提供する `rclpy` 互換APIを使い、ノードコードは `msg` を受け取って `publish(...)` で出力するcallbackスタイルで書けます。
+
+## できること
+
+- ブラウザでノードを作成し、入力・処理・表示・グラフ化・topic出力を接続できます。
+- `Image File Input` で画像を読み込み、`sensor_msgs/msg/Image` として処理できます。
+- `Video File Input` で動画を読み込み、Run中に現在フレームを `sensor_msgs/msg/Image` として流せます。
+- `Image Viewer` で画像を表示できます。
+- `Graph Viewer` で `std_msgs/msg/Float32` などの数値や、メッセージ内の数値フィールドをプロットできます。
+- `Topic Input` / `Topic Output` で、グラフの入口・出口をlwrclpy topicに接続できます。
+- カスタムノードごとに `requirements.txt` を持たせ、実行前に `.node_envs/<node-id>` のvenvへ依存をセットアップできます。
+- プロジェクト全体をJSONとしてSave/Loadできます。
+- カスタムノードを個別のPythonファイルとしてExport/Importできます。
+- カスタムノード群をROS 2 Python package形式のzipとしてExportできます。中には各ノードのPythonファイルとlaunchファイルが含まれます。
+
+## 実行方法
+
+このREADMEがある `lwrclpy_web_node_editor` ディレクトリで実行します。
 
 ```bash
-cd lwrclpy_web_node_editor
 python3.13 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python scripts/install_lwrclpy.py
 .venv/bin/python main.py --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765` in a browser.
+起動すると次のように表示されます。
 
-If `Port 8765 is already in use` is shown, stop the existing server or run on another port.
+```text
+lwrclpy Web Node Editor: http://127.0.0.1:8765
+```
+
+ブラウザで `http://127.0.0.1:8765` を開いてください。
+
+すでに8765番ポートを使っているサーバーがある場合は、止めるか別ポートで起動します。
 
 ```bash
-.venv/bin/python main.py --port 8766
+.venv/bin/python main.py --host 127.0.0.1 --port 8766
 ```
 
-## Workflow
+## 最初に試す手順
 
-- Click `Create Node` to create a custom lwrclpy node with configurable input and output ports.
-- Enable `Timer Callback` when creating or editing a custom node to run periodic code at the configured interval.
-- Each custom node has its own venv under `.node_envs/<node-id>`.
-- Write node-specific Python imports in `Import Code`, for example `import cv2` or `import numpy as np`.
-- Write node-specific dependencies in `requirements.txt`; `uv` creates the node venv and installs those dependencies before execution starts.
-- Use only message/service types discovered from the installed `lwrclpy` message packages, such as `sensor_msgs/msg/Image`.
-- No internal fake data types are used.
-- Edge names are the ROS-compatible topic/service names.
-- Ports can connect only when their data type matches.
-- `Topic Input` is a terminal entrance node: it has no data type settings, no code editor, and no Python export. Its output port subscribes to the edge topic using the data type of the connected node.
-- `Topic Output` is a terminal exit node: it has no data type settings, no code editor, and no Python export. Its input port publishes to the edge topic using the data type of the connected node.
-- `Image File Input` loads an image in the browser and outputs it as `sensor_msgs/msg/Image`.
-- `Video File Input` loads a video in the browser and outputs the current frame as `sensor_msgs/msg/Image`.
-- `Image Viewer` displays a connected `sensor_msgs/msg/Image`.
-- `Image File Save` saves a connected image as a PPM/PGM file under `saved_images/`.
-- `Graph Viewer` accepts any connected data type and plots the numeric value selected by its field path, such as `data`, `pose.position.x`, or `ranges.0`.
-- For image or video data, use real lwrclpy message types such as `sensor_msgs/msg/Image`.
-- Custom nodes can still use callback code and main loop code when processing is needed.
-- `Save` / `Load` saves and restores the full project as JSON.
-- `Run` starts continuous graph execution, `Stop` stops it, and `Run For` runs for the specified duration in seconds.
-- `Export lwrclpy Code` exports the custom-node part of the project as a runnable Python file.
-- `Export ROS2 Launch` exports a ROS 2-compatible launch Python file that starts the exported project Python.
+1. サーバーを起動します。
+2. ブラウザで `http://127.0.0.1:8765` を開きます。
+3. `Load` を押して `samples/02_video_motion_topic_graph.json` を選びます。
+4. `Run` を押します。
+5. Video入力、処理後画像、motion scoreのグラフが動くことを確認します。
+6. 止めるときは `Stop` を押します。
 
-## Code Scopes
+`Run For` を使うと、指定秒数だけ実行して自動停止できます。
 
-Subscribe/service callback code:
+## サンプルプロジェクト
 
-```python
-# input_id: input port ID that received the message/request
-# msg/request: lwrclpy/rclpy-compatible message or service request
-# response: service response object when the input type is srv, otherwise None
-# state: persistent per-node dictionary
-# params: node parameter dictionary
-# outputs: dictionary for output values
-# publish(output_id, value): publish through an output port
-# log(...): write to the node log
-outputs["out1"] = msg
+`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
+
+- `01_image_edge_topic_graph.json`: 画像入力、グレースケール化、エッジ抽出、画像表示、エッジ強度グラフ、topic出力。
+- `02_video_motion_topic_graph.json`: 動画フレーム入力、フレーム差分によるmotion mask、overlay表示、motion scoreグラフ、topic出力。
+- `03_image_color_balance_topic_graph.json`: 画像入力、コントラスト補正、赤バランス処理、画像表示、red indexグラフ、topic出力。
+- `04_video_low_light_colormap_topic_graph.json`: 暗い動画フレーム入力、ガンマ補正、疑似カラーマップ表示、輝度グラフ、topic出力。
+- `05_image_crop_mosaic_topic_graph.json`: 画像入力、中央クロップ、モザイク処理、画像表示、平均輝度グラフ、topic出力。
+
+サンプルを再生成する場合は次を実行します。
+
+```bash
+.venv/bin/python samples/generate_sample_projects.py
 ```
 
-Main loop code:
+## Webプレビューの実行モデル
+
+Webプレビューはブラウザ操作に対してできるだけ速く動くことを優先しています。
+
+- グラフ内部の接続は、高速な直接データ受け渡しで実行されます。
+- カスタムノードのコードは `lwrclpy` のcallbackに近いスコープで実行されます。
+- `Topic Input` と `Topic Output` は、グラフ外部との境界としてlwrclpy topicを使います。
+- 画像・動画フレームはJSON往復を軽くするため、ブラウザからbase64形式で送られます。
+
+つまり、Webプレビューでは低遅延に動かしながら、ノードに書く処理コードはエクスポートしやすいlwrclpy APIスタイルに寄せています。
+
+## ノードの作り方
+
+`Create Node` でカスタムノードを作成できます。
+
+主な設定項目は次の通りです。
+
+- `Inputs`: 入力ポートです。型は `sensor_msgs/msg/Image` や `std_msgs/msg/Float32` など、インストール済みlwrclpyメッセージから選びます。
+- `Outputs`: 出力ポートです。
+- `Callback Code`: 入力を受け取ったときに実行するコードです。通常の画像処理・動画処理はここに書きます。
+- `Timer Callback`: 一定周期で実行したいコードです。
+- `Import Code`: `import cv2` や `import numpy as np` など、ノード専用のimportを書きます。
+- `requirements.txt`: ノード専用venvに入れる依存パッケージを書きます。
+
+ポート同士は型が一致すると接続できます。1つの出力ポートから複数のノードへ接続した場合、その出力から出るtopic名は同じ名前に同期されます。
+
+## Callback Codeの書き方
+
+入力ポートをcallback modeにすると、その入力に値が届いたときにCallback Codeが実行されます。
+
+Callback Codeで使える主な変数は次の通りです。
+
+- `node`: lwrclpy互換のノードオブジェクトです。`node.get_logger().info(...)` が使えます。
+- `input_id`: どの入力ポートに届いたかを表すIDです。
+- `msg`: 届いたメッセージです。
+- `request`: service入力の場合のrequestです。message入力では `msg` と同じ値です。
+- `response`: service入力の場合のresponseです。
+- `state`: ノードごとに保持される辞書です。前フレームや累積値を保存できます。
+- `params`: ノードのパラメータ辞書です。
+- `publish(output_id, value)`: 出力ポートへ値を出します。
+- `log(...)`: ノードログへ文字列を出します。
+
+例: `std_msgs/msg/String` を受け取って別ポートへ流す場合。
 
 ```python
-# inputs: values received from connected edges or lwrclpy subscriptions
-# outputs: dictionary for output values
-# state: persistent per-node dictionary
-# params: node parameter dictionary
-# now: time.time()
-# latest(input_id): get the latest received value
-# take(input_id): pop one item from the input queue
-# has_input(input_id): return whether queued input exists
-# publish(output_id, value): publish through an output port
-# log(...): write to the node log
-while has_input("in1"):
-    outputs["out1"] = take("in1")
+node.get_logger().info(f"received {input_id}")
+publish("out1", msg)
 ```
 
-Timer callback code:
+例: `sensor_msgs/msg/Image` 風の辞書を受け取り、RGBをグレースケール化して出力する場合。
 
 ```python
-# Runs when the configured timer period elapses during Run / Run For ticks
-# inputs/outputs/state/params are the same as the main loop scope
-# period: configured timer period in seconds
+img = msg
+data = img.get("data") or []
+w = int(img.get("width") or 0)
+h = int(img.get("height") or 0)
+out = []
+
+for i in range(0, len(data), 3):
+    y = int(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114)
+    out.extend([y, y, y])
+
+publish("gray", {
+    "width": w,
+    "height": h,
+    "encoding": "rgb8",
+    "is_bigendian": 0,
+    "step": w * 3,
+    "data": out,
+})
+```
+
+複数入力を扱う場合は `state` に入力ごとの最新値を保存すると書きやすくなります。
+
+```python
+state[input_id] = msg
+frame = state.get("frame")
+mask = state.get("mask")
+
+if frame and mask:
+    publish("out1", frame)
+```
+
+## Timer CallbackとMain Loop
+
+Timer Callbackは、Run中に設定周期へ到達したときに実行されます。
+
+```python
 state["count"] = state.get("count", 0) + 1
-outputs["out1"] = str(state["count"])
+publish("out1", str(state["count"]))
 ```
 
-## lwrclpy Integration
+Main Loopは各tickで実行される任意処理です。データ入力に反応する処理はCallback Codeを使う方が、lwrclpyへエクスポートしやすくなります。
 
-`scripts/install_lwrclpy.py` installs the matching `lwrclpy` wheel for the current OS and Python version from GitHub Releases. The app uses the `rclpy`-compatible API provided by `lwrclpy` and subscribes/publishes using the topic/service names stored on graph edges.
+```python
+if state.get("enabled", True):
+    node.get_logger().info("tick")
+```
+
+## 画像・動画ノード
+
+`Image File Input` はブラウザで選んだ画像を `sensor_msgs/msg/Image` として出力します。
+
+- `One Shot`: 同じ画像を数tickだけ出力します。
+- `Rate`: 指定Hzで画像を繰り返し出力します。
+
+`Video File Input` はブラウザで選んだ動画をHTML videoとして再生し、Run中に現在フレームを出力します。サンプルJSONの動画入力は実動画ファイルを持たないため、埋め込みフレームから簡易的な動画フレームを生成します。
+
+`Image File Save` は接続された画像を `saved_images/` にBMPとして保存します。
+
+## Topic Input / Topic Output
+
+`Topic Input` と `Topic Output` は、Webグラフの外側とlwrclpy topicで接続するための境界ノードです。
+
+- `Topic Input`: 接続先の入力型に合わせてtopicをsubscribeし、グラフへ値を流します。
+- `Topic Output`: 入力された値を、接続元の型に合わせてtopicへpublishします。
+- topic名はエッジ名として表示・編集されます。
+- 同じ出力ポートから出る複数エッジは、同じtopic名に同期されます。
+
+## Export / Import
+
+`Export Python Node` は、選択したカスタムノードを単体のPythonファイルとして保存します。後から `Import Python Node` で読み戻せます。
+
+`Export ROS2 Package` は、プロジェクト内のカスタムノードをノードごとのPythonファイルに分け、Python package形式のzipとして出力します。zipには次のファイルが含まれます。
+
+- `package.xml`
+- `setup.py`
+- `setup.cfg`
+- `<package>/<node>.py`
+- `<package>/runtime.py`
+- `launch/project.launch.py`
+- `requirements.txt` が必要な場合は同梱
+
+ブラウザ専用の組み込みツールノード、たとえば `Image File Input` や `Image Viewer` はエクスポート対象外です。エクスポートされるのは、ユーザーが作成したカスタムノードです。
+
+## 依存関係とvenv
+
+アプリ本体は `.venv` で動きます。カスタムノードは、ノードごとに `.node_envs/<node-id>` のvenvを持ちます。
+
+ノードの `requirements.txt` に依存を書くと、実行前に `uv` がそのノード用venvを作成し、必要なパッケージとlwrclpyをインストールします。Webプレビューでは速度を優先するため、ノードコードはサーバープロセス内で実行されますが、ノードごとのvenvに入ったパッケージをimportできるようにしています。
+
+## トラブルシュート
+
+### ポートが使用中と表示される
+
+別のサーバーが残っている可能性があります。別ポートで起動するか、古いプロセスを止めてください。
+
+```bash
+.venv/bin/python main.py --host 127.0.0.1 --port 8766
+```
+
+### 動画が動かない
+
+- `Run` を押して連続実行にしてください。1 tickだけでは動画は進みにくいです。
+- ブラウザで動画ファイルを読み込んだ場合は、`Video File Input` ノードのプレビューが `playing` になっているか確認してください。
+- サンプル動画は `samples/02_video_motion_topic_graph.json` または `samples/04_video_low_light_colormap_topic_graph.json` を読み込み、`Run` で動作確認できます。
+
+### ノードの処理結果が出ない
+
+- 入力ポートの型と出力ポートの型が一致しているか確認してください。
+- Callback Codeでは `outputs["out1"] = ...` ではなく `publish("out1", value)` を使ってください。
+- 画像処理ノードでは出力辞書に `width`, `height`, `encoding`, `step`, `data` が入っているか確認してください。
+
+### 依存パッケージのimportに失敗する
+
+カスタムノードの `requirements.txt` に依存を書き、Runしてください。`.node_envs/<node-id>` が作られ、依存がインストールされます。
+
+## 関連ファイル
+
+- `main.py`: Webサーバーの起動入口。
+- `lwrclpy_web_node_editor/server.py`: HTTP APIと静的ファイル配信。
+- `lwrclpy_web_node_editor/graph.py`: グラフ実行、画像変換、lwrclpy topic連携。
+- `lwrclpy_web_node_editor/static/app.js`: ブラウザUI。
+- `samples/generate_sample_projects.py`: サンプルJSON生成スクリプト。
+- `scripts/install_lwrclpy.py`: 現在のOS/Pythonに合うlwrclpy wheelをインストールするスクリプト。
