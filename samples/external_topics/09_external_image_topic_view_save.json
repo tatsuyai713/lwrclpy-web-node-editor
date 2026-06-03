@@ -1,0 +1,85 @@
+{
+  "format": "lwrclpy-web-node-editor-project",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "topic_input",
+      "x": -300,
+      "y": -110,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out1",
+          "name": "topic",
+          "dataType": "sensor_msgs/msg/Image"
+        }
+      ],
+      "params": {},
+      "loopCode": "",
+      "toolType": "topic_input"
+    },
+    {
+      "id": "n2",
+      "name": "image_view",
+      "x": 80,
+      "y": -150,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "image",
+          "dataType": "sensor_msgs/msg/Image",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {},
+      "loopCode": "",
+      "toolType": "image_view"
+    },
+    {
+      "id": "n3",
+      "name": "image_file_save",
+      "x": 80,
+      "y": 110,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "image",
+          "dataType": "sensor_msgs/msg/Image",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {},
+      "loopCode": "",
+      "toolType": "image_file_save"
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "fromNode": "n1",
+      "fromPort": "out1",
+      "toNode": "n2",
+      "toPort": "in1",
+      "name": "/sample9/external_image"
+    },
+    {
+      "id": "l2",
+      "fromNode": "n1",
+      "fromPort": "out1",
+      "toNode": "n3",
+      "toPort": "in1",
+      "name": "/sample9/external_image"
+    }
+  ],
+  "view": {
+    "x": 70,
+    "y": 90,
+    "scale": 0.8
+  },
+  "nextId": 4
+}

@@ -46,22 +46,31 @@ lwrclpy Web Node Editor: http://127.0.0.1:8765
 
 1. サーバーを起動します。
 2. ブラウザで `http://127.0.0.1:8765` を開きます。
-3. `Load` を押して `samples/02_video_motion_topic_graph.json` を選びます。
+3. `Load` を押して `samples/image_video/02_video_motion_topic_graph.json` を選びます。
 4. `Run` を押します。
 5. Video入力、処理後画像、motion scoreのグラフが動くことを確認します。
 6. 止めるときは `Stop` を押します。
 
-`Run For` を使うと、指定秒数だけ実行して自動停止できます。
+`Run Hz` で連続実行時のtick周波数を設定できます。デフォルトは1000Hzです。`Run` の連続実行ループはサーバー側で動くため、ブラウザタブがフォーカスを失ってもTopic出力は継続します。`Duration sec` に秒数を入力して `Run For` を使うと、指定秒数だけ実行して自動停止できます。
 
 ## サンプルプロジェクト
 
-`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
+`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
 
-- `01_image_edge_topic_graph.json`: 画像入力、グレースケール化、エッジ抽出、画像表示、エッジ強度グラフ、topic出力。
-- `02_video_motion_topic_graph.json`: 動画フレーム入力、フレーム差分によるmotion mask、overlay表示、motion scoreグラフ、topic出力。
-- `03_image_color_balance_topic_graph.json`: 画像入力、コントラスト補正、赤バランス処理、画像表示、red indexグラフ、topic出力。
-- `04_video_low_light_colormap_topic_graph.json`: 暗い動画フレーム入力、ガンマ補正、疑似カラーマップ表示、輝度グラフ、topic出力。
-- `05_image_crop_mosaic_topic_graph.json`: 画像入力、中央クロップ、モザイク処理、画像表示、平均輝度グラフ、topic出力。
+- `image_video/01_image_edge_topic_graph.json`: 画像入力、グレースケール化、エッジ抽出、画像表示、エッジ強度グラフ、topic出力。
+- `image_video/02_video_motion_topic_graph.json`: 動画フレーム入力、フレーム差分によるmotion mask、overlay表示、motion scoreグラフ、topic出力。
+- `image_video/03_image_color_balance_topic_graph.json`: 画像入力、コントラスト補正、赤バランス処理、画像表示、red indexグラフ、topic出力。
+- `image_video/04_video_low_light_colormap_topic_graph.json`: 暗い動画フレーム入力、ガンマ補正、疑似カラーマップ表示、輝度グラフ、topic出力。
+- `image_video/05_image_crop_mosaic_topic_graph.json`: 画像入力、中央クロップ、モザイク処理、画像表示、平均輝度グラフ、topic出力。
+- `signals/06_function_generator_signal_view.json`: Function Generatorからサイン波をGraph Viewerとtopic出力へ接続。
+- `signals/07_function_generator_wave_suite.json`: サイン、ステップ、チャープ、ホワイトノイズのFunction Generatorを並べて表示。
+- `external_topics/08_external_float_topic_graph.json`: 外部 `std_msgs/msg/Float32` topicをGraph Viewerで表示。
+- `external_topics/09_external_image_topic_view_save.json`: 外部 `sensor_msgs/msg/Image` topicをImage ViewerとImage File Saveへ接続。
+- `custom_runtime/10_multi_timer_counter_graph.json`: 1つのカスタムノードに複数Timerを持たせ、別々の周期で値をpublish。
+- `custom_runtime/11_manual_subscriber_timer_sampler.json`: Subscriber callbackをOFFにし、Timer callbackから `latest()` で入力を読む例。
+- `image_video/12_image_view_save_topic_output.json`: 埋め込み画像を表示、保存、topic出力境界へ接続。
+
+詳しい分類は `samples/README.md` を参照してください。カスタムノードを含むサンプルは、実行時にノードごとのvenvとworker processを使います。
 
 サンプルを再生成する場合は次を実行します。
 
@@ -71,14 +80,15 @@ lwrclpy Web Node Editor: http://127.0.0.1:8765
 
 ## Webプレビューの実行モデル
 
-Webプレビューはブラウザ操作に対してできるだけ速く動くことを優先しています。
+Webプレビューは、リンクごとのtopic名を使ってlwrclpy topic経由でノード間データを流します。
 
-- グラフ内部の接続は、高速な直接データ受け渡しで実行されます。
+- グラフ内部の接続は、WebUI/サーバー内の直接データ受け渡しではなくlwrclpy topicで実行されます。
 - カスタムノードのコードは `lwrclpy` のcallbackに近いスコープで実行されます。
-- `Topic Input` と `Topic Output` は、グラフ外部との境界としてlwrclpy topicを使います。
+- `Topic Input` と `Topic Output` は、グラフ外部との境界マーカーです。実際のPub/Subは接続された処理・表示ノードが行います。
 - 画像・動画フレームはJSON往復を軽くするため、ブラウザからbase64形式で送られます。
+- 連続実行のtick周波数は `Run Hz` で設定します。Run中のtickループはサーバー側threadで動くため、ブラウザのtimer throttlingには依存しません。設定値が高い場合でも、実効周波数はノード処理時間やlwrclpy/DDS処理時間に制限されます。
 
-つまり、Webプレビューでは低遅延に動かしながら、ノードに書く処理コードはエクスポートしやすいlwrclpy APIスタイルに寄せています。
+つまり、Webプレビューでもノード間通信の意味論はlwrclpy topicに寄せています。
 
 ## ノードの作り方
 
@@ -86,10 +96,10 @@ Webプレビューはブラウザ操作に対してできるだけ速く動く�
 
 主な設定項目は次の通りです。
 
-- `Inputs`: 入力ポートです。型は `sensor_msgs/msg/Image` や `std_msgs/msg/Float32` など、インストール済みlwrclpyメッセージから選びます。
+- `Inputs`: 入力ポートです。型は `sensor_msgs/msg/Image` や `std_msgs/msg/Float32` など、インストール済みlwrclpyメッセージから選びます。`Use Callback` はデフォルトONで、OFFにすると `latest()` / `take()` で読む手動入力になります。
 - `Outputs`: 出力ポートです。
 - `Callback Code`: 入力を受け取ったときに実行するコードです。通常の画像処理・動画処理はここに書きます。
-- `Timer Callback`: 一定周期で実行したいコードです。
+- `Timer Callback`: 一定周期で実行したいコードです。`Timer Count` で複数のTimerを作成でき、各Timerは常にcallbackとして実行されます。
 - `Import Code`: `import cv2` や `import numpy as np` など、ノード専用のimportを書きます。
 - `requirements.txt`: ノード専用venvに入れる依存パッケージを書きます。
 
@@ -97,7 +107,7 @@ Webプレビューはブラウザ操作に対してできるだけ速く動く�
 
 ## Callback Codeの書き方
 
-入力ポートをcallback modeにすると、その入力に値が届いたときにCallback Codeが実行されます。
+入力ポートの `Use Callback` がONの場合、その入力に値が届いたときにCallback Codeが実行されます。OFFの場合はCallback Codeを使わず、Main LoopやTimer Callbackから `latest()` / `take()` で入力を読みます。
 
 Callback Codeで使える主な変数は次の通りです。
 
@@ -154,7 +164,7 @@ if frame and mask:
 
 ## Timer CallbackとMain Loop
 
-Timer Callbackは、Run中に設定周期へ到達したときに実行されます。
+Timer Callbackは、Run中に設定周期へ到達したときに実行されます。1ノードに複数のTimerを設定でき、Timerごとに `timer_id`, `timer_name`, `period` が渡されます。
 
 ```python
 state["count"] = state.get("count", 0) + 1
@@ -179,6 +189,12 @@ if state.get("enabled", True):
 
 `Image File Save` は接続された画像を `saved_images/` にBMPとして保存します。
 
+## 信号生成ノード
+
+`Function Generator` は `std_msgs/msg/Float32` の `data` として信号を出力します。ノード上の設定で `Step`, `Sine`, `Square`, `Ramp`, `Chirp`, `White Noise` を選べます。`Publish Hz` で出力周期を設定し、`Sample Time sec` で信号値のサンプル保持周期を設定できます。`DDS Topic` を設定すると、リンクやTopic Outputとは別に、そのDDS/lwrclpy topicへ直接publishします。`Graph Viewer` に接続し、`Field Path` を `data` にすると波形を確認できます。
+
+`Graph Viewer` の `Graph Settings` では、保持サンプル数、表示する横軸の秒数、縦軸を `Auto` にするか固定範囲にするかを設定できます。保持サンプル数のデフォルトは10000です。
+
 ## Topic Input / Topic Output
 
 `Topic Input` と `Topic Output` は、Webグラフの外側とlwrclpy topicで接続するための境界ノードです。
@@ -192,7 +208,7 @@ if state.get("enabled", True):
 
 `Export Python Node` は、選択したカスタムノードを単体のPythonファイルとして保存します。後から `Import Python Node` で読み戻せます。
 
-`Export ROS2 Package` は、プロジェクト内のカスタムノードをノードごとのPythonファイルに分け、Python package形式のzipとして出力します。zipには次のファイルが含まれます。
+`Export ROS 2 Package` は、プロジェクト内のカスタムノードをノードごとのPythonファイルに分け、Python package形式のzipとして出力します。zipには次のファイルが含まれます。
 
 - `package.xml`
 - `setup.py`
@@ -208,7 +224,9 @@ if state.get("enabled", True):
 
 アプリ本体は `.venv` で動きます。カスタムノードは、ノードごとに `.node_envs/<node-id>` のvenvを持ちます。
 
-ノードの `requirements.txt` に依存を書くと、実行前に `uv` がそのノード用venvを作成し、必要なパッケージとlwrclpyをインストールします。Webプレビューでは速度を優先するため、ノードコードはサーバープロセス内で実行されますが、ノードごとのvenvに入ったパッケージをimportできるようにしています。
+ノードの `requirements.txt` に依存を書くと、実行前に `uv` がそのノード用venvを作成し、必要なパッケージとlwrclpyをインストールします。lwrclpyはGitHub Releasesのlatest releaseから、現在のPython ABIとOS/CPUに合うwheelを自動選択してインストールします。Webプレビューでは、カスタムノードごとに `.node_envs/<node-id>` のPythonで別ワーカープロセスを起動し、ノード間や組み込みツールノードとの接続はlwrclpy topicで橋渡しします。
+
+`Stop` は実行中の全カスタムノードワーカーへ停止指示を送り、通常停止できない場合はタイムアウト後にkillします。`Force Stop` は最初から全カスタムノードワーカーを強制終了します。サーバー起動時と終了時にも、このフレームワークが起動した残存 `node_worker.py` プロセスを検出して強制終了します。
 
 ## トラブルシュート
 

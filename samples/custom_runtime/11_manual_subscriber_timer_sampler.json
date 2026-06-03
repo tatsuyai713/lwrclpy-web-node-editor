@@ -1,0 +1,169 @@
+{
+  "format": "lwrclpy-web-node-editor-project",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "function_generator",
+      "x": -440,
+      "y": -100,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out1",
+          "name": "signal",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "params": {
+        "signalType": "square",
+        "amplitude": 1,
+        "bias": 0,
+        "frequency": 1,
+        "phase": 0,
+        "sampleTime": 0,
+        "publishHz": 100,
+        "ddsTopic": "",
+        "stepTime": 1,
+        "initialValue": 0,
+        "finalValue": 1,
+        "dutyCycle": 50,
+        "rampSlope": 1,
+        "chirpStartFrequency": 0.1,
+        "chirpEndFrequency": 10,
+        "chirpDuration": 10,
+        "noiseMean": 0,
+        "noiseStd": 1,
+        "noiseSeed": 1
+      },
+      "loopCode": "",
+      "toolType": "function_generator"
+    },
+    {
+      "id": "n2",
+      "name": "manual_subscriber_sampler",
+      "x": -40,
+      "y": -100,
+      "inputs": [
+        {
+          "id": "in",
+          "name": "signal",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [
+        {
+          "id": "raw",
+          "name": "raw",
+          "dataType": "std_msgs/msg/Float32"
+        },
+        {
+          "id": "filtered",
+          "name": "filtered",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "loopCode": "",
+      "timers": [
+        {
+          "id": "sample_timer",
+          "name": "sample_timer",
+          "periodSec": 0.02,
+          "callbackCode": "value = latest(\"in\")\nif value is None:\n\treturn_value = None\nelse:\n\traw = value.get(\"data\", 0.0) if isinstance(value, dict) else getattr(value, \"data\", 0.0)\n\tstate[\"last_raw\"] = float(raw)\n\tstate[\"filtered\"] = state.get(\"filtered\", float(raw)) * 0.85 + float(raw) * 0.15\n\tpublish(\"raw\", {\"data\": float(raw)})\n\tpublish(\"filtered\", {\"data\": float(state[\"filtered\"])})\n"
+        }
+      ],
+      "timerEnabled": true,
+      "timerPeriodSec": 0.02,
+      "timerCode": "value = latest(\"in\")\nif value is None:\n\treturn_value = None\nelse:\n\traw = value.get(\"data\", 0.0) if isinstance(value, dict) else getattr(value, \"data\", 0.0)\n\tstate[\"last_raw\"] = float(raw)\n\tstate[\"filtered\"] = state.get(\"filtered\", float(raw)) * 0.85 + float(raw) * 0.15\n\tpublish(\"raw\", {\"data\": float(raw)})\n\tpublish(\"filtered\", {\"data\": float(state[\"filtered\"])})\n",
+      "importCode": "",
+      "requirements": "",
+      "params": {}
+    },
+    {
+      "id": "n3",
+      "name": "graph_view",
+      "x": 330,
+      "y": -205,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "value",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "fieldPath": "data",
+        "sampleLimit": 10000,
+        "xAxisSeconds": 8,
+        "yAxisMode": "fixed",
+        "yMin": -1.2,
+        "yMax": 1.2
+      },
+      "loopCode": "",
+      "toolType": "graph_view"
+    },
+    {
+      "id": "n4",
+      "name": "graph_view",
+      "x": 330,
+      "y": 45,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "value",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "fieldPath": "data",
+        "sampleLimit": 10000,
+        "xAxisSeconds": 8,
+        "yAxisMode": "fixed",
+        "yMin": -1.2,
+        "yMax": 1.2
+      },
+      "loopCode": "",
+      "toolType": "graph_view"
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "fromNode": "n1",
+      "fromPort": "out1",
+      "toNode": "n2",
+      "toPort": "in",
+      "name": "/sample11/source_signal"
+    },
+    {
+      "id": "l2",
+      "fromNode": "n2",
+      "fromPort": "raw",
+      "toNode": "n3",
+      "toPort": "in1",
+      "name": "/sample11/raw"
+    },
+    {
+      "id": "l3",
+      "fromNode": "n2",
+      "fromPort": "filtered",
+      "toNode": "n4",
+      "toPort": "in1",
+      "name": "/sample11/filtered"
+    }
+  ],
+  "view": {
+    "x": 70,
+    "y": 90,
+    "scale": 0.8
+  },
+  "nextId": 5
+}

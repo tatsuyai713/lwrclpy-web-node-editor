@@ -90,9 +90,7 @@ if img:
 		out.extend([y, y, y])
 		total += y
 	publish("gray", {"width": w, "height": h, "encoding": "rgb8", "is_bigendian": 0, "step": w * 3, "data": out})
-	metric = Float32()
-	metric.data = float(total) / max(1, count)
-	publish("brightness", metric)
+	publish("brightness", {"data": float(total) / max(1, count)})
 """
 
 EDGE_CODE = """img = msg
@@ -112,9 +110,7 @@ if img:
 			out.extend([v, v, v])
 			total += v
 	publish("edges", {"width": w, "height": h, "encoding": "rgb8", "is_bigendian": 0, "step": w * 3, "data": out})
-	metric = Float32()
-	metric.data = float(total) / max(1, w * h)
-	publish("edge_strength", metric)
+	publish("edge_strength", {"data": float(total) / max(1, w * h)})
 """
 
 MOTION_DIFF_CODE = """img = msg
@@ -133,9 +129,7 @@ if img:
 		total += diff
 	state["prev"] = list(data)
 	publish("motion", {"width": w, "height": h, "encoding": "rgb8", "is_bigendian": 0, "step": w * 3, "data": out})
-	metric = Float32()
-	metric.data = float(total) / max(1, w * h)
-	publish("motion_score", metric)
+	publish("motion_score", {"data": float(total) / max(1, w * h)})
 """
 
 MOTION_OVERLAY_CODE = """state[input_id] = msg
@@ -187,9 +181,7 @@ if img:
 		red_total += r
 		other_total += (g + b) // 2
 	publish("balanced", {"width": w, "height": h, "encoding": "rgb8", "is_bigendian": 0, "step": w * 3, "data": out})
-	metric = Float32()
-	metric.data = float(red_total - other_total) / max(1, w * h)
-	publish("red_index", metric)
+	publish("red_index", {"data": float(red_total - other_total) / max(1, w * h)})
 """
 
 GAMMA_CODE = """img = msg
@@ -204,9 +196,7 @@ if img:
 		out.append(nv)
 		total += nv
 	publish("bright", {"width": w, "height": h, "encoding": "rgb8", "is_bigendian": 0, "step": w * 3, "data": out})
-	metric = Float32()
-	metric.data = float(total) / max(1, len(data))
-	publish("luminance", metric)
+	publish("luminance", {"data": float(total) / max(1, len(data))})
 """
 
 COLORMAP_CODE = """img = msg
@@ -272,9 +262,26 @@ if img:
 					out[idx + 2] = b
 					total += (r + g + b) // 3
 	publish("mosaic", {"width": w, "height": h, "encoding": "rgb8", "is_bigendian": 0, "step": w * 3, "data": out})
-	metric = Float32()
-	metric.data = float(total) / max(1, w * h)
-	publish("mean", metric)
+	publish("mean", {"data": float(total) / max(1, w * h)})
+"""
+
+TIMER_FAST_CODE = """state["fast_count"] = int(state.get("fast_count", 0)) + 1
+publish("fast", {"data": float(state["fast_count"])})
+"""
+
+TIMER_SLOW_CODE = """state["slow_count"] = int(state.get("slow_count", 0)) + 1
+publish("slow", {"data": float(state["slow_count"])})
+"""
+
+MANUAL_SAMPLER_TIMER_CODE = """value = latest("in")
+if value is None:
+	return_value = None
+else:
+	raw = value.get("data", 0.0) if isinstance(value, dict) else getattr(value, "data", 0.0)
+	state["last_raw"] = float(raw)
+	state["filtered"] = state.get("filtered", float(raw)) * 0.85 + float(raw) * 0.15
+	publish("raw", {"data": float(raw)})
+	publish("filtered", {"data": float(state["filtered"])})
 """
 
 
@@ -307,27 +314,91 @@ def image_view(node_id: str, x: int, y: int) -> dict:
 	}
 
 
-def graph_view(node_id: str, x: int, y: int, sample_limit: int = 120) -> dict:
+def image_file_save(node_id: str, x: int, y: int) -> dict:
+	return {
+		"id": node_id,
+		"name": "image_file_save",
+		"x": x,
+		"y": y,
+		"inputs": [{"id": "in1", "name": "image", "dataType": "sensor_msgs/msg/Image", "receiveMode": "manual", "callbackCode": ""}],
+		"outputs": [],
+		"params": {},
+		"loopCode": "",
+		"toolType": "image_file_save",
+	}
+
+
+def graph_view(node_id: str, x: int, y: int, sample_limit: int = 10000, x_axis_seconds: float = 10, y_axis_mode: str = "auto", y_min: float = -1, y_max: float = 1) -> dict:
 	return {
 		"id": node_id,
 		"name": "graph_view",
 		"x": x,
 		"y": y,
-		"inputs": [{"id": "in1", "name": "value", "dataType": "", "receiveMode": "manual", "callbackCode": ""}],
+		"inputs": [{"id": "in1", "name": "value", "dataType": "std_msgs/msg/Float32", "receiveMode": "manual", "callbackCode": ""}],
 		"outputs": [],
-		"params": {"fieldPath": "data", "sampleLimit": sample_limit},
+		"params": {"fieldPath": "data", "sampleLimit": sample_limit, "xAxisSeconds": x_axis_seconds, "yAxisMode": y_axis_mode, "yMin": y_min, "yMax": y_max},
 		"loopCode": "",
 		"toolType": "graph_view",
 	}
 
 
-def topic_output(node_id: str, x: int, y: int) -> dict:
+def function_generator(node_id: str, x: int, y: int, name: str = "function_generator", params: dict | None = None) -> dict:
+	default_params = {
+		"signalType": "sine",
+		"amplitude": 1,
+		"bias": 0,
+		"frequency": 1,
+		"phase": 0,
+		"sampleTime": 0,
+		"publishHz": 100,
+		"ddsTopic": "",
+		"stepTime": 1,
+		"initialValue": 0,
+		"finalValue": 1,
+		"dutyCycle": 50,
+		"rampSlope": 1,
+		"chirpStartFrequency": 0.1,
+		"chirpEndFrequency": 10,
+		"chirpDuration": 10,
+		"noiseMean": 0,
+		"noiseStd": 1,
+		"noiseSeed": 1,
+	}
+	default_params.update(params or {})
+	return {
+		"id": node_id,
+		"name": name,
+		"x": x,
+		"y": y,
+		"inputs": [],
+		"outputs": [{"id": "out1", "name": "signal", "dataType": "std_msgs/msg/Float32"}],
+		"params": default_params,
+		"loopCode": "",
+		"toolType": "function_generator",
+	}
+
+
+def topic_input(node_id: str, x: int, y: int, data_type: str = "") -> dict:
+	return {
+		"id": node_id,
+		"name": "topic_input",
+		"x": x,
+		"y": y,
+		"inputs": [],
+		"outputs": [{"id": "out1", "name": "topic", "dataType": data_type}],
+		"params": {},
+		"loopCode": "",
+		"toolType": "topic_input",
+	}
+
+
+def topic_output(node_id: str, x: int, y: int, data_type: str = "") -> dict:
 	return {
 		"id": node_id,
 		"name": "topic_output",
 		"x": x,
 		"y": y,
-		"inputs": [{"id": "in1", "name": "topic", "dataType": "", "receiveMode": "manual", "callbackCode": ""}],
+		"inputs": [{"id": "in1", "name": "topic", "dataType": data_type, "receiveMode": "manual", "callbackCode": ""}],
 		"outputs": [],
 		"params": {},
 		"loopCode": "",
@@ -335,21 +406,35 @@ def topic_output(node_id: str, x: int, y: int) -> dict:
 	}
 
 
-def custom_node(node_id: str, name: str, x: int, y: int, inputs: list[tuple[str, str, str]], outputs: list[tuple[str, str, str]], code: str, import_code: str = "") -> dict:
+def custom_node(
+	node_id: str,
+	name: str,
+	x: int,
+	y: int,
+	inputs: list[tuple[str, str, str]],
+	outputs: list[tuple[str, str, str]],
+	code: str,
+	import_code: str = "",
+	timers: list[dict] | None = None,
+	input_receive_mode: str = "callback",
+	params: dict | None = None,
+) -> dict:
+	timer_items = timers or []
 	return {
 		"id": node_id,
 		"name": name,
 		"x": x,
 		"y": y,
-		"inputs": [{"id": pid, "name": pname, "dataType": dtype, "receiveMode": "callback", "callbackCode": code} for pid, pname, dtype in inputs],
+		"inputs": [{"id": pid, "name": pname, "dataType": dtype, "receiveMode": input_receive_mode, "callbackCode": code if input_receive_mode == "callback" else ""} for pid, pname, dtype in inputs],
 		"outputs": [{"id": pid, "name": pname, "dataType": dtype} for pid, pname, dtype in outputs],
 		"loopCode": "",
-		"timerEnabled": False,
-		"timerPeriodSec": 1.0,
-		"timerCode": "",
+		"timers": timer_items,
+		"timerEnabled": bool(timer_items),
+		"timerPeriodSec": float(timer_items[0].get("periodSec", 1.0)) if timer_items else 1.0,
+		"timerCode": str(timer_items[0].get("callbackCode", "")) if timer_items else "",
 		"importCode": import_code,
 		"requirements": "",
-		"params": {},
+		"params": params or {},
 	}
 
 
@@ -383,7 +468,7 @@ def build_projects() -> dict[str, dict]:
 		custom_node("n3", "edge_strength_filter", 160, -170, [("gray", "gray", "sensor_msgs/msg/Image")], [("edges", "edges", "sensor_msgs/msg/Image"), ("edge_strength", "edge_strength", "std_msgs/msg/Float32")], EDGE_CODE, IMPORT_FLOAT32),
 		image_view("n4", 520, -220),
 		graph_view("n5", 520, 25),
-		topic_output("n6", 850, 25),
+		topic_output("n6", 850, 25, "std_msgs/msg/Float32"),
 	]
 	links = [
 		link("l1", "n1", "out1", "n2", "image", "/sample1/input_image"),
@@ -392,7 +477,7 @@ def build_projects() -> dict[str, dict]:
 		link("l4", "n3", "edge_strength", "n5", "in1", "/sample1/edge_strength"),
 		link("l5", "n3", "edge_strength", "n6", "in1", "/sample1/edge_strength"),
 	]
-	projects["01_image_edge_topic_graph.json"] = project(nodes, links, 7)
+	projects["image_video/01_image_edge_topic_graph.json"] = project(nodes, links, 7)
 
 	nodes = [
 		image_input("n1", "embedded_video_frame_input", -560, -120, img_b, video=True),
@@ -400,7 +485,7 @@ def build_projects() -> dict[str, dict]:
 		custom_node("n3", "motion_overlay", 150, -165, [("frame", "frame", "sensor_msgs/msg/Image"), ("motion", "motion", "sensor_msgs/msg/Image")], [("overlay", "overlay", "sensor_msgs/msg/Image")], MOTION_OVERLAY_CODE),
 		image_view("n4", 510, -230),
 		graph_view("n5", 510, 20),
-		topic_output("n6", 840, 20),
+		topic_output("n6", 840, 20, "std_msgs/msg/Float32"),
 	]
 	links = [
 		link("l1", "n1", "out1", "n2", "frame", "/sample2/video_frame"),
@@ -410,7 +495,7 @@ def build_projects() -> dict[str, dict]:
 		link("l5", "n2", "motion_score", "n5", "in1", "/sample2/motion_score"),
 		link("l6", "n2", "motion_score", "n6", "in1", "/sample2/motion_score"),
 	]
-	projects["02_video_motion_topic_graph.json"] = project(nodes, links, 7)
+	projects["image_video/02_video_motion_topic_graph.json"] = project(nodes, links, 7)
 
 	nodes = [
 		image_input("n1", "embedded_color_input", -520, -120, img_c),
@@ -418,7 +503,7 @@ def build_projects() -> dict[str, dict]:
 		custom_node("n3", "red_balance_index", 170, -160, [("image", "image", "sensor_msgs/msg/Image")], [("balanced", "balanced", "sensor_msgs/msg/Image"), ("red_index", "red_index", "std_msgs/msg/Float32")], RED_BALANCE_CODE, IMPORT_FLOAT32),
 		image_view("n4", 535, -215),
 		graph_view("n5", 535, 25),
-		topic_output("n6", 865, 25),
+		topic_output("n6", 865, 25, "std_msgs/msg/Float32"),
 	]
 	links = [
 		link("l1", "n1", "out1", "n2", "image", "/sample3/input_color"),
@@ -427,7 +512,7 @@ def build_projects() -> dict[str, dict]:
 		link("l4", "n3", "red_index", "n5", "in1", "/sample3/red_index"),
 		link("l5", "n3", "red_index", "n6", "in1", "/sample3/red_index"),
 	]
-	projects["03_image_color_balance_topic_graph.json"] = project(nodes, links, 7)
+	projects["image_video/03_image_color_balance_topic_graph.json"] = project(nodes, links, 7)
 
 	nodes = [
 		image_input("n1", "embedded_low_light_video", -550, -120, img_d, video=True),
@@ -435,7 +520,7 @@ def build_projects() -> dict[str, dict]:
 		custom_node("n3", "pseudo_thermal_colormap", 160, -165, [("image", "image", "sensor_msgs/msg/Image")], [("thermal", "thermal", "sensor_msgs/msg/Image")], COLORMAP_CODE),
 		image_view("n4", 520, -225),
 		graph_view("n5", 520, 20),
-		topic_output("n6", 850, 20),
+		topic_output("n6", 850, 20, "std_msgs/msg/Float32"),
 	]
 	links = [
 		link("l1", "n1", "out1", "n2", "frame", "/sample4/low_light_frame"),
@@ -444,7 +529,7 @@ def build_projects() -> dict[str, dict]:
 		link("l4", "n2", "luminance", "n5", "in1", "/sample4/luminance"),
 		link("l5", "n2", "luminance", "n6", "in1", "/sample4/luminance"),
 	]
-	projects["04_video_low_light_colormap_topic_graph.json"] = project(nodes, links, 7)
+	projects["image_video/04_video_low_light_colormap_topic_graph.json"] = project(nodes, links, 7)
 
 	nodes = [
 		image_input("n1", "embedded_crop_input", -520, -120, img_e),
@@ -452,7 +537,7 @@ def build_projects() -> dict[str, dict]:
 		custom_node("n3", "mosaic_privacy_filter", 170, -160, [("image", "image", "sensor_msgs/msg/Image")], [("mosaic", "mosaic", "sensor_msgs/msg/Image"), ("mean", "mean", "std_msgs/msg/Float32")], MOSAIC_CODE, IMPORT_FLOAT32),
 		image_view("n4", 535, -215),
 		graph_view("n5", 535, 25),
-		topic_output("n6", 865, 25),
+		topic_output("n6", 865, 25, "std_msgs/msg/Float32"),
 	]
 	links = [
 		link("l1", "n1", "out1", "n2", "image", "/sample5/raw_image"),
@@ -461,7 +546,131 @@ def build_projects() -> dict[str, dict]:
 		link("l4", "n3", "mean", "n5", "in1", "/sample5/mosaic_mean"),
 		link("l5", "n3", "mean", "n6", "in1", "/sample5/mosaic_mean"),
 	]
-	projects["05_image_crop_mosaic_topic_graph.json"] = project(nodes, links, 7)
+	projects["image_video/05_image_crop_mosaic_topic_graph.json"] = project(nodes, links, 7)
+
+	nodes = [
+		function_generator("n1", -260, -90, params={"signalType": "sine", "frequency": 2, "publishHz": 100, "ddsTopic": "/sample6/function_signal"}),
+		graph_view("n2", 120, -100, sample_limit=10000, x_axis_seconds=5),
+		topic_output("n3", 450, -100, "std_msgs/msg/Float32"),
+	]
+	links = [
+		link("l1", "n1", "out1", "n2", "in1", "/sample6/function_signal"),
+		link("l2", "n1", "out1", "n3", "in1", "/sample6/function_signal"),
+	]
+	projects["signals/06_function_generator_signal_view.json"] = project(nodes, links, 4)
+
+	nodes = [
+		function_generator("n1", -520, -250, "sine_2hz", {"signalType": "sine", "frequency": 2, "amplitude": 1, "publishHz": 100}),
+		function_generator("n2", -520, -55, "step_after_1s", {"signalType": "step", "stepTime": 1, "initialValue": -1, "finalValue": 1, "publishHz": 100}),
+		function_generator("n3", -520, 140, "chirp_0_2_to_8hz", {"signalType": "chirp", "chirpStartFrequency": 0.2, "chirpEndFrequency": 8, "chirpDuration": 6, "amplitude": 1, "publishHz": 100}),
+		function_generator("n4", -520, 335, "white_noise", {"signalType": "white_noise", "noiseMean": 0, "noiseStd": 0.25, "noiseSeed": 7, "publishHz": 100}),
+		graph_view("n5", -120, -250, x_axis_seconds=5, y_axis_mode="fixed", y_min=-1.5, y_max=1.5),
+		graph_view("n6", -120, -55, x_axis_seconds=5, y_axis_mode="fixed", y_min=-1.5, y_max=1.5),
+		graph_view("n7", -120, 140, x_axis_seconds=6, y_axis_mode="fixed", y_min=-1.5, y_max=1.5),
+		graph_view("n8", -120, 335, x_axis_seconds=5, y_axis_mode="fixed", y_min=-1.0, y_max=1.0),
+		topic_output("n9", 220, -250, "std_msgs/msg/Float32"),
+		topic_output("n10", 220, -55, "std_msgs/msg/Float32"),
+		topic_output("n11", 220, 140, "std_msgs/msg/Float32"),
+		topic_output("n12", 220, 335, "std_msgs/msg/Float32"),
+	]
+	links = [
+		link("l1", "n1", "out1", "n5", "in1", "/sample7/sine"),
+		link("l2", "n1", "out1", "n9", "in1", "/sample7/sine"),
+		link("l3", "n2", "out1", "n6", "in1", "/sample7/step"),
+		link("l4", "n2", "out1", "n10", "in1", "/sample7/step"),
+		link("l5", "n3", "out1", "n7", "in1", "/sample7/chirp"),
+		link("l6", "n3", "out1", "n11", "in1", "/sample7/chirp"),
+		link("l7", "n4", "out1", "n8", "in1", "/sample7/white_noise"),
+		link("l8", "n4", "out1", "n12", "in1", "/sample7/white_noise"),
+	]
+	projects["signals/07_function_generator_wave_suite.json"] = project(nodes, links, 13)
+
+	nodes = [
+		topic_input("n1", -300, -80, "std_msgs/msg/Float32"),
+		graph_view("n2", 80, -90, x_axis_seconds=10),
+		topic_output("n3", 410, -90, "std_msgs/msg/Float32"),
+	]
+	links = [
+		link("l1", "n1", "out1", "n2", "in1", "/sample8/external_float"),
+		link("l2", "n1", "out1", "n3", "in1", "/sample8/external_float"),
+	]
+	projects["external_topics/08_external_float_topic_graph.json"] = project(nodes, links, 4)
+
+	nodes = [
+		topic_input("n1", -300, -110, "sensor_msgs/msg/Image"),
+		image_view("n2", 80, -150),
+		image_file_save("n3", 80, 110),
+	]
+	links = [
+		link("l1", "n1", "out1", "n2", "in1", "/sample9/external_image"),
+		link("l2", "n1", "out1", "n3", "in1", "/sample9/external_image"),
+	]
+	projects["external_topics/09_external_image_topic_view_save.json"] = project(nodes, links, 4)
+
+	timer_node = custom_node(
+		"n1",
+		"multi_timer_counter",
+		-360,
+		-100,
+		[],
+		[("fast", "fast_count", "std_msgs/msg/Float32"), ("slow", "slow_count", "std_msgs/msg/Float32")],
+		"",
+		timers=[
+			{"id": "fast_timer", "name": "fast_timer", "periodSec": 0.1, "callbackCode": TIMER_FAST_CODE},
+			{"id": "slow_timer", "name": "slow_timer", "periodSec": 0.5, "callbackCode": TIMER_SLOW_CODE},
+		],
+	)
+	nodes = [
+		timer_node,
+		graph_view("n2", 30, -210, x_axis_seconds=10),
+		graph_view("n3", 30, 40, x_axis_seconds=10),
+		topic_output("n4", 360, -210, "std_msgs/msg/Float32"),
+		topic_output("n5", 360, 40, "std_msgs/msg/Float32"),
+	]
+	links = [
+		link("l1", "n1", "fast", "n2", "in1", "/sample10/fast_count"),
+		link("l2", "n1", "fast", "n4", "in1", "/sample10/fast_count"),
+		link("l3", "n1", "slow", "n3", "in1", "/sample10/slow_count"),
+		link("l4", "n1", "slow", "n5", "in1", "/sample10/slow_count"),
+	]
+	projects["custom_runtime/10_multi_timer_counter_graph.json"] = project(nodes, links, 6)
+
+	sampler = custom_node(
+		"n2",
+		"manual_subscriber_sampler",
+		-40,
+		-100,
+		[("in", "signal", "std_msgs/msg/Float32")],
+		[("raw", "raw", "std_msgs/msg/Float32"), ("filtered", "filtered", "std_msgs/msg/Float32")],
+		"",
+		timers=[{"id": "sample_timer", "name": "sample_timer", "periodSec": 0.02, "callbackCode": MANUAL_SAMPLER_TIMER_CODE}],
+		input_receive_mode="manual",
+	)
+	nodes = [
+		function_generator("n1", -440, -100, params={"signalType": "square", "frequency": 1, "amplitude": 1, "publishHz": 100}),
+		sampler,
+		graph_view("n3", 330, -205, x_axis_seconds=8, y_axis_mode="fixed", y_min=-1.2, y_max=1.2),
+		graph_view("n4", 330, 45, x_axis_seconds=8, y_axis_mode="fixed", y_min=-1.2, y_max=1.2),
+	]
+	links = [
+		link("l1", "n1", "out1", "n2", "in", "/sample11/source_signal"),
+		link("l2", "n2", "raw", "n3", "in1", "/sample11/raw"),
+		link("l3", "n2", "filtered", "n4", "in1", "/sample11/filtered"),
+	]
+	projects["custom_runtime/11_manual_subscriber_timer_sampler.json"] = project(nodes, links, 5)
+
+	nodes = [
+		image_input("n1", "embedded_save_input", -520, -105, img_a),
+		image_view("n2", -150, -170),
+		image_file_save("n3", -150, 95),
+		topic_output("n4", 190, -170, "sensor_msgs/msg/Image"),
+	]
+	links = [
+		link("l1", "n1", "out1", "n2", "in1", "/sample12/save_input_image"),
+		link("l2", "n1", "out1", "n3", "in1", "/sample12/save_input_image"),
+		link("l3", "n1", "out1", "n4", "in1", "/sample12/save_input_image"),
+	]
+	projects["image_video/12_image_view_save_topic_output.json"] = project(nodes, links, 5)
 
 	return projects
 
@@ -469,7 +678,9 @@ def build_projects() -> dict[str, dict]:
 def main() -> None:
 	projects = build_projects()
 	for name, payload in projects.items():
-		(OUT_DIR / name).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+		path = OUT_DIR / name
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 	print(f"Wrote {len(projects)} sample projects to {OUT_DIR}")
 
 

@@ -206,6 +206,7 @@ body.panning, body.panning * {
 .status-pill.idle { background: var(--muted); }
 .status-pill.tick { background: var(--warn); }
 .status-pill.running { background: var(--accent); }
+.status-pill.stopping { background: #d58b24; }
 .status-pill.stopped { background: #7f8ea3; }
 .status-pill.error { background: var(--danger); color: #fff; }
 #tick-status { flex: 0 0 auto; }
@@ -300,6 +301,26 @@ body.panning, body.panning * {
   gap: 6px;
   color: var(--muted);
   font-size: 12px;
+}
+.signal-actions .tool-field {
+  grid-template-columns: 64px 1fr;
+}
+.tool-summary {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: center;
+  padding: 0 4px 2px;
+}
+.signal-config-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.graph-config-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
 }
 .tool-field select,
 .tool-field input {
@@ -453,6 +474,9 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .checkbox-field span {
   margin: 0;
 }
+#timer-configs {
+  grid-column: 1 / -1;
+}
 .port-config-row {
   display: grid;
   grid-template-columns: 1fr 1.2fr 1fr;
@@ -468,6 +492,14 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
   margin-bottom: 4px;
   color: var(--muted);
   font-size: 11px;
+}
+.port-config-row .wide-field {
+  grid-column: 1 / -1;
+}
+.port-config-row textarea {
+  min-height: 140px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 #code-editor {
   min-height: 460px;

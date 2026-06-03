@@ -9273,7 +9273,7 @@
           "name": "frame",
           "dataType": "sensor_msgs/msg/Image",
           "receiveMode": "callback",
-          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tprev = state.get(\"prev\")\n\tif not prev or len(prev) != len(data):\n\t\tprev = data\n\tout = []\n\ttotal = 0\n\tfor i in range(0, len(data), 3):\n\t\tdiff = (abs(data[i] - prev[i]) + abs(data[i + 1] - prev[i + 1]) + abs(data[i + 2] - prev[i + 2])) // 3\n\t\tout.extend([diff, diff, diff])\n\t\ttotal += diff\n\tstate[\"prev\"] = list(data)\n\tpublish(\"motion\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n\tmetric = Float32()\n\tmetric.data = float(total) / max(1, w * h)\n\tpublish(\"motion_score\", metric)\n"
+          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tprev = state.get(\"prev\")\n\tif not prev or len(prev) != len(data):\n\t\tprev = data\n\tout = []\n\ttotal = 0\n\tfor i in range(0, len(data), 3):\n\t\tdiff = (abs(data[i] - prev[i]) + abs(data[i + 1] - prev[i + 1]) + abs(data[i + 2] - prev[i + 2])) // 3\n\t\tout.extend([diff, diff, diff])\n\t\ttotal += diff\n\tstate[\"prev\"] = list(data)\n\tpublish(\"motion\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n\tpublish(\"motion_score\", {\"data\": float(total) / max(1, w * h)})\n"
         }
       ],
       "outputs": [
@@ -9289,6 +9289,7 @@
         }
       ],
       "loopCode": "",
+      "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
       "timerCode": "",
@@ -9325,6 +9326,7 @@
         }
       ],
       "loopCode": "",
+      "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
       "timerCode": "",
@@ -9360,7 +9362,7 @@
         {
           "id": "in1",
           "name": "value",
-          "dataType": "",
+          "dataType": "std_msgs/msg/Float32",
           "receiveMode": "manual",
           "callbackCode": ""
         }
@@ -9368,7 +9370,11 @@
       "outputs": [],
       "params": {
         "fieldPath": "data",
-        "sampleLimit": 120
+        "sampleLimit": 10000,
+        "xAxisSeconds": 10,
+        "yAxisMode": "auto",
+        "yMin": -1,
+        "yMax": 1
       },
       "loopCode": "",
       "toolType": "graph_view"
@@ -9382,7 +9388,7 @@
         {
           "id": "in1",
           "name": "topic",
-          "dataType": "",
+          "dataType": "std_msgs/msg/Float32",
           "receiveMode": "manual",
           "callbackCode": ""
         }

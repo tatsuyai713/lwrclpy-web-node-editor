@@ -13,6 +13,7 @@ const state = {
   dragLink: null,
   lastRunAt: 0,
   runInFlight: false,
+  runStatusInFlight: false,
   tickCount: 0,
   runState: 'idle',
   nodeViews: {},
@@ -38,7 +39,7 @@ const DEFAULT_LOOP_CODE = `# Optional lwrclpy-compatible spin tick body.
 `;
 
 const DEFAULT_TIMER_CODE = `# lwrclpy timer callback body.
-# Available: node, state, now, period, publish(output_id, value), log(...)
+# Available: node, timer_id, timer_name, state, now, period, publish(output_id, value), log(...)
 
 # Example:
 # state["count"] = state.get("count", 0) + 1
@@ -97,6 +98,37 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    label: 'Function Generator',
+    toolType: 'function_generator',
+    node: {
+      name: 'function_generator',
+      inputs: [],
+      outputs: [{ id: 'out1', name: 'signal', dataType: 'std_msgs/msg/Float32' }],
+      params: {
+        signalType: 'sine',
+        amplitude: 1,
+        bias: 0,
+        frequency: 1,
+        phase: 0,
+        sampleTime: 0,
+        publishHz: 10,
+        ddsTopic: '',
+        stepTime: 1,
+        initialValue: 0,
+        finalValue: 1,
+        dutyCycle: 50,
+        rampSlope: 1,
+        chirpStartFrequency: 0.1,
+        chirpEndFrequency: 10,
+        chirpDuration: 10,
+        noiseMean: 0,
+        noiseStd: 1,
+        noiseSeed: 1,
+      },
+      loopCode: '',
+    },
+  },
+  {
     label: 'Image Viewer',
     toolType: 'image_view',
     node: {
@@ -123,9 +155,9 @@ const INTERFACE_NODE_TEMPLATES = [
     toolType: 'graph_view',
     node: {
       name: 'graph_view',
-      inputs: [{ id: 'in1', name: 'value', dataType: '', receiveMode: 'manual', callbackCode: '' }],
+      inputs: [{ id: 'in1', name: 'value', dataType: 'std_msgs/msg/Float32', receiveMode: 'manual', callbackCode: '' }],
       outputs: [],
-      params: { fieldPath: 'data', sampleLimit: 120 },
+      params: { fieldPath: 'data', sampleLimit: 10000, xAxisSeconds: 10, yAxisMode: 'auto', yMin: -1, yMax: 1 },
       loopCode: '',
     },
   },
@@ -146,23 +178,31 @@ function bindToolbar() {
   $('create-node-side').onclick = () => openNodeDialog();
   $('run-model').onclick = startRun;
   $('stop-model').onclick = stopRun;
+  $('force-stop-model').onclick = forceStopRun;
+  $('run-hz').oninput = refreshRunTimer;
   $('run-duration-model').onclick = runForDuration;
   $('save-project').onclick = saveProject;
   $('load-project').onchange = loadProject;
   $('export-ros2-package').onclick = exportRos2Package;
   $('config-input-count').oninput = renderConfigPorts;
   $('config-output-count').oninput = renderConfigPorts;
-  $('config-timer-enabled').oninput = updateTimerDraft;
-  $('config-timer-period').oninput = updateTimerDraft;
+  $('config-timer-count').oninput = renderConfigPorts;
   $('config-import-code').oninput = updateEnvironmentDraft;
   $('config-requirements').oninput = updateEnvironmentDraft;
   $('node-form').addEventListener('submit', saveNodeDialog);
   $('code-form').addEventListener('submit', saveCodeDialog);
+  $('signal-form').addEventListener('submit', saveSignalDialog);
+  $('graph-form').addEventListener('submit', saveGraphDialog);
+  $('graph-y-mode').onchange = updateGraphAxisFields;
   document.addEventListener('selectstart', (ev) => {
     if (ev.target.closest('#workspace')) ev.preventDefault();
   });
   document.querySelectorAll('[data-close-dialog]').forEach((button) => {
-    button.onclick = () => $(button.dataset.closeDialog).close();
+    button.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      $(button.dataset.closeDialog).close();
+    };
   });
 }
 
@@ -198,6 +238,7 @@ function createDefaultNode(pos = centerWorld()) {
     inputs: [{ id: 'in1', name: 'in1', dataType: firstDataType(), receiveMode: 'callback', callbackCode: DEFAULT_CALLBACK_CODE }],
     outputs: [{ id: 'out1', name: 'out1', dataType: firstDataType() }],
     loopCode: DEFAULT_LOOP_CODE,
+    timers: [],
     timerEnabled: false,
     timerPeriodSec: 1.0,
     timerCode: DEFAULT_TIMER_CODE,
@@ -238,13 +279,13 @@ function renderInterfaceNodeList() {
 function openNodeDialog(node = null) {
   state.editingNode = node ? node.id : null;
   const draft = node ? structuredClone(node) : createDefaultNode();
+  draft.timers = normalizeTimers(draft);
   $('node-dialog').dataset.draft = JSON.stringify(draft);
   $('node-dialog-title').textContent = node ? 'Edit lwrclpy Node' : 'Create lwrclpy Node';
   $('config-node-name').value = draft.name;
   $('config-input-count').value = draft.inputs.length;
   $('config-output-count').value = draft.outputs.length;
-  $('config-timer-enabled').checked = Boolean(draft.timerEnabled);
-  $('config-timer-period').value = Number(draft.timerPeriodSec || 1.0);
+  $('config-timer-count').value = draft.timers.length;
   $('config-import-code').value = draft.importCode || DEFAULT_IMPORT_CODE;
   $('config-requirements').value = draft.requirements || '';
   renderConfigPorts();
@@ -257,14 +298,16 @@ function renderConfigPorts() {
   draft.name = $('config-node-name').value || draft.name;
   draft.inputs = resizePorts(draft.inputs || [], Number($('config-input-count').value || 0), 'in');
   draft.outputs = resizePorts(draft.outputs || [], Number($('config-output-count').value || 0), 'out');
-  draft.timerEnabled = $('config-timer-enabled').checked;
-  draft.timerPeriodSec = Math.max(0.001, Number($('config-timer-period').value || 1.0));
-  draft.timerCode = draft.timerCode || DEFAULT_TIMER_CODE;
+  draft.timers = resizeTimers(normalizeTimers(draft), Number($('config-timer-count').value || 0));
+  draft.timerEnabled = draft.timers.length > 0;
+  draft.timerPeriodSec = draft.timers[0]?.periodSec || 1.0;
+  draft.timerCode = draft.timers[0]?.callbackCode || DEFAULT_TIMER_CODE;
   draft.importCode = $('config-import-code').value || '';
   draft.requirements = $('config-requirements').value || '';
   dialog.dataset.draft = JSON.stringify(draft);
   renderPortConfigList('input-configs', draft.inputs, 'Input');
   renderPortConfigList('output-configs', draft.outputs, 'Output');
+  renderTimerConfigList(draft.timers);
 }
 
 function updateEnvironmentDraft() {
@@ -274,13 +317,70 @@ function updateEnvironmentDraft() {
   $('node-dialog').dataset.draft = JSON.stringify(draft);
 }
 
-function updateTimerDraft() {
+function normalizeTimers(node) {
+  if (Array.isArray(node.timers)) {
+    return node.timers.map((timer, index) => ({
+      id: timer.id || `timer${index + 1}`,
+      name: timer.name || timer.id || `timer${index + 1}`,
+      periodSec: Math.max(0.001, Number(timer.periodSec || timer.period || 1.0)),
+      callbackCode: timer.callbackCode || timer.timerCode || DEFAULT_TIMER_CODE,
+    }));
+  }
+  if (node.timerEnabled) {
+    return [{
+      id: 'timer1',
+      name: 'timer1',
+      periodSec: Math.max(0.001, Number(node.timerPeriodSec || 1.0)),
+      callbackCode: node.timerCode || DEFAULT_TIMER_CODE,
+    }];
+  }
+  return [];
+}
+
+function resizeTimers(timers, count) {
+  const next = timers.slice(0, count);
+  while (next.length < count) {
+    const index = next.length + 1;
+    next.push({ id: `timer${index}`, name: `timer${index}`, periodSec: 1.0, callbackCode: DEFAULT_TIMER_CODE });
+  }
+  return next.map((timer, index) => ({
+    ...timer,
+    id: timer.id || `timer${index + 1}`,
+    name: timer.name || timer.id || `timer${index + 1}`,
+    periodSec: Math.max(0.001, Number(timer.periodSec || 1.0)),
+    callbackCode: timer.callbackCode || DEFAULT_TIMER_CODE,
+  }));
+}
+
+function renderTimerConfigList(timers) {
+  const container = $('timer-configs');
+  container.innerHTML = '';
+  timers.forEach((timer, index) => {
+    const row = document.createElement('div');
+    row.className = 'port-config-row';
+    row.innerHTML = `
+      <label><span>Timer Name</span><input data-timer-key="name" data-index="${index}" value="${escapeAttr(timer.name)}"></label>
+      <label><span>Period Seconds</span><input data-timer-key="periodSec" data-index="${index}" type="number" min="0.001" step="0.001" value="${escapeAttr(timer.periodSec)}"></label>`;
+    container.appendChild(row);
+  });
+  container.querySelectorAll('input,textarea').forEach((input) => {
+    input.oninput = () => updateDraftTimer(input);
+  });
+}
+
+function updateDraftTimer(input) {
   const draft = JSON.parse($('node-dialog').dataset.draft || JSON.stringify(createDefaultNode()));
-  draft.timerEnabled = $('config-timer-enabled').checked;
-  draft.timerPeriodSec = Math.max(0.001, Number($('config-timer-period').value || 1.0));
-  draft.timerCode = draft.timerCode || DEFAULT_TIMER_CODE;
-  draft.importCode = $('config-import-code').value || '';
-  draft.requirements = $('config-requirements').value || '';
+  draft.timers = normalizeTimers(draft);
+  const timer = draft.timers[Number(input.dataset.index)];
+  if (!timer) return;
+  if (input.dataset.timerKey === 'periodSec') {
+    timer.periodSec = Math.max(0.001, Number(input.value || 1.0));
+  } else {
+    timer[input.dataset.timerKey] = input.value;
+  }
+  draft.timerEnabled = draft.timers.length > 0;
+  draft.timerPeriodSec = draft.timers[0]?.periodSec || 1.0;
+  draft.timerCode = draft.timers[0]?.callbackCode || DEFAULT_TIMER_CODE;
   $('node-dialog').dataset.draft = JSON.stringify(draft);
 }
 
@@ -308,10 +408,7 @@ function renderPortConfigList(containerId, ports, labelPrefix) {
     const type = parseDataType(port.dataType);
     const receiveMode = port.receiveMode || 'callback';
     const receiveModeField = containerId.startsWith('input')
-      ? `<label><span>Receive Mode</span><select data-key="receiveMode" data-index="${index}">
-          <option value="callback"${receiveMode === 'callback' ? ' selected' : ''}>Callback</option>
-          <option value="manual"${receiveMode === 'manual' ? ' selected' : ''}>Manual take/latest</option>
-        </select></label>`
+      ? `<label class="checkbox-field"><input data-key="receiveMode" data-index="${index}" type="checkbox" ${receiveMode !== 'manual' ? 'checked' : ''}><span>Use Callback</span></label>`
       : '';
     row.innerHTML = `
       <label><span>${labelPrefix} Name</span><input data-key="name" data-index="${index}" value="${escapeAttr(port.name)}"></label>
@@ -378,7 +475,12 @@ function updateDraftPort(direction, input) {
     renderConfigPorts();
     return;
   } else {
-    port[input.dataset.key] = input.value;
+    if (input.dataset.key === 'receiveMode') {
+      port.receiveMode = input.checked ? 'callback' : 'manual';
+      if (input.checked && !port.callbackCode) port.callbackCode = DEFAULT_CALLBACK_CODE;
+    } else {
+      port[input.dataset.key] = input.value;
+    }
   }
   $('node-dialog').dataset.draft = JSON.stringify(draft);
 }
@@ -387,9 +489,10 @@ function saveNodeDialog(ev) {
   ev.preventDefault();
   const draft = JSON.parse($('node-dialog').dataset.draft);
   draft.name = $('config-node-name').value || 'custom_ros_node';
-  draft.timerEnabled = $('config-timer-enabled').checked;
-  draft.timerPeriodSec = Math.max(0.001, Number($('config-timer-period').value || 1.0));
-  draft.timerCode = draft.timerCode || DEFAULT_TIMER_CODE;
+  draft.timers = resizeTimers(normalizeTimers(draft), Number($('config-timer-count').value || 0));
+  draft.timerEnabled = draft.timers.length > 0;
+  draft.timerPeriodSec = draft.timers[0]?.periodSec || 1.0;
+  draft.timerCode = draft.timers[0]?.callbackCode || DEFAULT_TIMER_CODE;
   if (state.editingNode) {
     const index = state.nodes.findIndex((node) => node.id === state.editingNode);
     const previous = state.nodes[index];
@@ -410,19 +513,21 @@ function saveNodeDialog(ev) {
 function openCodeDialog(node, kind) {
   state.editingCode = { nodeId: node.id, kind };
   const callbackPort = kind.startsWith('callback:') ? node.inputs.find((port) => port.id === kind.slice('callback:'.length)) : null;
-  const isTimer = kind === 'timerCode';
+  const timerId = kind.startsWith('timer:') ? kind.slice('timer:'.length) : '';
+  const timer = timerId ? normalizeTimers(node).find((item) => item.id === timerId) : null;
+  const isTimer = kind === 'timerCode' || Boolean(timer);
   const isImport = kind === 'importCode';
   const isRequirements = kind === 'requirements';
   $('code-dialog-title').textContent = callbackPort
     ? `${node.name}.${callbackPort.name}: Callback Code`
-    : (isTimer ? `${node.name}: Timer Callback Code` : (isImport ? `${node.name}: Import Code` : (isRequirements ? `${node.name}: requirements.txt` : `${node.name}: Main Loop Code`)));
+    : (isTimer ? `${node.name}.${timer?.name || 'timer'}: Timer Callback Code` : (isImport ? `${node.name}: Import Code` : (isRequirements ? `${node.name}: requirements.txt` : `${node.name}: Main Loop Code`)));
   $('code-editor').value = callbackPort
     ? (callbackPort.callbackCode || '')
-    : (isTimer ? (node.timerCode || DEFAULT_TIMER_CODE) : (isImport ? (node.importCode || DEFAULT_IMPORT_CODE) : (isRequirements ? (node.requirements || '') : (node.loopCode || ''))));
+    : (isTimer ? (timer?.callbackCode || node.timerCode || DEFAULT_TIMER_CODE) : (isImport ? (node.importCode || DEFAULT_IMPORT_CODE) : (isRequirements ? (node.requirements || '') : (node.loopCode || ''))));
   $('code-hint').textContent = callbackPort
     ? 'lwrclpy callback scope: node, input_id, msg/request, response, state, publish(output_id, value), log(...). Use publish(...) instead of direct graph outputs.'
     : (isTimer
-      ? 'lwrclpy timer scope: node, state, now, period, publish(output_id, value), log(...).'
+      ? 'lwrclpy timer scope: node, timer_id, timer_name, state, now, period, publish(output_id, value), log(...).'
       : (isImport
         ? 'Import code runs once after this node venv is ready. Put imports such as import cv2 and import numpy as np here.'
         : (isRequirements
@@ -438,6 +543,13 @@ function saveCodeDialog(ev) {
   if (node && kind.startsWith('callback:')) {
     const port = node.inputs.find((item) => item.id === kind.slice('callback:'.length));
     if (port) port.callbackCode = $('code-editor').value;
+  } else if (node && kind.startsWith('timer:')) {
+    node.timers = normalizeTimers(node);
+    const timer = node.timers.find((item) => item.id === kind.slice('timer:'.length));
+    if (timer) timer.callbackCode = $('code-editor').value;
+    node.timerEnabled = node.timers.length > 0;
+    node.timerPeriodSec = node.timers[0]?.periodSec || 1.0;
+    node.timerCode = node.timers[0]?.callbackCode || DEFAULT_TIMER_CODE;
   } else if (node && kind === 'timerCode') {
     node.timerCode = $('code-editor').value;
   } else if (node && kind === 'importCode') {
@@ -448,6 +560,170 @@ function saveCodeDialog(ev) {
     node.loopCode = $('code-editor').value;
   }
   $('code-dialog').close();
+  renderAll();
+  scheduleRun();
+}
+
+function openSignalDialog(node) {
+  state.editingNode = node.id;
+  $('signal-dialog').dataset.nodeId = node.id;
+  $('signal-dialog').dataset.params = JSON.stringify(signalDefaults(node.params || {}));
+  renderSignalConfigFields();
+  $('signal-dialog').showModal();
+}
+
+function signalDefaults(params = {}) {
+  return {
+    signalType: 'sine',
+    amplitude: 1,
+    bias: 0,
+    frequency: 1,
+    phase: 0,
+    sampleTime: 0,
+    publishHz: 10,
+    ddsTopic: '',
+    stepTime: 1,
+    initialValue: 0,
+    finalValue: 1,
+    dutyCycle: 50,
+    rampSlope: 1,
+    chirpStartFrequency: 0.1,
+    chirpEndFrequency: 10,
+    chirpDuration: 10,
+    noiseMean: 0,
+    noiseStd: 1,
+    noiseSeed: 1,
+    ...params,
+  };
+}
+
+function renderSignalConfigFields() {
+  const p = signalDefaults(JSON.parse($('signal-dialog').dataset.params || '{}'));
+  const type = p.signalType || 'sine';
+  const field = (key, label, min = '', step = '0.01') => `
+    <label class="field">
+      <span>${label}</span>
+      <input data-signal-param="${key}" type="number" ${min !== '' ? `min="${escapeAttr(min)}"` : ''} step="${escapeAttr(step)}" value="${escapeAttr(p[key] ?? 0)}">
+    </label>`;
+  const textField = (key, label, placeholder = '') => `
+    <label class="field">
+      <span>${label}</span>
+      <input data-signal-text-param="${key}" value="${escapeAttr(p[key] || '')}" placeholder="${escapeAttr(placeholder)}">
+    </label>`;
+  const typeFields = {
+    step: [field('stepTime', 'Step Time', '0'), field('initialValue', 'Initial Value'), field('finalValue', 'Final Value')],
+    sine: [field('amplitude', 'Amplitude'), field('bias', 'Bias'), field('frequency', 'Frequency Hz', '0'), field('phase', 'Phase rad')],
+    square: [field('amplitude', 'Amplitude'), field('bias', 'Bias'), field('frequency', 'Frequency Hz', '0'), field('dutyCycle', 'Duty Cycle %', '0', '1')],
+    ramp: [field('rampSlope', 'Slope'), field('bias', 'Bias')],
+    chirp: [field('amplitude', 'Amplitude'), field('bias', 'Bias'), field('chirpStartFrequency', 'Start Frequency Hz', '0'), field('chirpEndFrequency', 'End Frequency Hz', '0'), field('chirpDuration', 'Duration sec', '0.001')],
+    white_noise: [field('noiseMean', 'Mean'), field('noiseStd', 'Std Dev', '0'), field('noiseSeed', 'Seed', '', '1')],
+  };
+  $('signal-config-fields').innerHTML = `
+    <label class="field">
+      <span>Signal Type</span>
+      <select id="signal-type">
+        <option value="step"${type === 'step' ? ' selected' : ''}>Step</option>
+        <option value="sine"${type === 'sine' ? ' selected' : ''}>Sine</option>
+        <option value="square"${type === 'square' ? ' selected' : ''}>Square</option>
+        <option value="ramp"${type === 'ramp' ? ' selected' : ''}>Ramp</option>
+        <option value="chirp"${type === 'chirp' ? ' selected' : ''}>Chirp</option>
+        <option value="white_noise"${type === 'white_noise' ? ' selected' : ''}>White Noise</option>
+      </select>
+    </label>
+    ${field('publishHz', 'Publish Hz', '0.01', 'any')}
+    ${textField('ddsTopic', 'DDS Topic', '/example/signal')}
+    ${field('sampleTime', 'Sample Time sec', '0', '0.001')}
+    ${(typeFields[type] || typeFields.sine).join('')}`;
+  $('signal-type').onchange = (ev) => {
+    const draft = signalDefaults(JSON.parse($('signal-dialog').dataset.params || '{}'));
+    $('signal-config-fields').querySelectorAll('[data-signal-param]').forEach((input) => {
+      draft[input.dataset.signalParam] = Number(input.value || 0);
+    });
+    $('signal-config-fields').querySelectorAll('[data-signal-text-param]').forEach((input) => {
+      draft[input.dataset.signalTextParam] = input.value.trim();
+    });
+    draft.signalType = ev.target.value;
+    $('signal-dialog').dataset.params = JSON.stringify(draft);
+    renderSignalConfigFields();
+  };
+}
+
+function saveSignalDialog(ev) {
+  ev.preventDefault();
+  const node = nodeFor($('signal-dialog').dataset.nodeId);
+  if (!node) return;
+  const params = signalDefaults(JSON.parse($('signal-dialog').dataset.params || '{}'));
+  params.signalType = $('signal-type').value;
+  $('signal-config-fields').querySelectorAll('[data-signal-param]').forEach((input) => {
+    params[input.dataset.signalParam] = Number(input.value || 0);
+  });
+  $('signal-config-fields').querySelectorAll('[data-signal-text-param]').forEach((input) => {
+    params[input.dataset.signalTextParam] = input.value.trim();
+  });
+  node.params = params;
+  $('signal-dialog').close();
+  renderAll();
+  refreshRunTimer();
+  scheduleRun();
+}
+
+function graphDefaults(params = {}) {
+  return {
+    fieldPath: 'data',
+    sampleLimit: 10000,
+    xAxisSeconds: 10,
+    yAxisMode: 'auto',
+    yMin: -1,
+    yMax: 1,
+    ...params,
+  };
+}
+
+function openGraphDialog(node) {
+  $('graph-dialog').dataset.nodeId = node.id;
+  $('graph-dialog').dataset.params = JSON.stringify(graphDefaults(node.params || {}));
+  renderGraphConfigFields();
+  $('graph-dialog').showModal();
+}
+
+function renderGraphConfigFields() {
+  const p = graphDefaults(JSON.parse($('graph-dialog').dataset.params || '{}'));
+  $('graph-field-path').value = p.fieldPath || 'data';
+  $('graph-sample-limit').value = Math.max(1, Number(p.sampleLimit || 10000));
+  $('graph-window-sec').value = Number(p.xAxisSeconds || 10);
+  $('graph-y-mode').value = p.yAxisMode === 'fixed' ? 'fixed' : 'auto';
+  $('graph-y-min').value = Number(p.yMin ?? -1);
+  $('graph-y-max').value = Number(p.yMax ?? 1);
+  updateGraphAxisFields();
+}
+
+function updateGraphAxisFields() {
+  const fixed = $('graph-y-mode').value === 'fixed';
+  $('graph-y-min').disabled = !fixed;
+  $('graph-y-max').disabled = !fixed;
+  const draft = graphDefaults(JSON.parse($('graph-dialog').dataset.params || '{}'));
+  draft.yAxisMode = fixed ? 'fixed' : 'auto';
+  $('graph-dialog').dataset.params = JSON.stringify(draft);
+}
+
+function saveGraphDialog(ev) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const node = nodeFor($('graph-dialog').dataset.nodeId);
+  if (!node) return;
+  const draft = graphDefaults(JSON.parse($('graph-dialog').dataset.params || '{}'));
+  const yMin = Number($('graph-y-min').value === '' ? -1 : $('graph-y-min').value);
+  const yMax = Number($('graph-y-max').value === '' ? 1 : $('graph-y-max').value);
+  node.params = {
+    ...draft,
+    fieldPath: $('graph-field-path').value.trim() || 'data',
+    sampleLimit: Math.max(1, Math.round(Number($('graph-sample-limit').value || 10000))),
+    xAxisSeconds: Math.max(0.1, Number($('graph-window-sec').value || 10)),
+    yAxisMode: $('graph-y-mode').value === 'fixed' ? 'fixed' : 'auto',
+    yMin: Math.min(yMin, yMax),
+    yMax: Math.max(yMin, yMax),
+  };
+  $('graph-dialog').close();
   renderAll();
   scheduleRun();
 }
@@ -502,8 +778,8 @@ function renderNodes() {
           <button data-action="imports">Import Code</button>
           <button data-action="requirements">Requirements</button>
           <button data-action="loop">Main Loop Code</button>
-          <button data-action="timer">Timer Callback Code</button>
-          ${node.inputs.map((input) => `<button data-callback-input="${escapeAttr(input.id)}">Callback: ${escapeHtml(input.name)}</button>`).join('')}
+          ${timerActionButtons(node)}
+          ${node.inputs.filter((input) => (input.receiveMode || 'callback') === 'callback').map((input) => `<button data-callback-input="${escapeAttr(input.id)}">Callback: ${escapeHtml(input.name)}</button>`).join('')}
         </div>`}`;
     root.appendChild(el);
     el.onclick = (ev) => selectNode(ev, node.id);
@@ -539,13 +815,12 @@ function renderNodes() {
         openCodeDialog(node, 'requirements');
       };
     }
-    const timerButton = el.querySelector('[data-action="timer"]');
-    if (timerButton) {
-      timerButton.onclick = (ev) => {
+    el.querySelectorAll('[data-timer-input]').forEach((button) => {
+      button.onclick = (ev) => {
         ev.stopPropagation();
-        openCodeDialog(node, 'timerCode');
+        openCodeDialog(node, `timer:${button.dataset.timerInput}`);
       };
-    }
+    });
     el.querySelectorAll('[data-callback-input]').forEach((button) => {
       button.onclick = (ev) => {
         ev.stopPropagation();
@@ -561,8 +836,24 @@ function renderNodes() {
 
 function nodeKindLabel(node) {
   if (!node.toolType) return 'lwrclpy Custom Node';
-  if (['topic_input', 'topic_output'].includes(node.toolType)) return 'Interface Node';
+  if (['topic_input', 'topic_output'].includes(node.toolType)) return 'Boundary Node';
   return 'Tool Node';
+}
+
+function inspectorHint(node) {
+  if (!node.toolType) {
+    const timers = normalizeTimers(node);
+    return `${node.inputs.length} subscriptions / ${node.outputs.length} publishers${timers.length ? ` / ${timers.length} timer${timers.length === 1 ? '' : 's'}` : ''}`;
+  }
+  if (['topic_input', 'topic_output'].includes(node.toolType)) {
+    return 'Graph boundary only. Sub/Pub is handled by the connected processing node.';
+  }
+  return 'Built-in processing/view node.';
+}
+
+function timerActionButtons(node) {
+  const timers = normalizeTimers(node);
+  return timers.map((timer) => `<button data-timer-input="${escapeAttr(timer.id)}">Timer: ${escapeHtml(timer.name)}</button>`).join('');
 }
 
 function toolActionHtml(node) {
@@ -582,16 +873,46 @@ function toolActionHtml(node) {
       <label class="tool-check"><input data-tool-video-loop type="checkbox" ${loopChecked}> Loop</label>
     </div>`;
   }
+  if (node.toolType === 'function_generator') {
+    return functionGeneratorHtml(node);
+  }
   if (node.toolType === 'graph_view') {
+    const p = graphDefaults(node.params || {});
     return `<div class="node-actions tool-actions">
-      <button data-action="plot-field">Plot Field: ${escapeHtml(node.params?.fieldPath || 'data')}</button>
+      <button data-action="graph-settings">Graph Settings</button>
+      <div class="tool-summary">${escapeHtml(graphSummary(p))}</div>
     </div>`;
   }
   return '';
 }
 
+function functionGeneratorHtml(node) {
+  const p = signalDefaults(node.params || {});
+  return `<div class="node-actions tool-actions signal-actions">
+    <button data-action="signal-settings">Signal Settings</button>
+    <div class="tool-summary">${escapeHtml(signalSummary(p))}</div>
+  </div>`;
+}
+
+function signalSummary(p) {
+  const type = String(p.signalType || 'sine');
+  const pub = `pub ${p.publishHz || 10} Hz`;
+  const dds = p.ddsTopic ? `, DDS ${p.ddsTopic}` : '';
+  if (type === 'step') return `Step: ${p.initialValue} -> ${p.finalValue} at ${p.stepTime}s, ${pub}${dds}`;
+  if (type === 'square') return `Square: ${p.amplitude} amp, ${p.frequency} Hz, ${p.dutyCycle}%, ${pub}${dds}`;
+  if (type === 'ramp') return `Ramp: slope ${p.rampSlope}, bias ${p.bias}, ${pub}${dds}`;
+  if (type === 'chirp') return `Chirp: ${p.chirpStartFrequency} -> ${p.chirpEndFrequency} Hz, ${pub}${dds}`;
+  if (type === 'white_noise') return `White Noise: mean ${p.noiseMean}, std ${p.noiseStd}, ${pub}${dds}`;
+  return `Sine: ${p.amplitude} amp, ${p.frequency} Hz, ${pub}${dds}`;
+}
+
+function graphSummary(p) {
+  const yAxis = p.yAxisMode === 'fixed' ? `Y ${p.yMin}..${p.yMax}` : 'Y auto';
+  return `${p.fieldPath || 'data'} / ${Number(p.xAxisSeconds || 10)}s / ${yAxis} / ${Math.max(1, Number(p.sampleLimit || 10000))} samples`;
+}
+
 function viewNodeHtml(node) {
-  if (!['image_file_input', 'video_file_input', 'image_view', 'image_file_save', 'graph_view'].includes(node.toolType)) return '';
+  if (!['image_file_input', 'video_file_input', 'function_generator', 'image_view', 'image_file_save', 'graph_view'].includes(node.toolType)) return '';
   const viewClass = node.toolType === 'video_file_input' ? ' node-view-video' : '';
   return `<div class="node-view${viewClass}" data-node-view="${escapeAttr(node.id)}">${renderViewContent(state.nodeViews[node.id])}</div>`;
 }
@@ -629,16 +950,18 @@ function bindToolActions(el, node) {
       renderAll();
     };
   }
-  const plotField = el.querySelector('[data-action="plot-field"]');
-  if (plotField) {
-    plotField.onclick = (ev) => {
+  const signalSettings = el.querySelector('[data-action="signal-settings"]');
+  if (signalSettings) {
+    signalSettings.onclick = (ev) => {
       ev.stopPropagation();
-      const value = prompt('Field path to plot', node.params?.fieldPath || 'data');
-      if (value === null) return;
-      node.params = node.params || {};
-      node.params.fieldPath = value.trim() || 'data';
-      renderAll();
-      scheduleRun();
+      openSignalDialog(node);
+    };
+  }
+  const graphSettings = el.querySelector('[data-action="graph-settings"]');
+  if (graphSettings) {
+    graphSettings.onclick = (ev) => {
+      ev.stopPropagation();
+      openGraphDialog(node);
     };
   }
 }
@@ -692,24 +1015,31 @@ function renderInspector() {
   }
   box.innerHTML = `
     <div class="inspector-title">${escapeHtml(node.name)}</div>
-    <div class="hint">${node.toolType ? 'Terminal topic node. Type is inferred from the connected node.' : `${node.inputs.length} subscriptions / ${node.outputs.length} publishers${node.timerEnabled ? ` / timer ${node.timerPeriodSec || 1}s` : ''}`}</div>
+    <div class="hint">${escapeHtml(inspectorHint(node))}</div>
+    ${node.toolType === 'function_generator' ? `<div class="inspector-actions"><button id="inspect-signal-settings">Signal Settings</button></div>` : ''}
+    ${node.toolType === 'graph_view' ? `<div class="inspector-actions"><button id="inspect-graph-settings">Graph Settings</button></div>` : ''}
     ${node.toolType ? '' : `<div class="inspector-actions">
         <button id="inspect-config">Configure Ports</button>
         <button id="inspect-imports">Import Code</button>
         <button id="inspect-requirements">Requirements</button>
         <button id="inspect-callback">Subscribe Callback Code</button>
-        <button id="inspect-timer">Timer Callback Code</button>
+        ${timerActionButtons(node)}
         <button id="inspect-loop">Main Loop Code</button>
       </div>`}
     <h3>Inputs</h3>
     ${inputSummary(node)}
     <h3>Outputs</h3>
-    ${portSummary(node.outputs)}`;
+    ${portSummary(node.outputs)}
+    ${node.toolType ? '' : `<h3>Timers</h3>${timerSummary(node)}`}`;
   const inspectConfig = $('inspect-config');
   if (inspectConfig) inspectConfig.onclick = () => openNodeDialog(node);
+  const inspectSignalSettings = $('inspect-signal-settings');
+  if (inspectSignalSettings) inspectSignalSettings.onclick = () => openSignalDialog(node);
+  const inspectGraphSettings = $('inspect-graph-settings');
+  if (inspectGraphSettings) inspectGraphSettings.onclick = () => openGraphDialog(node);
   const inspectCallback = $('inspect-callback');
   if (inspectCallback) inspectCallback.onclick = () => {
-    const firstInput = node.inputs[0];
+    const firstInput = node.inputs.find((input) => (input.receiveMode || 'callback') === 'callback');
     if (firstInput) openCodeDialog(node, `callback:${firstInput.id}`);
   };
   const inspectLoop = $('inspect-loop');
@@ -718,8 +1048,9 @@ function renderInspector() {
   if (inspectImports) inspectImports.onclick = () => openCodeDialog(node, 'importCode');
   const inspectRequirements = $('inspect-requirements');
   if (inspectRequirements) inspectRequirements.onclick = () => openCodeDialog(node, 'requirements');
-  const inspectTimer = $('inspect-timer');
-  if (inspectTimer) inspectTimer.onclick = () => openCodeDialog(node, 'timerCode');
+  box.querySelectorAll('[data-timer-input]').forEach((button) => {
+    button.onclick = () => openCodeDialog(node, `timer:${button.dataset.timerInput}`);
+  });
   box.querySelectorAll('[data-callback-port]').forEach((button) => {
     button.onclick = () => openCodeDialog(node, `callback:${button.dataset.callbackPort}`);
   });
@@ -732,7 +1063,23 @@ function portSummary(ports) {
 
 function inputSummary(node) {
   if (!node.inputs.length) return '<div class="hint">None</div>';
-  return node.inputs.map((p) => `<div class="port-summary"><b>${escapeHtml(p.name)}</b><span>${escapeHtml(p.dataType || 'connected topic type')}</span>${node.toolType ? '' : `<small>${escapeHtml(p.receiveMode || 'callback')}</small><button data-callback-port="${escapeAttr(p.id)}">Edit Callback</button>`}</div>`).join('');
+  return node.inputs.map((p) => {
+    const mode = p.receiveMode || 'callback';
+    const callbackButton = !node.toolType && mode === 'callback' ? `<button data-callback-port="${escapeAttr(p.id)}">Edit Callback</button>` : '';
+    return `<div class="port-summary"><b>${escapeHtml(p.name)}</b><span>${escapeHtml(p.dataType || 'connected topic type')}</span>${node.toolType ? '' : `<small>${escapeHtml(mode)}</small>${callbackButton}`}</div>`;
+  }).join('');
+}
+
+function timerSummary(node) {
+  const timers = normalizeTimers(node);
+  if (!timers.length) return '<div class="hint">None</div>';
+  return timers.map((timer) => `
+    <div class="port-summary">
+      <b>${escapeHtml(timer.name)}</b>
+      <span>${Number(timer.periodSec || 1).toFixed(3)} sec</span>
+      <small>${escapeHtml(timer.id)}</small>
+      <button data-timer-input="${escapeAttr(timer.id)}">Edit Callback</button>
+    </div>`).join('');
 }
 
 function startPan(ev) {
@@ -959,23 +1306,19 @@ function fitView() {
 }
 
 async function runGraph() {
-  if (state.runInFlight) return;
+  if (state.runInFlight || state.runState === 'stopping') return;
   state.runInFlight = true;
-  normalizeSourceTopicNames();
   const startedAt = performance.now();
   state.lastRunAt = startedAt;
   if (!state.autoTimer) setExecutionStatus('tick', 'Running one tick');
-  if (state.autoTimer) updateVideoInputsForRun();
-  const payload = {
-    nodes: state.nodes,
-    links: state.links.map(({ fromNode, fromPort, toNode, toPort, name }) => ({ fromNode, fromPort, toNode, toPort, name })),
-  };
+  const payload = graphRunPayload();
   try {
     const data = await fetch('/api/run', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
     }).then((res) => res.json());
+    if (state.runState === 'stopping' || state.runState === 'stopped') return;
     updateStatus(data);
     updateNodeViews(data.nodes || {});
     updateExecutionStatus(data, performance.now() - startedAt);
@@ -984,6 +1327,100 @@ async function runGraph() {
     setExecutionStatus('error', `API error: ${err.message}`);
   } finally {
     state.runInFlight = false;
+  }
+}
+
+function graphRunPayload() {
+  normalizeSourceTopicNames();
+  return {
+    nodes: state.nodes,
+    links: state.links.map(({ fromNode, fromPort, toNode, toPort, name }) => ({ fromNode, fromPort, toNode, toPort, name })),
+  };
+}
+
+async function startServerRun(durationSec = null) {
+  if (state.runInFlight) return;
+  state.runInFlight = true;
+  state.tickCount = 0;
+  state.lastRunAt = performance.now();
+  startVideoInputs();
+  startEmbeddedVideoInputs();
+  const payload = { ...graphRunPayload(), runHz: runLoopHz() };
+  if (durationSec !== null) payload.durationSec = durationSec;
+  try {
+    const data = await fetch('/api/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then((res) => res.json());
+    $('run-model').classList.add('active');
+    setExecutionStatus('running', durationSec === null
+      ? `Continuous run started on server at ${runLoopHz().toFixed(1)} Hz`
+      : `Run for ${durationSec.toFixed(1)} seconds on server at ${runLoopHz().toFixed(1)} Hz`);
+    updateRunStatus(data);
+    startRunStatusPolling();
+  } catch (err) {
+    setExecutionStatus('error', `Start API error: ${err.message}`);
+  } finally {
+    state.runInFlight = false;
+  }
+}
+
+function startRunStatusPolling() {
+  if (state.autoTimer) clearInterval(state.autoTimer);
+  pollRunStatus();
+  state.autoTimer = setInterval(pollRunStatus, 50);
+}
+
+async function pollRunStatus() {
+  if (state.runStatusInFlight) return;
+  state.runStatusInFlight = true;
+  try {
+    const data = await fetch('/api/run-status').then((res) => res.json());
+    updateRunStatus(data);
+  } catch (err) {
+    setExecutionStatus('error', `Status API error: ${err.message}`);
+  } finally {
+    state.runStatusInFlight = false;
+  }
+}
+
+function updateRunStatus(data) {
+  if (!data || data.error) {
+    setExecutionStatus('error', data?.error || 'Run status unavailable');
+    return;
+  }
+  updateStatus(data);
+  updateNodeViews(data.nodes || {});
+  const run = data.run || {};
+  state.tickCount = Number(run.tickCount || 0);
+  if (run.error) {
+    setExecutionStatus('error', `Server run error: ${run.error}`);
+  } else if (run.running) {
+    setExecutionStatus('running', `Server tick ${state.tickCount} at ${Number(run.hz || runLoopHz()).toFixed(1)} Hz`);
+  } else if (state.autoTimer) {
+    clearInterval(state.autoTimer);
+    state.autoTimer = null;
+    pauseVideoInputs();
+    $('run-model').classList.remove('active');
+    setExecutionStatus('stopped', `Server run stopped after ${state.tickCount} ticks`);
+  }
+}
+
+async function stopWorkers(force = false) {
+  try {
+    const endpoint = force ? '/api/force-stop' : '/api/stop';
+    const data = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ force }),
+    }).then((res) => res.json());
+    const count = Object.keys(data.stopped || {}).length;
+    setExecutionStatus('stopped', `${force ? 'Force stopped' : 'Stopped'} ${count} worker process${count === 1 ? '' : 'es'}`);
+    return data;
+  } catch (err) {
+    setExecutionStatus('error', `Stop API error: ${err.message}`);
+    return null;
   }
 }
 
@@ -1024,6 +1461,7 @@ function setExecutionStatus(kind, detail) {
     idle: 'Idle',
     tick: 'Tick',
     running: 'Running',
+    stopping: 'Stopping',
     stopped: 'Stopped',
     error: 'Error',
   }[kind] || kind;
@@ -1054,27 +1492,56 @@ function renderViewContent(view) {
     return `<figure class="image-view"><img src="${escapeAttr(view.dataUrl)}" alt=""><figcaption>${escapeHtml(view.status || '')}</figcaption></figure>`;
   }
   if (view.kind === 'plot') {
-    return renderPlot(view.series || [], view.status || '');
+    return renderPlot(view.series || [], view.status || '', view);
   }
   return `<div class="view-empty">${escapeHtml(view.status || 'No data')}</div>`;
 }
 
-function renderPlot(series, label) {
+function renderPlot(series, label, view = {}) {
   const width = 280;
   const height = 120;
-  const values = series.map(Number).filter((value) => Number.isFinite(value));
-  if (values.length < 2) {
+  const pointsData = series.map((item, index) => {
+    if (item && typeof item === 'object') return { t: Number(item.t), y: Number(item.y) };
+    return { t: index, y: Number(item) };
+  }).filter((point) => Number.isFinite(point.t) && Number.isFinite(point.y));
+  if (pointsData.length < 2) {
     return `<div class="plot-view"><svg viewBox="0 0 ${width} ${height}"></svg><span>${escapeHtml(label || 'Waiting for values')}</span></div>`;
   }
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const values = pointsData.map((point) => point.y);
+  const yAxis = view.yAxis || {};
+  const fixed = yAxis.mode === 'fixed';
+  let min = fixed ? Number(yAxis.min) : Math.min(...values);
+  let max = fixed ? Number(yAxis.max) : Math.max(...values);
+  if (!Number.isFinite(min)) min = Math.min(...values);
+  if (!Number.isFinite(max)) max = Math.max(...values);
+  if (max === min) {
+    max += 0.5;
+    min -= 0.5;
+  }
   const span = max - min || 1;
-  const points = values.map((value, index) => {
-    const x = values.length === 1 ? 0 : (index / (values.length - 1)) * width;
-    const y = height - ((value - min) / span) * (height - 12) - 6;
+  const latestT = Math.max(...pointsData.map((point) => point.t));
+  const windowSec = Math.max(0.1, Number(view.xAxisSeconds || (latestT - pointsData[0].t) || 1));
+  const startT = latestT - windowSec;
+  const plotPoints = decimatePlotPoints(pointsData, width);
+  const points = plotPoints.map((point) => {
+    const x = clamp(((point.t - startT) / windowSec) * width, 0, width);
+    const y = clamp(height - ((point.y - min) / span) * (height - 12) - 6, 0, height);
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
-  return `<div class="plot-view"><svg viewBox="0 0 ${width} ${height}"><polyline points="${points}"></polyline></svg><span>${escapeHtml(label)} ${min.toFixed(3)} .. ${max.toFixed(3)}</span></div>`;
+  return `<div class="plot-view"><svg viewBox="0 0 ${width} ${height}"><polyline points="${points}"></polyline></svg><span>${escapeHtml(label)} ${windowSec.toFixed(1)}s / ${min.toFixed(3)} .. ${max.toFixed(3)}</span></div>`;
+}
+
+function decimatePlotPoints(points, width) {
+  const maxPoints = Math.max(64, width * 2);
+  if (points.length <= maxPoints) return points;
+  const step = points.length / maxPoints;
+  const sampled = [];
+  for (let i = 0; i < maxPoints; i += 1) {
+    sampled.push(points[Math.min(points.length - 1, Math.floor(i * step))]);
+  }
+  const last = points[points.length - 1];
+  if (sampled[sampled.length - 1] !== last) sampled.push(last);
+  return sampled;
 }
 
 function loadImageFile(node, file) {
@@ -1388,6 +1855,7 @@ function syntheticVideoFrame(baseFrame, frameIndex) {
 }
 
 function scheduleRun() {
+  if (state.autoTimer) return;
   const now = performance.now();
   if (now - state.lastRunAt > 80) {
     runGraph();
@@ -1399,12 +1867,19 @@ function scheduleRun() {
 
 function startRun() {
   if (state.autoTimer) return;
-  state.autoTimer = setInterval(runGraph, 100);
-  $('run-model').classList.add('active');
-  setExecutionStatus('running', 'Continuous run started');
-  startVideoInputs();
-  startEmbeddedVideoInputs();
-  runGraph();
+  startServerRun();
+}
+
+function refreshRunTimer() {
+  startServerRun();
+}
+
+function runLoopHz() {
+  return clamp(Number($('run-hz')?.value || 1000), 1, 1000);
+}
+
+function runIntervalMs() {
+  return Math.max(1, Math.round(1000 / runLoopHz()));
 }
 
 function stopRun(message = null) {
@@ -1418,14 +1893,32 @@ function stopRun(message = null) {
   }
   pauseVideoInputs();
   $('run-model').classList.remove('active');
-  setExecutionStatus('stopped', message || `Stopped after ${state.tickCount} ticks`);
+  setExecutionStatus('stopping', message || `Stopping after ${state.tickCount} ticks`);
+  stopWorkers(false);
+}
+
+function forceStopRun() {
+  if (state.autoTimer) {
+    clearInterval(state.autoTimer);
+    state.autoTimer = null;
+  }
+  if (state.runStopTimer) {
+    clearTimeout(state.runStopTimer);
+    state.runStopTimer = null;
+  }
+  pauseVideoInputs();
+  $('run-model').classList.remove('active');
+  setExecutionStatus('stopping', `Force stopping after ${state.tickCount} ticks`);
+  stopWorkers(true);
 }
 
 function runForDuration() {
-  stopRun();
-  startRun();
   const seconds = Math.max(0.1, Number($('run-duration').value || 5));
-  state.runStopTimer = setTimeout(stopRun, seconds * 1000);
+  if (state.runStopTimer) {
+    clearTimeout(state.runStopTimer);
+    state.runStopTimer = null;
+  }
+  startServerRun(seconds);
 }
 
 function clearGraph() {
@@ -1495,7 +1988,7 @@ async function loadProject(event) {
   if (!file) return;
   stopAllVideoInputs();
   const imported = JSON.parse(await file.text());
-  state.nodes = imported.nodes || [];
+  state.nodes = (imported.nodes || []).map(normalizeImportedNode);
   state.links = (imported.links || []).map((link) => ({ id: link.id || `l${Date.now()}${Math.random()}`, ...link }));
   state.links = state.links.filter(isValidLink);
   normalizeSourceTopicNames();
@@ -2595,6 +3088,11 @@ function extractPythonNodeConfig(text) {
 }
 
 function normalizeImportedNode(node) {
+  const isTool = Boolean(node.toolType);
+  const toolInputType = (port, fallback) => {
+    if (node.toolType === 'graph_view' && !port.dataType) return 'std_msgs/msg/Float32';
+    return port.dataType ?? fallback;
+  };
   return {
     id: node.id || `n${state.nextId++}`,
     name: node.name || 'imported_lwrclpy_node',
@@ -2603,16 +3101,17 @@ function normalizeImportedNode(node) {
     inputs: (node.inputs || []).map((port, index) => ({
       id: port.id || `in${index + 1}`,
       name: port.name || `in${index + 1}`,
-      dataType: port.dataType || firstDataType(),
+      dataType: toolInputType(port, firstDataType()),
       receiveMode: port.receiveMode || 'callback',
       callbackCode: port.callbackCode || '',
     })),
     outputs: (node.outputs || []).map((port, index) => ({
       id: port.id || `out${index + 1}`,
       name: port.name || `out${index + 1}`,
-      dataType: port.dataType || firstDataType(),
+      dataType: port.dataType ?? firstDataType(),
     })),
     loopCode: node.loopCode || '',
+    timers: isTool ? [] : normalizeTimers(node),
     timerEnabled: Boolean(node.timerEnabled),
     timerPeriodSec: Number(node.timerPeriodSec || 1.0),
     timerCode: node.timerCode || DEFAULT_TIMER_CODE,

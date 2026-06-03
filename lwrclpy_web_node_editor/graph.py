@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import importlib
 import json
+import math
 import pkgutil
 import base64
 import hashlib
+import os
+import random
+import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +54,14 @@ class PortConfig:
 
 
 @dataclass
+class TimerConfig:
+    id: str
+    name: str
+    period_sec: float = 1.0
+    callback_code: str = ""
+
+
+@dataclass
 class CustomLwrclNodeConfig:
     id: str
     name: str
@@ -57,6 +70,7 @@ class CustomLwrclNodeConfig:
     inputs: list[PortConfig] = field(default_factory=list)
     outputs: list[PortConfig] = field(default_factory=list)
     loop_code: str = ""
+    timers: list[TimerConfig] = field(default_factory=list)
     timer_enabled: bool = False
     timer_period_sec: float = 1.0
     timer_code: str = ""
@@ -161,17 +175,18 @@ class CustomLwrclNodeInstance:
         self.last_outputs: dict[str, Any] = {}
         self.logs: list[str] = []
         self.view: dict[str, Any] = {}
-        self._series: list[float] = []
+        self._series: list[dict[str, float]] = []
         self._image_input_signatures: dict[str, tuple[Any, ...]] = {}
         self._last_saved_signature = ""
         self._next_timer_at = 0.0
+        self._next_timer_by_id: dict[str, float] = {}
         self._exec_globals: dict[str, Any] | None = None
         self._import_signature = ""
         self.env_path: Path | None = None
+        self.env_python_bin: Path | None = None
         self.env_site_packages: Path | None = None
         self.env_status = "pending"
         self.publishers: dict[str, list[Any]] = {}
-        self.input_publishers: dict[str, list[Any]] = {}
         self.clients: dict[str, list[Any]] = {}
         self.subscriptions: list[Any] = []
         self.services: list[Any] = []
@@ -181,6 +196,7 @@ class CustomLwrclNodeInstance:
         self.worker_signature = None
         self.worker_config_path: Path | None = None
         self.worker_log_path: Path | None = None
+        self.worker_pid_path: Path | None = None
         self.env_signature = None
         self.signature = None
         self._setup_transport()
@@ -205,46 +221,71 @@ class CustomLwrclNodeInstance:
                 pass
         self.lwrcl_node = None
         self.publishers = {}
-        self.input_publishers = {}
         self.clients = {}
         self.subscriptions = []
         self.services = []
         self.stop_worker()
 
-    def stop_worker(self) -> None:
+    def stop_worker(self, force: bool = False) -> bool:
         process = self.worker_process
         self.worker_process = None
         if process is None or process.poll() is not None:
-            return
-        process.terminate()
+            if self.worker_pid_path:
+                try:
+                    self.worker_pid_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            return False
+        self._signal_worker(process, force)
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            process.kill()
+            self._signal_worker(process, True)
             process.wait(timeout=2)
+        if self.worker_pid_path:
+            try:
+                self.worker_pid_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        self.env_status = "worker stopped"
+        return True
+
+    def _signal_worker(self, process: subprocess.Popen, force: bool) -> None:
+        sig = signal.SIGKILL if force else signal.SIGTERM
+        try:
+            if os.name != "nt":
+                os.killpg(process.pid, sig)
+            elif force:
+                process.kill()
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            pass
 
     def tick(self, linked_inputs: dict[str, Any]) -> dict[str, Any]:
         self.runtime.spin_once()
-        for key, value in linked_inputs.items():
-            if value is not None:
-                self._store_input(key, value)
-                self.publish_input(key, value)
-                if not self.config.tool_type:
-                    port = self._input_port(key)
-                    if port is not None and port.receive_mode == "callback":
-                        callback_outputs: dict[str, Any] = {}
-                        self._execute_callback(port, value, None, callback_outputs)
-                        for output_id, output_value in callback_outputs.items():
-                            self.publish(output_id, output_value)
         if self._execute_tool(linked_inputs):
+            self.runtime.spin_once()
             return {
-                "inputs": self._repr_values({**self.last_inputs, **linked_inputs}),
+                "inputs": self._repr_values(self.last_inputs),
                 "outputs": self._repr_values(self.last_outputs),
                 "logs": self.logs[-20:],
                 "lwrclpy": self.runtime.available,
                 "environment": self.env_status,
             }
-        merged_inputs = {**self.last_inputs, **linked_inputs}
+        if self.worker_process is not None:
+            self.runtime.spin_once()
+            if self.worker_process.poll() is not None:
+                self.env_status = f"worker exited: {self.worker_process.returncode}"
+            return {
+                "inputs": self._repr_values(self.last_inputs),
+                "outputs": self._repr_values(self.last_outputs),
+                "logs": self._combined_logs(),
+                "lwrclpy": self.runtime.available,
+                "environment": self.env_status,
+                "worker": "running" if self.worker_process.poll() is None else "stopped",
+            }
+        merged_inputs = dict(self.last_inputs)
         self._reset_state_on_image_shape_change(merged_inputs)
         local_outputs: dict[str, Any] = {}
         self._execute_timer_if_due(merged_inputs, local_outputs)
@@ -271,13 +312,6 @@ class CustomLwrclNodeInstance:
             request = self._coerce_service_request(self._output_type(output_id), value)
             for client in self.clients[output_id]:
                 client.call_async(request)
-
-    def publish_input(self, input_id: str, value: Any) -> None:
-        if input_id not in self.input_publishers:
-            return
-        msg = self._coerce_message(self._input_type(input_id), value)
-        for publisher in self.input_publishers[input_id]:
-            publisher.publish(msg)
 
     def latest(self, input_id: str, default: Any = None) -> Any:
         return self.last_inputs.get(input_id, default)
@@ -307,18 +341,18 @@ class CustomLwrclNodeInstance:
 
     def _setup_transport(self) -> None:
         self.signature = self._signature(self.config)
-        if self.config.tool_type not in {"topic_input", "topic_output"}:
+        if self.config.tool_type in {"topic_input", "topic_output"}:
             return
         needs_transport = any(self._port_topics(port) for port in [*self.config.inputs, *self.config.outputs])
-        if not needs_transport or not self.runtime.ensure_initialized():
+        if not needs_transport:
+            return
+        if not self.runtime.ensure_initialized():
             return
         self.lwrcl_node = self.runtime.rclpy.create_node(f"ipn_user_{self.config.id}".replace("-", "_")[:80])
-        if self.config.tool_type == "topic_input":
-            self._setup_topic_input_transport()
-        elif self.config.tool_type == "topic_output":
-            self._setup_topic_output_transport()
+        if self.config.tool_type:
+            self._setup_tool_transport()
         else:
-            self._setup_custom_transport()
+            self._setup_worker_bridge_transport()
         if self.runtime.executor is not None:
             self.runtime.executor.add_node(self.lwrcl_node)
 
@@ -348,24 +382,56 @@ class CustomLwrclNodeInstance:
             else:
                 self.view = {"kind": "empty", "status": "No media selected"}
             return True
+        if tool == "function_generator":
+            value, status, should_publish = self._function_generator_value()
+            if should_publish:
+                output = {"data": float(value)}
+                self.last_outputs["out1"] = output
+                self.publish("out1", output)
+            else:
+                self.last_outputs.pop("out1", None)
+            self.view = {"kind": "text", "status": status}
+            return True
         if tool == "image_view":
-            image = linked_inputs.get("in1") or self.last_inputs.get("in1")
+            image = self.take("in1", None) or self.last_inputs.get("in1")
             data_url = self._image_data_url(image)
             self.view = {"kind": "image", "dataUrl": data_url, "status": self._image_status(image) if data_url else "No image"}
             return True
         if tool == "image_file_save":
-            image = linked_inputs.get("in1") or self.last_inputs.get("in1")
+            image = self.take("in1", None) or self.last_inputs.get("in1")
             path = self._save_image(image)
             self.view = {"kind": "text", "status": path or "No image to save"}
             return True
         if tool == "graph_view":
-            value = linked_inputs.get("in1") or self.last_inputs.get("in1")
-            y = self._extract_number(value, str(self.config.params.get("fieldPath") or "data"))
-            if y is not None:
-                self._series.append(y)
-                limit = int(self.config.params.get("sampleLimit") or 120)
-                del self._series[:-max(8, min(limit, 1000))]
-            self.view = {"kind": "plot", "series": self._series[-240:], "status": str(self.config.params.get("fieldPath") or "data")}
+            queued_values = []
+            while self.has_input("in1"):
+                queued_values.append(self.take("in1"))
+            now = time.time()
+            if "graph_view_start_at" not in self.state:
+                self.state["graph_view_start_at"] = now
+            elapsed = max(0.0, now - float(self.state["graph_view_start_at"]))
+            limit = max(8, min(int(self.config.params.get("sampleLimit") or 10000), 100000))
+            for value in queued_values:
+                y = self._extract_number(value, str(self.config.params.get("fieldPath") or "data"))
+                if y is None:
+                    continue
+                self._series.append({"t": elapsed, "y": y})
+                del self._series[:-limit]
+                window = max(0.1, float(self.config.params.get("xAxisSeconds") or 10.0))
+                cutoff = elapsed - window
+                self._series = [point for point in self._series if point.get("t", 0.0) >= cutoff]
+            y_mode = str(self.config.params.get("yAxisMode") or "auto")
+            self.view = {
+                "kind": "plot",
+                "series": self._series[-limit:],
+                "status": str(self.config.params.get("fieldPath") or "data"),
+                "xAxisSeconds": max(0.1, float(self.config.params.get("xAxisSeconds") or 10.0)),
+                "yAxis": {
+                    "mode": "fixed" if y_mode == "fixed" else "auto",
+                    "min": float(self.config.params.get("yMin") if self.config.params.get("yMin") is not None else -1.0),
+                    "max": float(self.config.params.get("yMax") if self.config.params.get("yMax") is not None else 1.0),
+                },
+            }
             return True
         return False
 
@@ -391,6 +457,93 @@ class CustomLwrclNodeInstance:
             return False
         self.state["image_file_sent_count"] = sent_count + 1
         return True
+
+    def _function_generator_value(self) -> tuple[float, str, bool]:
+        p = self.config.params
+        signature = json.dumps(p, sort_keys=True, default=str)
+        if self.state.get("function_generator_signature") != signature:
+            for key in list(self.state.keys()):
+                if key.startswith("function_generator_"):
+                    self.state.pop(key, None)
+            self.state["function_generator_signature"] = signature
+        now = time.time()
+        if "function_generator_start_at" not in self.state:
+            self.state["function_generator_start_at"] = now
+        elapsed = max(0.0, now - float(self.state["function_generator_start_at"]))
+        publish_hz = max(0.01, float(p.get("publishHz") or 10.0))
+        publish_period = 1.0 / publish_hz
+        next_publish_at = float(self.state.get("function_generator_next_publish_at") or 0.0)
+        should_publish = now >= next_publish_at
+        sample_time = max(0.0, float(p.get("sampleTime") or 0.0))
+        if sample_time > 0:
+            last_sample_at = self.state.get("function_generator_last_sample_at")
+            if last_sample_at is not None and now - float(last_sample_at) < sample_time:
+                value = float(self.state.get("function_generator_last_value") or 0.0)
+                if should_publish:
+                    self.state["function_generator_next_publish_at"] = self._next_periodic_time(next_publish_at, publish_period, now)
+                return value, self._function_generator_status(value, elapsed, held=True, should_publish=should_publish, publish_hz=publish_hz), should_publish
+            self.state["function_generator_last_sample_at"] = now
+
+        signal_type = str(p.get("signalType") or "sine")
+        value = self._function_generator_raw_value(signal_type, elapsed)
+        self.state["function_generator_last_value"] = float(value)
+        if should_publish:
+            self.state["function_generator_next_publish_at"] = self._next_periodic_time(next_publish_at, publish_period, now)
+        return float(value), self._function_generator_status(float(value), elapsed, held=False, should_publish=should_publish, publish_hz=publish_hz), should_publish
+
+    def _next_periodic_time(self, previous_next: float, period: float, now: float) -> float:
+        next_at = (previous_next if previous_next > 0 else now) + period
+        while next_at <= now:
+            next_at += period
+        return next_at
+
+    def _function_generator_raw_value(self, signal_type: str, elapsed: float) -> float:
+        p = self.config.params
+        amplitude = float(p.get("amplitude") or 0.0)
+        bias = float(p.get("bias") or 0.0)
+        frequency = max(0.0, float(p.get("frequency") or 0.0))
+        phase = float(p.get("phase") or 0.0)
+        if signal_type == "step":
+            step_time = max(0.0, float(p.get("stepTime") or 0.0))
+            initial = float(p.get("initialValue") or 0.0)
+            final = float(p.get("finalValue") or 0.0)
+            return final if elapsed >= step_time else initial
+        if signal_type == "square":
+            duty = max(0.0, min(100.0, float(p.get("dutyCycle") or 50.0))) / 100.0
+            if frequency <= 0:
+                return bias + amplitude
+            cycle = (elapsed * frequency + phase / (2.0 * math.pi)) % 1.0
+            return bias + (amplitude if cycle < duty else -amplitude)
+        if signal_type == "ramp":
+            slope = float(p.get("rampSlope") or 0.0)
+            return bias + slope * elapsed
+        if signal_type == "chirp":
+            duration = max(0.001, float(p.get("chirpDuration") or 1.0))
+            f0 = max(0.0, float(p.get("chirpStartFrequency") or 0.0))
+            f1 = max(0.0, float(p.get("chirpEndFrequency") or f0))
+            t = min(elapsed, duration)
+            k = (f1 - f0) / duration
+            angle = 2.0 * math.pi * (f0 * t + 0.5 * k * t * t) + phase
+            return bias + amplitude * math.sin(angle)
+        if signal_type == "white_noise":
+            seed = int(float(p.get("noiseSeed") or 0.0))
+            if self.state.get("function_generator_noise_seed") != seed:
+                self.state["function_generator_noise_rng"] = random.Random(seed)
+                self.state["function_generator_noise_seed"] = seed
+            rng = self.state.get("function_generator_noise_rng")
+            if not isinstance(rng, random.Random):
+                rng = random.Random(seed)
+                self.state["function_generator_noise_rng"] = rng
+            mean = float(p.get("noiseMean") or 0.0)
+            std = max(0.0, float(p.get("noiseStd") or 0.0))
+            return rng.gauss(mean, std)
+        return bias + amplitude * math.sin((2.0 * math.pi * frequency * elapsed) + phase)
+
+    def _function_generator_status(self, value: float, elapsed: float, held: bool, should_publish: bool, publish_hz: float) -> str:
+        signal_type = str(self.config.params.get("signalType") or "sine").replace("_", " ")
+        state = "published" if should_publish else "waiting"
+        suffix = " held" if held else ""
+        return f"{signal_type} {publish_hz:.3g}Hz {state} t={elapsed:.3f}s y={value:.5g}{suffix}"
 
     def _image_signature(self, image: dict[str, Any]) -> str:
         data = image.get("data")
@@ -521,6 +674,11 @@ class CustomLwrclNodeInstance:
                 current = current[int(part)]
             else:
                 current = getattr(current, part, None)
+                if callable(current):
+                    try:
+                        current = current()
+                    except TypeError:
+                        pass
         if isinstance(current, (int, float)):
             return float(current)
         try:
@@ -531,9 +689,25 @@ class CustomLwrclNodeInstance:
     def _field(self, value: Any, key: str) -> Any:
         if isinstance(value, dict):
             return value.get(key)
-        return getattr(value, key, None)
+        field = getattr(value, key, None)
+        if callable(field):
+            try:
+                return field()
+            except TypeError:
+                return field
+        return field
 
-    def _setup_custom_transport(self) -> None:
+    def _set_field(self, target: Any, key: str, value: Any) -> None:
+        field = getattr(target, key, None)
+        if callable(field):
+            try:
+                field(value)
+                return
+            except TypeError:
+                pass
+        setattr(target, key, value)
+
+    def _setup_tool_transport(self) -> None:
         for output in self.config.outputs:
             topics = self._port_topics(output)
             type_cls = import_type_class(output.data_type)
@@ -555,7 +729,7 @@ class CustomLwrclNodeInstance:
                     srv = self.lwrcl_node.create_service(type_cls, topic, self._make_service_callback(input_port.id))
                     self.services.append(srv)
 
-    def _setup_topic_input_transport(self) -> None:
+    def _setup_worker_bridge_transport(self) -> None:
         for output in self.config.outputs:
             type_cls = import_type_class(output.data_type)
             _, kind, _ = split_type(output.data_type)
@@ -564,15 +738,6 @@ class CustomLwrclNodeInstance:
             for topic in self._port_topics(output):
                 sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_output_subscription_callback(output.id), 10)
                 self.subscriptions.append(sub)
-
-    def _setup_topic_output_transport(self) -> None:
-        for input_port in self.config.inputs:
-            type_cls = import_type_class(input_port.data_type)
-            _, kind, _ = split_type(input_port.data_type)
-            if kind != "msg":
-                continue
-            for topic in self._port_topics(input_port):
-                self.input_publishers.setdefault(input_port.id, []).append(self.lwrcl_node.create_publisher(type_cls, topic, 10))
 
     def _port_topics(self, port: PortConfig) -> tuple[str, ...]:
         if port.topics:
@@ -648,31 +813,34 @@ class CustomLwrclNodeInstance:
             self.log(f"loop error: {exc}")
 
     def _execute_timer_if_due(self, inputs: dict[str, Any], outputs: dict[str, Any]) -> None:
-        if not self.config.timer_enabled:
-            return
-        code = self.config.timer_code.strip()
-        if not code:
-            return
         now = time.time()
-        period = max(0.001, float(self.config.timer_period_sec or 1.0))
-        if self._next_timer_at <= 0:
-            self._next_timer_at = now
-        if now < self._next_timer_at:
-            return
-        self._next_timer_at = now + period
-        local = self._locals({
-            "inputs": inputs,
-            "outputs": outputs,
-            "now": now,
-            "period": period,
-            "latest": self.latest,
-            "take": self.take,
-            "has_input": self.has_input,
-        })
-        try:
-            exec(code, self._globals(), local)
-        except Exception as exc:
-            self.log(f"timer callback error: {exc}")
+        for timer in self.config.timers:
+            code = timer.callback_code.strip()
+            if not code:
+                continue
+            period = max(0.001, float(timer.period_sec or 1.0))
+            next_at = self._next_timer_by_id.get(timer.id, 0.0)
+            if next_at <= 0:
+                next_at = now
+            if now < next_at:
+                self._next_timer_by_id[timer.id] = next_at
+                continue
+            self._next_timer_by_id[timer.id] = self._next_periodic_time(next_at, period, now)
+            local = self._locals({
+                "timer_id": timer.id,
+                "timer_name": timer.name,
+                "inputs": inputs,
+                "outputs": outputs,
+                "now": now,
+                "period": period,
+                "latest": self.latest,
+                "take": self.take,
+                "has_input": self.has_input,
+            })
+            try:
+                exec(code, self._globals(), local)
+            except Exception as exc:
+                self.log(f"{timer.id} timer callback error: {exc}")
 
     def _globals(self) -> dict[str, Any]:
         signature = f"{self.env_site_packages}|{self.config.import_code}"
@@ -774,14 +942,14 @@ class CustomLwrclNodeInstance:
         if hasattr(value, "_fields_and_field_types"):
             return value
         msg = msg_cls()
-        if hasattr(msg, "data"):
-            msg.data = value
-        elif isinstance(value, dict):
+        if isinstance(value, dict):
             for key, item in value.items():
                 if hasattr(msg, key):
                     if key == "data" and isinstance(item, str) and value.get("dataEncoding") == "base64":
                         item = base64.b64decode(item)
-                    setattr(msg, key, item)
+                    self._set_field(msg, key, item)
+        elif hasattr(msg, "data"):
+            self._set_field(msg, "data", value)
         return msg
 
     def _coerce_service_request(self, data_type: str, value: Any) -> Any:
@@ -790,11 +958,11 @@ class CustomLwrclNodeInstance:
         if hasattr(value, "_fields_and_field_types"):
             return value
         if hasattr(request, "data"):
-            request.data = value
+            self._set_field(request, "data", value)
         elif isinstance(value, dict):
             for key, item in value.items():
                 if hasattr(request, key):
-                    setattr(request, key, item)
+                    self._set_field(request, key, item)
         return request
 
     def _repr_values(self, values: dict[str, Any]) -> dict[str, str]:
@@ -819,21 +987,40 @@ class GraphRuntime:
     def __init__(self) -> None:
         self.runtime = LwrclpyRuntime()
         self.instances: dict[str, CustomLwrclNodeInstance] = {}
+        self._lock = threading.RLock()
 
     @property
     def ros(self) -> LwrclpyRuntime:
         return self.runtime
 
     def close(self) -> None:
-        for node in self.instances.values():
-            node.close()
-        self.instances.clear()
+        with self._lock:
+            for node in self.instances.values():
+                node.close()
+            self.instances.clear()
+
+    def stop(self, force: bool = False) -> dict[str, Any]:
+        with self._lock:
+            stopped: dict[str, str] = {}
+            for node_id, node in list(self.instances.items()):
+                if node.stop_worker(force=force):
+                    stopped[node_id] = "killed" if force else "terminated"
+            return {"stopped": stopped, "force": force}
 
     def run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            return self._run_locked(payload)
+
+    def _run_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
         configs = [self._parse_node(node) for node in payload.get("nodes", [])]
         links = [link for link in payload.get("links", []) if self._valid_link(link, configs)]
         self._apply_link_topics(configs, links)
-        needs_lwrclpy = any(node.tool_type in {"topic_input", "topic_output"} for node in configs)
+        self._apply_builtin_param_topics(configs)
+        needs_lwrclpy = bool(links) or any(not node.tool_type for node in configs) or any(
+            any(port.topics for port in [*node.inputs, *node.outputs])
+            for node in configs
+            if node.tool_type
+        )
         if needs_lwrclpy and not self.runtime.ensure_initialized():
             return {
                 "nodes": {},
@@ -856,18 +1043,26 @@ class GraphRuntime:
                     "lwrclpy": {"available": self.runtime.available, "error": self.runtime.error or instance.env_status},
                     "setup": {"complete": False},
                 }
+            if not config.tool_type:
+                if instance.env_python_bin is None:
+                    instance.env_status = "python venv missing"
+                    return {
+                        "nodes": response_nodes,
+                        "lwrclpy": {"available": self.runtime.available, "error": instance.env_status},
+                        "setup": {"complete": False},
+                    }
+                if not self._ensure_worker_process(config, instance, instance.env_python_bin):
+                    return {
+                        "nodes": response_nodes,
+                        "lwrclpy": {"available": self.runtime.available, "error": instance.env_status},
+                        "setup": {"complete": False},
+                    }
 
         if needs_lwrclpy:
             self.runtime.spin_some(1)
-        outputs: dict[str, dict[str, Any]] = {}
         for config in self._sort(configs, links):
             instance = self._instance_for(config)
-            linked_inputs = {}
-            for link in links:
-                if link.get("toNode") == config.id:
-                    linked_inputs[str(link.get("toPort"))] = outputs.get(str(link.get("fromNode")), {}).get(str(link.get("fromPort")))
-            meta = instance.tick(linked_inputs)
-            outputs[config.id] = instance.last_outputs
+            meta = instance.tick({})
             if needs_lwrclpy:
                 self.runtime.spin_some(1)
             response_nodes[config.id] = {"meta": meta, "values": meta.get("outputs", {}), "view": instance.view}
@@ -920,6 +1115,7 @@ class GraphRuntime:
                     subprocess.run([uv, "pip", "install", "--python", str(python_bin), "-r", str(req_file)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
                 hash_file.write_text(req_hash, encoding="utf-8")
             instance.env_path = env_root
+            instance.env_python_bin = python_bin
             instance.env_site_packages = self._site_packages_for(env_root)
             if not self._ensure_lwrclpy_in_env(python_bin, instance):
                 return False
@@ -950,9 +1146,6 @@ class GraphRuntime:
         return None
 
     def _ensure_lwrclpy_in_env(self, python_bin: Path, instance: CustomLwrclNodeInstance) -> bool:
-        check = subprocess.run([str(python_bin), "-c", "import rclpy"], cwd=Path.cwd(), capture_output=True, text=True)
-        if check.returncode == 0:
-            return True
         installer = Path(__file__).resolve().parents[1] / "scripts" / "install_lwrclpy.py"
         if not installer.exists():
             instance.env_status = "lwrclpy installer not found"
@@ -977,6 +1170,7 @@ class GraphRuntime:
         worker_dir.mkdir(parents=True, exist_ok=True)
         config_path = worker_dir / f"{config.id}.json"
         log_path = worker_dir / f"{config.id}.log"
+        pid_path = worker_dir / f"{config.id}.pid"
         config_path.write_text(json.dumps(self._worker_config(config), ensure_ascii=False, default=str), encoding="utf-8")
         worker_script = Path(__file__).resolve().parent / "node_worker.py"
         try:
@@ -987,10 +1181,13 @@ class GraphRuntime:
                 stdout=log_file,
                 stderr=log_file,
                 text=True,
+                start_new_session=(os.name != "nt"),
             )
             instance.worker_signature = signature
             instance.worker_config_path = config_path
             instance.worker_log_path = log_path
+            instance.worker_pid_path = pid_path
+            pid_path.write_text(str(instance.worker_process.pid), encoding="utf-8")
             instance.env_status = "worker running"
             return True
         except Exception as exc:
@@ -1003,9 +1200,7 @@ class GraphRuntime:
             config.id,
             config.name,
             config.loop_code,
-            config.timer_enabled,
-            config.timer_period_sec,
-            config.timer_code,
+            tuple((timer.id, timer.name, timer.period_sec, timer.callback_code) for timer in config.timers),
             config.import_code,
             json.dumps(config.params, sort_keys=True, default=str),
             tuple((p.id, p.name, p.data_type, p.topics, p.receive_mode, p.callback_code) for p in config.inputs),
@@ -1020,6 +1215,7 @@ class GraphRuntime:
                 "inputs": [self._port_dict(port, include_callback=True) for port in config.inputs],
                 "outputs": [self._port_dict(port, include_callback=False) for port in config.outputs],
                 "loopCode": config.loop_code,
+                "timers": [self._timer_dict(timer) for timer in config.timers],
                 "timerEnabled": config.timer_enabled,
                 "timerPeriodSec": config.timer_period_sec,
                 "timerCode": config.timer_code,
@@ -1031,6 +1227,9 @@ class GraphRuntime:
                 "outputs": {port.id: list(port.topics) for port in config.outputs if port.topics},
             },
         }
+
+    def _timer_dict(self, timer: TimerConfig) -> dict[str, Any]:
+        return {"id": timer.id, "name": timer.name, "periodSec": timer.period_sec, "callbackCode": timer.callback_code}
 
     def _port_dict(self, port: PortConfig, include_callback: bool) -> dict[str, Any]:
         data = {"id": port.id, "name": port.name, "dataType": port.data_type, "receiveMode": port.receive_mode}
@@ -1046,32 +1245,61 @@ class GraphRuntime:
         return str(sibling) if sibling.exists() else None
 
     def _parse_node(self, node: dict[str, Any]) -> CustomLwrclNodeConfig:
+        tool_type = str(node.get("toolType", ""))
         return CustomLwrclNodeConfig(
             id=str(node.get("id")),
             name=str(node.get("name") or node.get("id")),
             x=int(node.get("x", 0)),
             y=int(node.get("y", 0)),
-            inputs=[self._parse_port(port) for port in node.get("inputs", [])],
+            inputs=[self._parse_port(port, tool_type=tool_type) for port in node.get("inputs", [])],
             outputs=[self._parse_port(port) for port in node.get("outputs", [])],
             loop_code=str(node.get("loopCode", "")),
+            timers=self._parse_timers(node),
             timer_enabled=bool(node.get("timerEnabled", False)),
             timer_period_sec=float(node.get("timerPeriodSec", 1.0) or 1.0),
             timer_code=str(node.get("timerCode", "")),
             import_code=str(node.get("importCode", "")),
             requirements=str(node.get("requirements", "")),
-            tool_type=str(node.get("toolType", "")),
+            tool_type=tool_type,
             params=dict(node.get("params", {}) if isinstance(node.get("params", {}), dict) else {}),
         )
 
-    def _parse_port(self, port: dict[str, Any]) -> PortConfig:
+    def _parse_port(self, port: dict[str, Any], tool_type: str = "") -> PortConfig:
+        data_type = str(port.get("dataType", "std_msgs/msg/String"))
+        if tool_type == "graph_view" and not data_type:
+            data_type = "std_msgs/msg/Float32"
         return PortConfig(
             id=str(port.get("id")),
             name=str(port.get("name") or port.get("id")),
-            data_type=normalize_type(str(port.get("dataType", "std_msgs/msg/String"))),
+            data_type=normalize_type(data_type),
             topic=str(port.get("topic", "")),
             receive_mode=str(port.get("receiveMode", "callback")),
             callback_code=str(port.get("callbackCode", "")),
         )
+
+    def _parse_timers(self, node: dict[str, Any]) -> list[TimerConfig]:
+        timers = node.get("timers")
+        if isinstance(timers, list):
+            result = []
+            for index, timer in enumerate(timers):
+                if not isinstance(timer, dict):
+                    continue
+                timer_id = str(timer.get("id") or f"timer{index + 1}")
+                result.append(TimerConfig(
+                    id=timer_id,
+                    name=str(timer.get("name") or timer_id),
+                    period_sec=max(0.001, float(timer.get("periodSec", timer.get("period", 1.0)) or 1.0)),
+                    callback_code=str(timer.get("callbackCode", timer.get("timerCode", ""))),
+                ))
+            return result
+        if node.get("timerEnabled", False):
+            return [TimerConfig(
+                id="timer1",
+                name="timer1",
+                period_sec=max(0.001, float(node.get("timerPeriodSec", 1.0) or 1.0)),
+                callback_code=str(node.get("timerCode", "")),
+            )]
+        return []
 
     def _apply_link_topics(self, nodes: list[CustomLwrclNodeConfig], links: list[dict[str, Any]]) -> None:
         by_id = {node.id: node for node in nodes}
@@ -1105,6 +1333,22 @@ class GraphRuntime:
             for port in node.outputs:
                 port.topic = ""
                 port.topics = tuple(sorted(output_topics.get((node.id, port.id), set())))
+
+    def _apply_builtin_param_topics(self, nodes: list[CustomLwrclNodeConfig]) -> None:
+        for node in nodes:
+            if node.tool_type != "function_generator":
+                continue
+            topic = str(node.params.get("ddsTopic") or "").strip()
+            if not topic:
+                continue
+            if not topic.startswith("/"):
+                topic = f"/{topic}"
+            output = next((port for port in node.outputs if port.id == "out1"), None)
+            if output is None:
+                continue
+            topics = set(output.topics)
+            topics.add(topic)
+            output.topics = tuple(sorted(topics))
 
     def _link_topic(self, link: dict[str, Any], nodes: dict[str, CustomLwrclNodeConfig]) -> str:
         name = str(link.get("name") or "").strip()

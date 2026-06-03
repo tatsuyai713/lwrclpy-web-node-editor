@@ -1,0 +1,92 @@
+{
+  "format": "lwrclpy-web-node-editor-project",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "topic_input",
+      "x": -300,
+      "y": -80,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out1",
+          "name": "topic",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "params": {},
+      "loopCode": "",
+      "toolType": "topic_input"
+    },
+    {
+      "id": "n2",
+      "name": "graph_view",
+      "x": 80,
+      "y": -90,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "value",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "fieldPath": "data",
+        "sampleLimit": 10000,
+        "xAxisSeconds": 10,
+        "yAxisMode": "auto",
+        "yMin": -1,
+        "yMax": 1
+      },
+      "loopCode": "",
+      "toolType": "graph_view"
+    },
+    {
+      "id": "n3",
+      "name": "topic_output",
+      "x": 410,
+      "y": -90,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "topic",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {},
+      "loopCode": "",
+      "toolType": "topic_output"
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "fromNode": "n1",
+      "fromPort": "out1",
+      "toNode": "n2",
+      "toPort": "in1",
+      "name": "/sample8/external_float"
+    },
+    {
+      "id": "l2",
+      "fromNode": "n1",
+      "fromPort": "out1",
+      "toNode": "n3",
+      "toPort": "in1",
+      "name": "/sample8/external_float"
+    }
+  ],
+  "view": {
+    "x": 70,
+    "y": 90,
+    "scale": 0.8
+  },
+  "nextId": 4
+}

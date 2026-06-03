@@ -1,0 +1,406 @@
+{
+  "format": "lwrclpy-web-node-editor-project",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "sine_2hz",
+      "x": -520,
+      "y": -250,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out1",
+          "name": "signal",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "params": {
+        "signalType": "sine",
+        "amplitude": 1,
+        "bias": 0,
+        "frequency": 2,
+        "phase": 0,
+        "sampleTime": 0,
+        "publishHz": 100,
+        "ddsTopic": "",
+        "stepTime": 1,
+        "initialValue": 0,
+        "finalValue": 1,
+        "dutyCycle": 50,
+        "rampSlope": 1,
+        "chirpStartFrequency": 0.1,
+        "chirpEndFrequency": 10,
+        "chirpDuration": 10,
+        "noiseMean": 0,
+        "noiseStd": 1,
+        "noiseSeed": 1
+      },
+      "loopCode": "",
+      "toolType": "function_generator"
+    },
+    {
+      "id": "n2",
+      "name": "step_after_1s",
+      "x": -520,
+      "y": -55,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out1",
+          "name": "signal",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "params": {
+        "signalType": "step",
+        "amplitude": 1,
+        "bias": 0,
+        "frequency": 1,
+        "phase": 0,
+        "sampleTime": 0,
+        "publishHz": 100,
+        "ddsTopic": "",
+        "stepTime": 1,
+        "initialValue": -1,
+        "finalValue": 1,
+        "dutyCycle": 50,
+        "rampSlope": 1,
+        "chirpStartFrequency": 0.1,
+        "chirpEndFrequency": 10,
+        "chirpDuration": 10,
+        "noiseMean": 0,
+        "noiseStd": 1,
+        "noiseSeed": 1
+      },
+      "loopCode": "",
+      "toolType": "function_generator"
+    },
+    {
+      "id": "n3",
+      "name": "chirp_0_2_to_8hz",
+      "x": -520,
+      "y": 140,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out1",
+          "name": "signal",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "params": {
+        "signalType": "chirp",
+        "amplitude": 1,
+        "bias": 0,
+        "frequency": 1,
+        "phase": 0,
+        "sampleTime": 0,
+        "publishHz": 100,
+        "ddsTopic": "",
+        "stepTime": 1,
+        "initialValue": 0,
+        "finalValue": 1,
+        "dutyCycle": 50,
+        "rampSlope": 1,
+        "chirpStartFrequency": 0.2,
+        "chirpEndFrequency": 8,
+        "chirpDuration": 6,
+        "noiseMean": 0,
+        "noiseStd": 1,
+        "noiseSeed": 1
+      },
+      "loopCode": "",
+      "toolType": "function_generator"
+    },
+    {
+      "id": "n4",
+      "name": "white_noise",
+      "x": -520,
+      "y": 335,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out1",
+          "name": "signal",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "params": {
+        "signalType": "white_noise",
+        "amplitude": 1,
+        "bias": 0,
+        "frequency": 1,
+        "phase": 0,
+        "sampleTime": 0,
+        "publishHz": 100,
+        "ddsTopic": "",
+        "stepTime": 1,
+        "initialValue": 0,
+        "finalValue": 1,
+        "dutyCycle": 50,
+        "rampSlope": 1,
+        "chirpStartFrequency": 0.1,
+        "chirpEndFrequency": 10,
+        "chirpDuration": 10,
+        "noiseMean": 0,
+        "noiseStd": 0.25,
+        "noiseSeed": 7
+      },
+      "loopCode": "",
+      "toolType": "function_generator"
+    },
+    {
+      "id": "n5",
+      "name": "graph_view",
+      "x": -120,
+      "y": -250,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "value",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "fieldPath": "data",
+        "sampleLimit": 10000,
+        "xAxisSeconds": 5,
+        "yAxisMode": "fixed",
+        "yMin": -1.5,
+        "yMax": 1.5
+      },
+      "loopCode": "",
+      "toolType": "graph_view"
+    },
+    {
+      "id": "n6",
+      "name": "graph_view",
+      "x": -120,
+      "y": -55,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "value",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "fieldPath": "data",
+        "sampleLimit": 10000,
+        "xAxisSeconds": 5,
+        "yAxisMode": "fixed",
+        "yMin": -1.5,
+        "yMax": 1.5
+      },
+      "loopCode": "",
+      "toolType": "graph_view"
+    },
+    {
+      "id": "n7",
+      "name": "graph_view",
+      "x": -120,
+      "y": 140,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "value",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "fieldPath": "data",
+        "sampleLimit": 10000,
+        "xAxisSeconds": 6,
+        "yAxisMode": "fixed",
+        "yMin": -1.5,
+        "yMax": 1.5
+      },
+      "loopCode": "",
+      "toolType": "graph_view"
+    },
+    {
+      "id": "n8",
+      "name": "graph_view",
+      "x": -120,
+      "y": 335,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "value",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "fieldPath": "data",
+        "sampleLimit": 10000,
+        "xAxisSeconds": 5,
+        "yAxisMode": "fixed",
+        "yMin": -1.0,
+        "yMax": 1.0
+      },
+      "loopCode": "",
+      "toolType": "graph_view"
+    },
+    {
+      "id": "n9",
+      "name": "topic_output",
+      "x": 220,
+      "y": -250,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "topic",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {},
+      "loopCode": "",
+      "toolType": "topic_output"
+    },
+    {
+      "id": "n10",
+      "name": "topic_output",
+      "x": 220,
+      "y": -55,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "topic",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {},
+      "loopCode": "",
+      "toolType": "topic_output"
+    },
+    {
+      "id": "n11",
+      "name": "topic_output",
+      "x": 220,
+      "y": 140,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "topic",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {},
+      "loopCode": "",
+      "toolType": "topic_output"
+    },
+    {
+      "id": "n12",
+      "name": "topic_output",
+      "x": 220,
+      "y": 335,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "topic",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {},
+      "loopCode": "",
+      "toolType": "topic_output"
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "fromNode": "n1",
+      "fromPort": "out1",
+      "toNode": "n5",
+      "toPort": "in1",
+      "name": "/sample7/sine"
+    },
+    {
+      "id": "l2",
+      "fromNode": "n1",
+      "fromPort": "out1",
+      "toNode": "n9",
+      "toPort": "in1",
+      "name": "/sample7/sine"
+    },
+    {
+      "id": "l3",
+      "fromNode": "n2",
+      "fromPort": "out1",
+      "toNode": "n6",
+      "toPort": "in1",
+      "name": "/sample7/step"
+    },
+    {
+      "id": "l4",
+      "fromNode": "n2",
+      "fromPort": "out1",
+      "toNode": "n10",
+      "toPort": "in1",
+      "name": "/sample7/step"
+    },
+    {
+      "id": "l5",
+      "fromNode": "n3",
+      "fromPort": "out1",
+      "toNode": "n7",
+      "toPort": "in1",
+      "name": "/sample7/chirp"
+    },
+    {
+      "id": "l6",
+      "fromNode": "n3",
+      "fromPort": "out1",
+      "toNode": "n11",
+      "toPort": "in1",
+      "name": "/sample7/chirp"
+    },
+    {
+      "id": "l7",
+      "fromNode": "n4",
+      "fromPort": "out1",
+      "toNode": "n8",
+      "toPort": "in1",
+      "name": "/sample7/white_noise"
+    },
+    {
+      "id": "l8",
+      "fromNode": "n4",
+      "fromPort": "out1",
+      "toNode": "n12",
+      "toPort": "in1",
+      "name": "/sample7/white_noise"
+    }
+  ],
+  "view": {
+    "x": 70,
+    "y": 90,
+    "scale": 0.8
+  },
+  "nextId": 13
+}

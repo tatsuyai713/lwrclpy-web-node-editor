@@ -4664,6 +4664,7 @@
         }
       ],
       "loopCode": "",
+      "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
       "timerCode": "",
@@ -4682,7 +4683,7 @@
           "name": "image",
           "dataType": "sensor_msgs/msg/Image",
           "receiveMode": "callback",
-          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tblock = 4\n\tout = list(data)\n\ttotal = 0\n\tfor by in range(0, h, block):\n\t\tfor bx in range(0, w, block):\n\t\t\tr = 0\n\t\t\tg = 0\n\t\t\tb = 0\n\t\t\tcount = 0\n\t\t\tfor y in range(by, min(h, by + block)):\n\t\t\t\tfor x in range(bx, min(w, bx + block)):\n\t\t\t\t\tidx = (y * w + x) * 3\n\t\t\t\t\tr += data[idx]\n\t\t\t\t\tg += data[idx + 1]\n\t\t\t\t\tb += data[idx + 2]\n\t\t\t\t\tcount += 1\n\t\t\tr = r // max(1, count)\n\t\t\tg = g // max(1, count)\n\t\t\tb = b // max(1, count)\n\t\t\tfor y in range(by, min(h, by + block)):\n\t\t\t\tfor x in range(bx, min(w, bx + block)):\n\t\t\t\t\tidx = (y * w + x) * 3\n\t\t\t\t\tout[idx] = r\n\t\t\t\t\tout[idx + 1] = g\n\t\t\t\t\tout[idx + 2] = b\n\t\t\t\t\ttotal += (r + g + b) // 3\n\tpublish(\"mosaic\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n\tmetric = Float32()\n\tmetric.data = float(total) / max(1, w * h)\n\tpublish(\"mean\", metric)\n"
+          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tblock = 4\n\tout = list(data)\n\ttotal = 0\n\tfor by in range(0, h, block):\n\t\tfor bx in range(0, w, block):\n\t\t\tr = 0\n\t\t\tg = 0\n\t\t\tb = 0\n\t\t\tcount = 0\n\t\t\tfor y in range(by, min(h, by + block)):\n\t\t\t\tfor x in range(bx, min(w, bx + block)):\n\t\t\t\t\tidx = (y * w + x) * 3\n\t\t\t\t\tr += data[idx]\n\t\t\t\t\tg += data[idx + 1]\n\t\t\t\t\tb += data[idx + 2]\n\t\t\t\t\tcount += 1\n\t\t\tr = r // max(1, count)\n\t\t\tg = g // max(1, count)\n\t\t\tb = b // max(1, count)\n\t\t\tfor y in range(by, min(h, by + block)):\n\t\t\t\tfor x in range(bx, min(w, bx + block)):\n\t\t\t\t\tidx = (y * w + x) * 3\n\t\t\t\t\tout[idx] = r\n\t\t\t\t\tout[idx + 1] = g\n\t\t\t\t\tout[idx + 2] = b\n\t\t\t\t\ttotal += (r + g + b) // 3\n\tpublish(\"mosaic\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n\tpublish(\"mean\", {\"data\": float(total) / max(1, w * h)})\n"
         }
       ],
       "outputs": [
@@ -4698,6 +4699,7 @@
         }
       ],
       "loopCode": "",
+      "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
       "timerCode": "",
@@ -4733,7 +4735,7 @@
         {
           "id": "in1",
           "name": "value",
-          "dataType": "",
+          "dataType": "std_msgs/msg/Float32",
           "receiveMode": "manual",
           "callbackCode": ""
         }
@@ -4741,7 +4743,11 @@
       "outputs": [],
       "params": {
         "fieldPath": "data",
-        "sampleLimit": 120
+        "sampleLimit": 10000,
+        "xAxisSeconds": 10,
+        "yAxisMode": "auto",
+        "yMin": -1,
+        "yMax": 1
       },
       "loopCode": "",
       "toolType": "graph_view"
@@ -4755,7 +4761,7 @@
         {
           "id": "in1",
           "name": "topic",
-          "dataType": "",
+          "dataType": "std_msgs/msg/Float32",
           "receiveMode": "manual",
           "callbackCode": ""
         }

@@ -33,6 +33,7 @@ class LwrclpyWorkerNode:
         self.input_queues: dict[str, list[Any]] = {}
         self.last_outputs: dict[str, Any] = {}
         self.next_timer_at = 0.0
+        self.next_timer_by_id: dict[str, float] = {}
         self.publishers: dict[str, list[Any]] = {}
         self.clients: dict[str, list[Any]] = {}
         self.subscriptions: list[Any] = []
@@ -140,23 +141,51 @@ class LwrclpyWorkerNode:
             self.log(f"loop error: {exc}")
 
     def _execute_timer_if_due(self, inputs: dict[str, Any], outputs: dict[str, Any]) -> None:
-        if not self.node_config.get("timerEnabled", False):
-            return
-        code = self.node_config.get("timerCode", "").strip()
-        if not code:
-            return
         now = time.time()
-        period = max(0.001, float(self.node_config.get("timerPeriodSec", 1.0) or 1.0))
-        if self.next_timer_at <= 0:
-            self.next_timer_at = now
-        if now < self.next_timer_at:
-            return
-        self.next_timer_at = now + period
-        local = self._locals({"inputs": inputs, "outputs": outputs, "now": now, "period": period, "latest": self.latest, "take": self.take, "has_input": self.has_input})
-        try:
-            exec(code, self._globals(), local)
-        except Exception as exc:
-            self.log(f"timer callback error: {exc}")
+        for timer in self._timers():
+            code = str(timer.get("callbackCode") or "").strip()
+            if not code:
+                continue
+            timer_id = str(timer.get("id") or "timer1")
+            period = max(0.001, float(timer.get("periodSec", 1.0) or 1.0))
+            next_at = self.next_timer_by_id.get(timer_id, 0.0)
+            if next_at <= 0:
+                next_at = now
+            if now < next_at:
+                self.next_timer_by_id[timer_id] = next_at
+                continue
+            next_due = (next_at if next_at > 0 else now) + period
+            while next_due <= now:
+                next_due += period
+            self.next_timer_by_id[timer_id] = next_due
+            local = self._locals({
+                "timer_id": timer_id,
+                "timer_name": str(timer.get("name") or timer_id),
+                "inputs": inputs,
+                "outputs": outputs,
+                "now": now,
+                "period": period,
+                "latest": self.latest,
+                "take": self.take,
+                "has_input": self.has_input,
+            })
+            try:
+                exec(code, self._globals(), local)
+            except Exception as exc:
+                self.log(f"{timer_id} timer callback error: {exc}")
+
+    def _timers(self) -> list[dict[str, Any]]:
+        timers = self.node_config.get("timers")
+        if isinstance(timers, list):
+            return [timer for timer in timers if isinstance(timer, dict)]
+        if self.node_config.get("timerEnabled", False):
+            return [{
+                "id": "timer1",
+                "name": "timer1",
+                "periodSec": self.node_config.get("timerPeriodSec", 1.0),
+                "callbackCode": self.node_config.get("timerCode", ""),
+            }]
+        return []
 
     def _flush_outputs(self, outputs: dict[str, Any]) -> None:
         for key, value in outputs.items():
@@ -232,6 +261,11 @@ class LwrclpyWorkerNode:
         return result
 
     def _plain_value(self, value: Any) -> Any:
+        if callable(value):
+            try:
+                value = value()
+            except TypeError:
+                pass
         if isinstance(value, (bytes, bytearray, memoryview)):
             return bytes(value)
         if hasattr(value, "tolist"):
@@ -240,6 +274,16 @@ class LwrclpyWorkerNode:
             except Exception:
                 pass
         return value
+
+    def _set_field(self, target: Any, key: str, value: Any) -> None:
+        field = getattr(target, key, None)
+        if callable(field):
+            try:
+                field(value)
+                return
+            except TypeError:
+                pass
+        setattr(target, key, value)
 
     def _output_port(self, output_id: str) -> dict[str, Any] | None:
         for output in self.node_config.get("outputs", []):
@@ -255,9 +299,9 @@ class LwrclpyWorkerNode:
         if isinstance(value, dict):
             for key, item in value.items():
                 if hasattr(msg, key):
-                    setattr(msg, key, item)
+                    self._set_field(msg, key, item)
         elif hasattr(msg, "data"):
-            msg.data = value
+            self._set_field(msg, "data", value)
         return msg
 
     def _coerce_service_request(self, data_type: str, value: Any) -> Any:
@@ -268,9 +312,9 @@ class LwrclpyWorkerNode:
         if isinstance(value, dict):
             for key, item in value.items():
                 if hasattr(request, key):
-                    setattr(request, key, item)
+                    self._set_field(request, key, item)
         elif hasattr(request, "data"):
-            request.data = value
+            self._set_field(request, "data", value)
         return request
 
     def close(self) -> None:
@@ -288,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     worker = LwrclpyWorkerNode(config)
     try:
         while worker.rclpy.ok():
-            worker.executor.spin_once(timeout_sec=0.02)
+            worker.executor.spin_once(timeout_sec=0.001)
             worker.spin_tick()
     finally:
         worker.close()

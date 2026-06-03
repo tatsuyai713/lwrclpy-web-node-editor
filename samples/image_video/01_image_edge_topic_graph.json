@@ -4653,7 +4653,7 @@
           "name": "image",
           "dataType": "sensor_msgs/msg/Image",
           "receiveMode": "callback",
-          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tout = []\n\ttotal = 0\n\tcount = w * h\n\tfor i in range(0, len(data), 3):\n\t\ty = int(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114)\n\t\tout.extend([y, y, y])\n\t\ttotal += y\n\tpublish(\"gray\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n\tmetric = Float32()\n\tmetric.data = float(total) / max(1, count)\n\tpublish(\"brightness\", metric)\n"
+          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tout = []\n\ttotal = 0\n\tcount = w * h\n\tfor i in range(0, len(data), 3):\n\t\ty = int(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114)\n\t\tout.extend([y, y, y])\n\t\ttotal += y\n\tpublish(\"gray\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n\tpublish(\"brightness\", {\"data\": float(total) / max(1, count)})\n"
         }
       ],
       "outputs": [
@@ -4669,6 +4669,7 @@
         }
       ],
       "loopCode": "",
+      "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
       "timerCode": "",
@@ -4687,7 +4688,7 @@
           "name": "gray",
           "dataType": "sensor_msgs/msg/Image",
           "receiveMode": "callback",
-          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tout = []\n\ttotal = 0\n\tfor y in range(h):\n\t\tfor x in range(w):\n\t\t\tleft = data[(y * w + max(0, x - 1)) * 3]\n\t\t\tright = data[(y * w + min(w - 1, x + 1)) * 3]\n\t\t\tup = data[(max(0, y - 1) * w + x) * 3]\n\t\t\tdown = data[(min(h - 1, y + 1) * w + x) * 3]\n\t\t\tv = min(255, abs(right - left) + abs(down - up))\n\t\t\tout.extend([v, v, v])\n\t\t\ttotal += v\n\tpublish(\"edges\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n\tmetric = Float32()\n\tmetric.data = float(total) / max(1, w * h)\n\tpublish(\"edge_strength\", metric)\n"
+          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tout = []\n\ttotal = 0\n\tfor y in range(h):\n\t\tfor x in range(w):\n\t\t\tleft = data[(y * w + max(0, x - 1)) * 3]\n\t\t\tright = data[(y * w + min(w - 1, x + 1)) * 3]\n\t\t\tup = data[(max(0, y - 1) * w + x) * 3]\n\t\t\tdown = data[(min(h - 1, y + 1) * w + x) * 3]\n\t\t\tv = min(255, abs(right - left) + abs(down - up))\n\t\t\tout.extend([v, v, v])\n\t\t\ttotal += v\n\tpublish(\"edges\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n\tpublish(\"edge_strength\", {\"data\": float(total) / max(1, w * h)})\n"
         }
       ],
       "outputs": [
@@ -4703,6 +4704,7 @@
         }
       ],
       "loopCode": "",
+      "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
       "timerCode": "",
@@ -4738,7 +4740,7 @@
         {
           "id": "in1",
           "name": "value",
-          "dataType": "",
+          "dataType": "std_msgs/msg/Float32",
           "receiveMode": "manual",
           "callbackCode": ""
         }
@@ -4746,7 +4748,11 @@
       "outputs": [],
       "params": {
         "fieldPath": "data",
-        "sampleLimit": 120
+        "sampleLimit": 10000,
+        "xAxisSeconds": 10,
+        "yAxisMode": "auto",
+        "yMin": -1,
+        "yMax": 1
       },
       "loopCode": "",
       "toolType": "graph_view"
@@ -4760,7 +4766,7 @@
         {
           "id": "in1",
           "name": "topic",
-          "dataType": "",
+          "dataType": "std_msgs/msg/Float32",
           "receiveMode": "manual",
           "callbackCode": ""
         }

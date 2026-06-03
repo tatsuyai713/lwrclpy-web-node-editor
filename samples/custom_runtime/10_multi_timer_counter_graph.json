@@ -1,0 +1,176 @@
+{
+  "format": "lwrclpy-web-node-editor-project",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "multi_timer_counter",
+      "x": -360,
+      "y": -100,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "fast",
+          "name": "fast_count",
+          "dataType": "std_msgs/msg/Float32"
+        },
+        {
+          "id": "slow",
+          "name": "slow_count",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "loopCode": "",
+      "timers": [
+        {
+          "id": "fast_timer",
+          "name": "fast_timer",
+          "periodSec": 0.1,
+          "callbackCode": "state[\"fast_count\"] = int(state.get(\"fast_count\", 0)) + 1\npublish(\"fast\", {\"data\": float(state[\"fast_count\"])})\n"
+        },
+        {
+          "id": "slow_timer",
+          "name": "slow_timer",
+          "periodSec": 0.5,
+          "callbackCode": "state[\"slow_count\"] = int(state.get(\"slow_count\", 0)) + 1\npublish(\"slow\", {\"data\": float(state[\"slow_count\"])})\n"
+        }
+      ],
+      "timerEnabled": true,
+      "timerPeriodSec": 0.1,
+      "timerCode": "state[\"fast_count\"] = int(state.get(\"fast_count\", 0)) + 1\npublish(\"fast\", {\"data\": float(state[\"fast_count\"])})\n",
+      "importCode": "",
+      "requirements": "",
+      "params": {}
+    },
+    {
+      "id": "n2",
+      "name": "graph_view",
+      "x": 30,
+      "y": -210,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "value",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "fieldPath": "data",
+        "sampleLimit": 10000,
+        "xAxisSeconds": 10,
+        "yAxisMode": "auto",
+        "yMin": -1,
+        "yMax": 1
+      },
+      "loopCode": "",
+      "toolType": "graph_view"
+    },
+    {
+      "id": "n3",
+      "name": "graph_view",
+      "x": 30,
+      "y": 40,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "value",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "fieldPath": "data",
+        "sampleLimit": 10000,
+        "xAxisSeconds": 10,
+        "yAxisMode": "auto",
+        "yMin": -1,
+        "yMax": 1
+      },
+      "loopCode": "",
+      "toolType": "graph_view"
+    },
+    {
+      "id": "n4",
+      "name": "topic_output",
+      "x": 360,
+      "y": -210,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "topic",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {},
+      "loopCode": "",
+      "toolType": "topic_output"
+    },
+    {
+      "id": "n5",
+      "name": "topic_output",
+      "x": 360,
+      "y": 40,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "topic",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {},
+      "loopCode": "",
+      "toolType": "topic_output"
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "fromNode": "n1",
+      "fromPort": "fast",
+      "toNode": "n2",
+      "toPort": "in1",
+      "name": "/sample10/fast_count"
+    },
+    {
+      "id": "l2",
+      "fromNode": "n1",
+      "fromPort": "fast",
+      "toNode": "n4",
+      "toPort": "in1",
+      "name": "/sample10/fast_count"
+    },
+    {
+      "id": "l3",
+      "fromNode": "n1",
+      "fromPort": "slow",
+      "toNode": "n3",
+      "toPort": "in1",
+      "name": "/sample10/slow_count"
+    },
+    {
+      "id": "l4",
+      "fromNode": "n1",
+      "fromPort": "slow",
+      "toNode": "n5",
+      "toPort": "in1",
+      "name": "/sample10/slow_count"
+    }
+  ],
+  "view": {
+    "x": 70,
+    "y": 90,
+    "scale": 0.8
+  },
+  "nextId": 6
+}

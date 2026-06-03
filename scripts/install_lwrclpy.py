@@ -9,6 +9,7 @@ import sys
 import urllib.request
 
 
+LATEST_RELEASE_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases/latest"
 RELEASES_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
 
 
@@ -16,7 +17,8 @@ def main() -> int:
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     system = platform.system().lower()
     machine = platform.machine().lower()
-    assets = fetch_assets()
+    release = fetch_latest_release()
+    assets = release.get("assets", [])
     candidates = []
     for asset in assets:
         name = asset["name"]
@@ -32,33 +34,44 @@ def main() -> int:
     if not candidates:
         print(f"No lwrclpy wheel found for Python {py_tag} on {platform.platform()}", file=sys.stderr)
         return 1
-    asset = prefer_latest(candidates)
-    print(f"Installing {asset['name']}")
+    asset = prefer_platform(candidates)
+    print(f"Installing {asset['name']} from {release.get('tag_name', 'latest')}")
     uv = shutil.which("uv")
     if uv:
-        subprocess.check_call([uv, "pip", "install", "--python", sys.executable, asset["browser_download_url"]])
+        subprocess.check_call([uv, "pip", "install", "--upgrade", "--python", sys.executable, asset["browser_download_url"]])
     else:
         subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
-        subprocess.check_call([sys.executable, "-m", "pip", "install", asset["browser_download_url"]])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", asset["browser_download_url"]])
     return 0
 
 
-def fetch_assets() -> list[dict]:
+def fetch_latest_release() -> dict:
+    try:
+        with urllib.request.urlopen(LATEST_RELEASE_URL, timeout=20) as response:
+            release = json.load(response)
+        if release.get("assets"):
+            return release
+    except Exception:
+        pass
     with urllib.request.urlopen(RELEASES_URL, timeout=20) as response:
         releases = json.load(response)
-    assets = []
     for release in releases:
-        if release.get("tag_name") in {"v0.3.2", "latest-macos", "latest"}:
-            assets.extend(release.get("assets", []))
-    return assets
+        if not release.get("draft") and not release.get("prerelease") and release.get("assets"):
+            return release
+    return {"tag_name": "latest", "assets": []}
 
 
-def prefer_latest(assets: list[dict]) -> dict:
+def prefer_platform(assets: list[dict]) -> dict:
     def score(asset: dict) -> tuple[int, str]:
-        url = asset["browser_download_url"]
-        tag_score = 2 if "/v0.3.2/" in url else 1
-        universal_score = 1 if "universal2" in asset["name"] else 0
-        return (tag_score + universal_score, asset["name"])
+        name = asset["name"].lower()
+        universal_score = 2 if "universal2" in name else 0
+        machine = platform.machine().lower()
+        machine_score = 1
+        if machine in {"arm64", "aarch64"} and any(tag in name for tag in ("arm64", "aarch64")):
+            machine_score = 3
+        elif machine in {"x86_64", "amd64"} and "x86_64" in name:
+            machine_score = 3
+        return (machine_score + universal_score, asset["name"])
 
     return sorted(assets, key=score, reverse=True)[0]
 

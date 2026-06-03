@@ -9273,7 +9273,7 @@
           "name": "frame",
           "dataType": "sensor_msgs/msg/Image",
           "receiveMode": "callback",
-          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tout = []\n\ttotal = 0\n\tfor v in data:\n\t\tnv = min(255, int((float(v) / 255.0) ** 0.55 * 255.0))\n\t\tout.append(nv)\n\t\ttotal += nv\n\tpublish(\"bright\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n\tmetric = Float32()\n\tmetric.data = float(total) / max(1, len(data))\n\tpublish(\"luminance\", metric)\n"
+          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tout = []\n\ttotal = 0\n\tfor v in data:\n\t\tnv = min(255, int((float(v) / 255.0) ** 0.55 * 255.0))\n\t\tout.append(nv)\n\t\ttotal += nv\n\tpublish(\"bright\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n\tpublish(\"luminance\", {\"data\": float(total) / max(1, len(data))})\n"
         }
       ],
       "outputs": [
@@ -9289,6 +9289,7 @@
         }
       ],
       "loopCode": "",
+      "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
       "timerCode": "",
@@ -9318,6 +9319,7 @@
         }
       ],
       "loopCode": "",
+      "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
       "timerCode": "",
@@ -9353,7 +9355,7 @@
         {
           "id": "in1",
           "name": "value",
-          "dataType": "",
+          "dataType": "std_msgs/msg/Float32",
           "receiveMode": "manual",
           "callbackCode": ""
         }
@@ -9361,7 +9363,11 @@
       "outputs": [],
       "params": {
         "fieldPath": "data",
-        "sampleLimit": 120
+        "sampleLimit": 10000,
+        "xAxisSeconds": 10,
+        "yAxisMode": "auto",
+        "yMin": -1,
+        "yMax": 1
       },
       "loopCode": "",
       "toolType": "graph_view"
@@ -9375,7 +9381,7 @@
         {
           "id": "in1",
           "name": "topic",
-          "dataType": "",
+          "dataType": "std_msgs/msg/Float32",
           "receiveMode": "manual",
           "callbackCode": ""
         }
