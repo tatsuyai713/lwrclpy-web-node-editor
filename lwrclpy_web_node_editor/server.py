@@ -224,7 +224,7 @@ class ContinuousGraphRunner:
             self._started_at = time.time()
             self._stopped_at = 0.0
             self._error = ""
-            self._latest = {"nodes": {}, "setup": {"complete": True}, "lwrclpy": {"available": self.runtime.ros.available, "error": self.runtime.ros.error}}
+            self._latest = {"nodes": {}, "setup": {"complete": True}, "lwrclpy": self.runtime.ros.status()}
             self._stop_event.clear()
             self._stopping = False
             self._phase = "starting"
@@ -411,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"types": LWRCLPY_TYPE_TREE})
             return
         if path == "/api/health":
-            self._send_json({"ok": True, "lwrclpy": {"available": self.runtime.ros.available, "error": self.runtime.ros.error}})
+            self._send_json({"ok": True, "lwrclpy": self.runtime.ros.status()})
             return
         if path == "/api/run-status":
             self._send_json(self._compact_run_status(self.runner.status()))

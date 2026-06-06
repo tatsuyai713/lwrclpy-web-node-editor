@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import json
 import math
 import pkgutil
@@ -124,6 +125,7 @@ class LwrclpyRuntime:
         self.available = False
         self.initialized = False
         self.error = ""
+        self.version = ""
         self.rclpy = None
         self.executor = None
         self._spin_thread: threading.Thread | None = None
@@ -133,6 +135,17 @@ class LwrclpyRuntime:
             self.available = True
         except Exception as exc:  # pragma: no cover
             self.error = str(exc)
+        try:
+            self.version = importlib.metadata.version("lwrclpy")
+        except Exception:
+            self.version = ""
+
+    def status(self, error: str = "") -> dict[str, Any]:
+        return {
+            "available": self.available,
+            "error": error or self.error,
+            "version": self.version,
+        }
 
     def ensure_initialized(self) -> bool:
         if not self.available or self.rclpy is None:
@@ -2062,13 +2075,13 @@ class GraphRuntime:
                 return {
                     "ready": False,
                     "nodes": response_nodes,
-                    "lwrclpy": {"available": self.runtime.available, "error": self.runtime.error or instance.env_status},
+                    "lwrclpy": self.runtime.status(instance.env_status),
                     "setup": {"complete": False},
                 }
         return {
             "ready": True,
             "nodes": response_nodes,
-            "lwrclpy": {"available": self.runtime.available, "error": self.runtime.error},
+            "lwrclpy": self.runtime.status(),
             "setup": {"complete": True},
         }
 
@@ -2089,7 +2102,7 @@ class GraphRuntime:
         if needs_lwrclpy and not self.runtime.ensure_initialized():
             return {
                 "nodes": {},
-                "lwrclpy": {"available": self.runtime.available, "error": self.runtime.error or "lwrclpy is required for web preview topic transport"},
+                "lwrclpy": self.runtime.status("lwrclpy is required for web preview topic transport"),
                 "setup": {"complete": False},
             }
         active_ids = {node.id for node in configs}
@@ -2107,7 +2120,7 @@ class GraphRuntime:
             if not setup_ok:
                 return {
                     "nodes": response_nodes,
-                    "lwrclpy": {"available": self.runtime.available, "error": self.runtime.error or instance.env_status},
+                    "lwrclpy": self.runtime.status(instance.env_status),
                     "setup": {"complete": False},
                 }
             if not config.tool_type:
@@ -2115,13 +2128,13 @@ class GraphRuntime:
                     instance.env_status = "python venv missing"
                     return {
                         "nodes": response_nodes,
-                        "lwrclpy": {"available": self.runtime.available, "error": instance.env_status},
+                        "lwrclpy": self.runtime.status(instance.env_status),
                         "setup": {"complete": False},
                     }
                 if not self._ensure_worker_process(config, instance, instance.env_python_bin):
                     return {
                         "nodes": response_nodes,
-                        "lwrclpy": {"available": self.runtime.available, "error": instance.env_status},
+                        "lwrclpy": self.runtime.status(instance.env_status),
                         "setup": {"complete": False},
                     }
 
@@ -2138,7 +2151,7 @@ class GraphRuntime:
             self.runtime.spin_some(2)
         return {
             "nodes": response_nodes,
-            "lwrclpy": {"available": self.runtime.available, "error": self.runtime.error},
+            "lwrclpy": self.runtime.status(),
             "setup": {"complete": True},
         }
 

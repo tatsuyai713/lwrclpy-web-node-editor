@@ -1681,17 +1681,23 @@ async function stopWorkers(force = false) {
 function updateStatus(data) {
   const runtime = data.lwrclpy || {};
   const setup = data.setup?.complete === false ? ` / setup blocked${runtime.error ? ': ' + runtime.error : ''}` : '';
-  const text = (runtime.available ? 'lwrclpy available' : `lwrclpy unavailable${runtime.error ? ': ' + runtime.error : ''}`) + setup;
+  const text = runtimeStatusText(runtime) + setup;
   $('runtime-status').textContent = text;
   $('runtime-detail').textContent = text;
   $('node-count').textContent = `${state.nodes.length} nodes / ${state.links.length} links`;
+}
+
+function runtimeStatusText(runtime) {
+  const version = runtime?.version ? ` ${runtime.version}` : '';
+  if (runtime?.available) return `lwrclpy available${version}`;
+  return `lwrclpy unavailable${runtime?.error ? ': ' + runtime.error : ''}`;
 }
 
 async function refreshRuntimeHealth() {
   try {
     const data = await fetch('/api/health').then((res) => res.json());
     const runtime = data.lwrclpy || {};
-    const text = runtime.available ? 'lwrclpy available' : `lwrclpy unavailable${runtime.error ? ': ' + runtime.error : ''}`;
+    const text = runtimeStatusText(runtime);
     $('runtime-status').textContent = text;
     $('runtime-detail').textContent = text;
   } catch (err) {
