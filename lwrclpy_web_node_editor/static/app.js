@@ -1008,16 +1008,22 @@ function bindToolActions(el, node) {
   if (videoInput) videoInput.onchange = (ev) => loadVideoFile(node, ev.target.files[0]);
   const videoPath = el.querySelector('[data-tool-video-path]');
   const selectVideoFile = el.querySelector('[data-action="select-video-file"]');
-  const setVideoPath = (path) => {
+  const setVideoPath = (path, metadata = {}) => {
     path = String(path || '').trim();
     if (!path) return;
     stopVideoInput(node.id);
+    const detectedFps = Number(metadata.fps || metadata.detectedFps || metadata.sourceFps || 0);
+    const publishHz = detectedFps > 0 ? Math.round(detectedFps * 100) / 100 : 30;
     node.params = {
       ...(node.params || {}),
-      fileName: path.split(/[\\/]/).filter(Boolean).pop() || path,
+      fileName: metadata.fileName || path.split(/[\\/]/).filter(Boolean).pop() || path,
       videoPath: path,
       serverDecode: true,
-      publishHz: effectiveVideoHz(node),
+      publishHz,
+      detectedFps: detectedFps > 0 ? publishHz : 0,
+      sourceFps: detectedFps > 0 ? detectedFps : undefined,
+      sourceWidth: Number(metadata.width || 0) || undefined,
+      sourceHeight: Number(metadata.height || 0) || undefined,
       maxSide: Number(node.params?.maxSide || 640),
       embeddedVideo: false,
     };
@@ -1030,7 +1036,7 @@ function bindToolActions(el, node) {
     selectVideoFile.disabled = true;
     try {
       const selected = await selectVideoFileFromServer();
-      if (selected?.path) setVideoPath(selected.path);
+      if (selected?.path) setVideoPath(selected.path, selected);
     } catch (err) {
       setExecutionStatus('error', `Video selection failed: ${err.message}`);
     } finally {

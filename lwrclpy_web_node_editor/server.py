@@ -74,7 +74,31 @@ def _select_video_file() -> dict[str, object]:
     selected = Path(path).expanduser()
     if not selected.is_file():
         raise RuntimeError(f"selected file does not exist: {selected}")
-    return {"ok": True, "path": str(selected), "fileName": selected.name}
+    result: dict[str, object] = {"ok": True, "path": str(selected), "fileName": selected.name}
+    try:
+        result.update(_probe_video_file(selected))
+    except Exception as exc:
+        result["probeError"] = str(exc)
+    return result
+
+
+def _probe_video_file(path: Path) -> dict[str, object]:
+    import cv2
+
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        capture.release()
+        raise RuntimeError(f"OpenCV could not open video: {path}")
+    try:
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    finally:
+        capture.release()
+    if fps <= 0 or fps >= 10000:
+        fps = 30.0
+    return {"width": width, "height": height, "fps": fps, "frameCount": frame_count}
 
 
 def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:

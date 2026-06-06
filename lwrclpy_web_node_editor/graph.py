@@ -692,11 +692,6 @@ class CustomLwrclNodeInstance:
         }
 
     def _ensure_dds_tap_worker(self) -> None:
-        shared_status_path = self.state.get("shared_tap_status_path")
-        if shared_status_path:
-            self.stop_worker(force=True)
-            self.env_status = "DDS tap worker shared"
-            return
         signature = self._dds_tap_worker_signature()
         if self.worker_process is not None and self.worker_process.poll() is None and self.worker_signature == signature:
             self.env_status = "DDS tap worker running"
@@ -1125,8 +1120,7 @@ class CustomLwrclNodeInstance:
         }
 
     def _read_dds_tap_status(self) -> dict[str, Any] | None:
-        shared_status_path = self.state.get("shared_tap_status_path")
-        status_path = Path(str(shared_status_path)) if shared_status_path else Path.cwd() / ".node_workers" / f"{self.config.id}.tap.status.json"
+        status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.tap.status.json"
         if not status_path.exists():
             return None
         try:
@@ -2114,7 +2108,6 @@ class GraphRuntime:
             if node_id not in active_ids:
                 self.instances.pop(node_id).close()
 
-        self._configure_shared_dds_taps(configs)
         response_nodes: dict[str, Any] = {}
         for config in configs:
             instance = self._instance_for(config)
@@ -2158,36 +2151,6 @@ class GraphRuntime:
             "lwrclpy": self.runtime.status(),
             "setup": {"complete": True},
         }
-
-    def _configure_shared_dds_taps(self, configs: list[CustomLwrclNodeConfig]) -> None:
-        image_taps: dict[tuple[str, str], str] = {}
-        hz_taps: list[tuple[CustomLwrclNodeConfig, tuple[str, str]]] = []
-        for config in configs:
-            input_port = next((port for port in config.inputs if port.topics), None)
-            if input_port is None:
-                continue
-            data_type = normalize_type(input_port.data_type)
-            if data_type != "sensor_msgs/msg/Image":
-                continue
-            key = (input_port.topics[0], data_type)
-            if config.tool_type == "image_view":
-                image_taps.setdefault(key, config.id)
-            elif config.tool_type == "topic_hz_monitor":
-                hz_taps.append((config, key))
-        shared_ids = set()
-        for config, key in hz_taps:
-            source_id = image_taps.get(key)
-            if not source_id or source_id == config.id:
-                continue
-            instance = self._instance_for(config)
-            instance.state["shared_tap_status_path"] = str(Path.cwd() / ".node_workers" / f"{source_id}.tap.status.json")
-            shared_ids.add(config.id)
-        for config in configs:
-            if config.id in shared_ids:
-                continue
-            instance = self.instances.get(config.id)
-            if instance is not None:
-                instance.state.pop("shared_tap_status_path", None)
 
     def _instance_for(self, config: CustomLwrclNodeConfig) -> CustomLwrclNodeInstance:
         instance = self.instances.get(config.id)
