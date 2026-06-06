@@ -16,9 +16,6 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-
-os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
-
 from .graph import GraphRuntime, LWRCLPY_TYPE_TREE
 
 
@@ -553,6 +550,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("x-frame-seq", str(frame.get("seq") or 0))
             self.send_header("x-frame-width", str(frame.get("width") or 0))
             self.send_header("x-frame-height", str(frame.get("height") or 0))
+            self.send_header("x-frame-source-width", str(frame.get("sourceWidth") or frame.get("width") or 0))
+            self.send_header("x-frame-source-height", str(frame.get("sourceHeight") or frame.get("height") or 0))
             self.send_header("x-frame-encoding", encoding)
             self.end_headers()
             if isinstance(data, (bytes, bytearray)):

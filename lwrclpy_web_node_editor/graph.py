@@ -840,7 +840,6 @@ class CustomLwrclNodeInstance:
 
     def _worker_env(self) -> dict[str, str]:
         env = dict(os.environ)
-        env["LWRCLPY_NO_DATASHARING"] = "1"
         return env
 
     def _video_worker_completed(self) -> bool:
@@ -861,7 +860,7 @@ class CustomLwrclNodeInstance:
             self.config.params.get("videoPath"),
             float(self.config.params.get("publishHz") or 30.0),
             bool(self.config.params.get("loop", True)),
-            int(self.config.params.get("maxSide") or 640),
+            int(self.config.params.get("maxSide") or 0),
             "preview:jpeg",
             tuple((p.id, p.data_type, p.topics) for p in self.config.outputs),
         )
@@ -878,7 +877,7 @@ class CustomLwrclNodeInstance:
             "publishHz": max(0.01, float(self.config.params.get("publishHz") or 30.0)),
             "useSourceFps": True,
             "loop": bool(self.config.params.get("loop", True)),
-            "maxSide": int(self.config.params.get("maxSide") or 640),
+            "maxSide": int(self.config.params.get("maxSide") or 0),
             "statusPath": str(status_path),
             "framePath": str(frame_path),
             "enableDdsPublish": True,
@@ -1112,7 +1111,15 @@ class CustomLwrclNodeInstance:
             "path": str(frame_path),
             "updatedAt": time.time(),
         }
-        frame_ref = {"nodeId": self.config.id, "seq": seq, "width": preview_width, "height": preview_height, "encoding": self.state["image_view_frame"]["encoding"]}
+        frame_ref = {
+            "nodeId": self.config.id,
+            "seq": seq,
+            "width": preview_width,
+            "height": preview_height,
+            "sourceWidth": width,
+            "sourceHeight": height,
+            "encoding": self.state["image_view_frame"]["encoding"],
+        }
         self.view = {
             "kind": "image",
             "frameRef": frame_ref,

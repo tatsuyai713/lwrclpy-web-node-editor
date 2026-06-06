@@ -10,9 +10,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
-os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
-
 RUNNING = True
 GUI_DISPLAY_HZ = 30.0
 
@@ -303,17 +300,16 @@ def main() -> int:
     if output_encoding not in {"raw", "jpeg"}:
         output_encoding = "raw"
     loop = bool(config.get("loop", True))
-    max_side = int(config.get("maxSide") or 640)
+    max_side = int(config.get("maxSide") or 0)
     preview_hz = GUI_DISPLAY_HZ
     preview_encoding = str(config.get("previewEncoding") or "jpeg").lower()
     if preview_encoding not in {"jpeg", "bmp"}:
         preview_encoding = "jpeg"
     status_path = Path(config.get("statusPath") or (str(config_path) + ".status"))
     frame_path = Path(config.get("framePath") or (str(config_path) + ".frame"))
-    data_sharing_disabled = os.environ.get("LWRCLPY_NO_DATASHARING") == "1"
 
     try:
-        _write_status(status_path, running=True, phase="probe", error="", videoPath=str(video_path), dataSharingDisabled=data_sharing_disabled)
+        _write_status(status_path, running=True, phase="probe", error="", videoPath=str(video_path))
         if not video_path.is_file():
             raise RuntimeError(f"video file not found: {video_path}")
         src_w, src_h, src_fps = _probe(video_path)
@@ -328,15 +324,15 @@ def main() -> int:
     node = None
     publisher = None
     if enable_dds_publish:
-        _write_status(status_path, running=True, phase="dds_init", error="", videoPath=str(video_path), dataSharingDisabled=data_sharing_disabled)
+        _write_status(status_path, running=True, phase="dds_init", error="", videoPath=str(video_path))
         import rclpy as _rclpy
 
         rclpy = _rclpy
         if not rclpy.ok():
             rclpy.init(args=None)
-        _write_status(status_path, running=True, phase="create_node", error="", videoPath=str(video_path), dataSharingDisabled=data_sharing_disabled)
+        _write_status(status_path, running=True, phase="create_node", error="", videoPath=str(video_path))
         node = rclpy.create_node(f"ipn_video_dds_{config.get('nodeId', 'video')}".replace("-", "_")[:80])
-        _write_status(status_path, running=True, phase="create_publisher", error="", videoPath=str(video_path), dataSharingDisabled=data_sharing_disabled)
+        _write_status(status_path, running=True, phase="create_publisher", error="", videoPath=str(video_path))
         publisher = node.create_publisher(_import_type_class(type_name), topic, _topic_qos(type_name))
     count = 0
     started_perf = time.perf_counter()
@@ -357,7 +353,6 @@ def main() -> int:
         sourceFps=src_fps,
         published=0,
         matchedSubscriptions=_matched_subscriptions(publisher),
-        dataSharingDisabled=data_sharing_disabled,
     )
     if publisher is not None:
         discovery_deadline = time.time() + 3.0
@@ -406,8 +401,7 @@ def main() -> int:
                                 "sourceFps": src_fps,
                                 "published": count,
                                 "actualHz": actual_hz,
-                                "matchedSubscriptions": _matched_subscriptions(publisher),
-                                "dataSharingDisabled": data_sharing_disabled,
+                                "matchedSubscriptions": _matched_subscriptions(publisher)
                             },
                         )
                         next_preview_at = now + (1.0 / preview_hz)
@@ -425,7 +419,6 @@ def main() -> int:
                             published=count,
                             actualHz=actual_hz,
                             matchedSubscriptions=_matched_subscriptions(publisher),
-                            dataSharingDisabled=data_sharing_disabled,
                             **(preview_writer.status_snapshot() if preview_writer is not None else {}),
                         )
                         next_status_at = now + (1.0 / GUI_DISPLAY_HZ)
@@ -448,7 +441,6 @@ def main() -> int:
             encoding=output_encoding,
             sourceFps=src_fps,
             published=count,
-            dataSharingDisabled=data_sharing_disabled,
             **(preview_writer.status_snapshot() if preview_writer is not None else {}),
         )
         if preview_writer is not None:

@@ -11,9 +11,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
-os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
-
 RUNNING = True
 GUI_DISPLAY_HZ = 30.0
 PREVIEW_JPEG_QUALITY = 60
@@ -136,7 +133,6 @@ class DdsTap:
         self._frame_writer_thread: threading.Thread | None = None
         self._frame_writer_stop = False
         self.subscription: Any = None
-        self.data_sharing_disabled = os.environ.get("LWRCLPY_NO_DATASHARING") == "1"
         self.transport = "callback"
 
     def callback(self, msg: Any) -> None:
@@ -210,7 +206,6 @@ class DdsTap:
             "frameSeq": seq,
             "framePath": str(self.frame_path),
             "matchedPublishers": self._matched_publishers(),
-            "dataSharingDisabled": self.data_sharing_disabled,
             "polling": False,
             "transport": self.transport,
         }
@@ -344,7 +339,6 @@ class DdsTap:
             "hz": hz,
             "windowSec": self.window_sec,
             "matchedPublishers": self._matched_publishers(),
-            "dataSharingDisabled": self.data_sharing_disabled,
             "polling": False,
             "transport": self.transport,
         })
@@ -381,7 +375,6 @@ class DdsTap:
                 "savedPath": str(path),
                 "frameSeq": seq,
                 "matchedPublishers": self._matched_publishers(),
-                "dataSharingDisabled": self.data_sharing_disabled,
                 "polling": False,
                 "transport": self.transport,
             },
@@ -565,7 +558,6 @@ def main() -> int:
             "hz": 0.0,
             "count": 0,
             "subscribed": True,
-            "dataSharingDisabled": tap.data_sharing_disabled,
             "polling": False,
             "transport": tap.transport,
         },

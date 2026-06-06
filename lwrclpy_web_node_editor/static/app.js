@@ -109,7 +109,7 @@ const INTERFACE_NODE_TEMPLATES = [
       name: 'video_file_input',
       inputs: [],
       outputs: [{ id: 'out1', name: 'frame', dataType: 'sensor_msgs/msg/Image' }],
-      params: { loop: false, publishHz: 30, detectedFps: 0 },
+      params: { loop: false, publishHz: 30, detectedFps: 0, maxSide: 0 },
       loopCode: '',
     },
   },
@@ -1024,7 +1024,7 @@ function bindToolActions(el, node) {
       sourceFps: detectedFps > 0 ? detectedFps : undefined,
       sourceWidth: Number(metadata.width || 0) || undefined,
       sourceHeight: Number(metadata.height || 0) || undefined,
-      maxSide: Number(node.params?.maxSide || 640),
+      maxSide: 0,
       embeddedVideo: false,
     };
     state.videoPayloadDirty = true;
@@ -1455,6 +1455,7 @@ function nodeForRunPayload(node) {
   delete params.dataUrl;
   if (params.serverDecode && params.videoPath) {
     delete params.frameMessage;
+    params.maxSide = 0;
   }
   return { ...node, params };
 }
@@ -1608,7 +1609,7 @@ function videoRuntimeParams(node) {
       serverDecode: true,
       loop: Boolean(p.loop),
       publishHz: effectiveVideoHz(node),
-      maxSide: Number(p.maxSide || 640),
+      maxSide: 0,
     };
   }
   return {
@@ -1778,7 +1779,9 @@ function updateNodeViews(nodes) {
 function nodeViewSignature(view) {
   if (!view) return '';
   if (view.kind === 'image') {
-    if (view.frameRef) return `image:frame:${view.frameRef.nodeId}:${view.frameRef.encoding || ''}:${view.status || ''}`;
+    if (view.frameRef) {
+      return `image:frame:${view.frameRef.nodeId}:${view.frameRef.seq || 0}:${view.frameRef.width || 0}:${view.frameRef.height || 0}:${view.frameRef.sourceWidth || 0}:${view.frameRef.sourceHeight || 0}:${view.frameRef.encoding || ''}:${view.status || ''}`;
+    }
     if (view.raw) return `image:raw:${view.raw.width}:${view.raw.height}:${view.raw.encoding}:${String(view.raw.data || '').length}:${view.status || ''}`;
     if (view.dataUrl) return `image:data:${view.dataUrl.length}:${view.status || ''}`;
     return `image:empty:${view.status || ''}`;
@@ -1988,6 +1991,7 @@ async function drawFrameRefToCanvas(canvas, frameRef) {
   if (!frameRef?.nodeId || !frameRef.seq) return;
   const signature = `${frameRef.nodeId}:${frameRef.seq}`;
   canvas.dataset.desiredFrame = signature;
+  if (canvas.dataset.rawSignature === signature) return;
   if (canvas.dataset.pendingFrame === signature) return;
   cancelCanvasFrameLoad(canvas);
   const controller = new AbortController();

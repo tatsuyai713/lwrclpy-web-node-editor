@@ -11,9 +11,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
-os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
-
 RUNNING = True
 
 
