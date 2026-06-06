@@ -2,31 +2,21 @@
 from __future__ import annotations
 
 import json
-import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
 import urllib.request
-from pathlib import Path
 
 
 LATEST_RELEASE_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases/latest"
 RELEASES_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
-DEFAULT_LOCAL_WHEEL_DIR = Path("/Users/tatsuyai/repos/lwrclpy/dist")
-PREFERRED_VERSION = "0.4.9"
 
 
 def main() -> int:
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     system = platform.system().lower()
     machine = platform.machine().lower()
-    local_wheel = find_local_wheel(py_tag, system, machine)
-    if local_wheel is not None:
-        print(f"Installing {local_wheel.name} from local wheel")
-        install_target(str(local_wheel))
-        return 0
     release = fetch_latest_release()
     assets = release.get("assets", [])
     candidates = []
@@ -57,54 +47,6 @@ def install_target(target: str) -> None:
     else:
         subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
         subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", target])
-
-
-def find_local_wheel(py_tag: str, system: str, machine: str) -> Path | None:
-    wheel_dir = Path(os.environ.get("LWRCLPY_WHEEL_DIR") or DEFAULT_LOCAL_WHEEL_DIR)
-    if not wheel_dir.exists():
-        return None
-    candidates = []
-    for path in wheel_dir.glob("lwrclpy-*.whl"):
-        name = path.name
-        if py_tag not in name or not wheel_matches_platform(name, system, machine):
-            continue
-        version_match = re.match(r"lwrclpy-([^-]+)-", name)
-        version = version_match.group(1) if version_match else ""
-        preferred = 1 if version == PREFERRED_VERSION else 0
-        candidates.append((preferred, version_key(version), name, path))
-    if not candidates:
-        return None
-    return sorted(candidates, reverse=True)[0][3]
-
-
-def wheel_matches_platform(name: str, system: str, machine: str) -> bool:
-    lname = name.lower()
-    if system == "darwin":
-        if "macosx" not in lname:
-            return False
-        return (
-            "universal2" in lname
-            or (machine in {"arm64", "aarch64"} and any(tag in lname for tag in ("arm64", "aarch64")))
-            or (machine in {"x86_64", "amd64"} and "x86_64" in lname)
-        )
-    if system == "linux":
-        if "linux" not in lname:
-            return False
-        return (
-            (machine in {"x86_64", "amd64"} and "x86_64" in lname)
-            or (machine in {"arm64", "aarch64"} and any(tag in lname for tag in ("arm64", "aarch64")))
-        )
-    return False
-
-
-def version_key(version: str) -> tuple[int, ...]:
-    parts = []
-    for part in version.split("."):
-        try:
-            parts.append(int(part))
-        except ValueError:
-            parts.append(0)
-    return tuple(parts)
 
 
 def fetch_latest_release() -> dict:
