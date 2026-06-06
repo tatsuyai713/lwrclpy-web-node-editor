@@ -4,11 +4,7 @@ import argparse
 import io
 import json
 import os
-import re
 import signal
-import shutil
-import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -18,6 +14,7 @@ from typing import Any
 os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
 
 RUNNING = True
+GUI_DISPLAY_HZ = 30.0
 
 
 def _stop(_signum, _frame) -> None:
@@ -223,42 +220,30 @@ def _bmp_bytes(width: int, height: int, rgb: bytes) -> bytes:
     ])
 
 
-def _ffmpeg_executable() -> str:
-    env_path = os.environ.get("FFMPEG_BINARY")
-    if env_path:
-        return env_path
-    direct = shutil.which("ffmpeg")
-    if direct:
-        return direct
+def _open_capture(path: Path) -> Any:
+    import cv2
+
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        capture.release()
+        raise RuntimeError(f"OpenCV could not open video: {path}")
+    return capture
+
+
+def _probe(path: Path) -> tuple[int, int, float]:
+    import cv2
+
+    capture = _open_capture(path)
     try:
-        import imageio_ffmpeg
-
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception as exc:
-        raise RuntimeError("ffmpeg not found. Install requirements.txt to provide imageio-ffmpeg.") from exc
-
-
-def _probe(path: Path, ffmpeg: str) -> tuple[int, int, float]:
-    result = subprocess.run(
-        [
-            ffmpeg,
-            "-v",
-            "info",
-            "-i",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    text = f"{result.stderr}\n{result.stdout}"
-    stream_line = next((line for line in text.splitlines() if " Video:" in line), "")
-    size_match = re.search(r"(\d{2,5})x(\d{2,5})", stream_line)
-    fps_match = re.search(r"(\d+(?:\.\d+)?)\s*fps", stream_line)
-    width = int(size_match.group(1)) if size_match else 0
-    height = int(size_match.group(2)) if size_match else 0
-    fps = float(fps_match.group(1)) if fps_match else 30.0
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+    finally:
+        capture.release()
     if width <= 0 or height <= 0:
-        raise RuntimeError("ffmpeg could not read video dimensions")
+        raise RuntimeError("OpenCV could not read video dimensions")
+    if fps <= 0 or fps >= 10000:
+        fps = 30.0
     return width, height, fps
 
 
@@ -275,38 +260,28 @@ def _scaled_size(width: int, height: int, max_side: int) -> tuple[int, int]:
     return out_w, out_h
 
 
-def _ffmpeg_cmd(ffmpeg: str, path: Path, width: int, height: int, publish_hz: float, output_encoding: str) -> list[str]:
-    base = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-re",
-        "-i",
-        str(path),
-        "-vf",
-        f"fps={publish_hz:g},scale={width}:{height}",
-        "-an",
-    ]
-    if output_encoding == "jpeg":
-        return [
-            *base,
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "mjpeg",
-            "-q:v",
-            "5",
-            "pipe:1",
-        ]
-    return [
-        *base,
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "pipe:1",
-    ]
+def _read_rgb_frame(capture: Any, width: int, height: int) -> bytes | None:
+    import cv2
+
+    ok, bgr = capture.read()
+    if not ok or bgr is None:
+        return None
+    if int(bgr.shape[1]) != width or int(bgr.shape[0]) != height:
+        bgr = cv2.resize(bgr, (width, height), interpolation=cv2.INTER_AREA)
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    return rgb.tobytes()
+
+
+def _jpeg_from_rgb(width: int, height: int, rgb: bytes) -> bytes:
+    try:
+        from PIL import Image
+
+        image = Image.frombytes("RGB", (width, height), rgb)
+        out = io.BytesIO()
+        image.save(out, format="JPEG", quality=75, subsampling=1)
+        return out.getvalue()
+    except Exception:
+        return rgb
 
 
 def main() -> int:
@@ -329,7 +304,7 @@ def main() -> int:
         output_encoding = "raw"
     loop = bool(config.get("loop", True))
     max_side = int(config.get("maxSide") or 640)
-    preview_hz = max(0.0, float(config.get("previewHz") if config.get("previewHz") is not None else 30.0))
+    preview_hz = GUI_DISPLAY_HZ
     preview_encoding = str(config.get("previewEncoding") or "jpeg").lower()
     if preview_encoding not in {"jpeg", "bmp"}:
         preview_encoding = "jpeg"
@@ -339,8 +314,9 @@ def main() -> int:
 
     try:
         _write_status(status_path, running=True, phase="probe", error="", videoPath=str(video_path), dataSharingDisabled=data_sharing_disabled)
-        ffmpeg = _ffmpeg_executable()
-        src_w, src_h, src_fps = _probe(video_path, ffmpeg)
+        if not video_path.is_file():
+            raise RuntimeError(f"video file not found: {video_path}")
+        src_w, src_h, src_fps = _probe(video_path)
         width, height = _scaled_size(src_w, src_h, max_side)
         if use_source_fps and src_fps > 0:
             publish_hz = max(0.01, src_fps)
@@ -362,9 +338,10 @@ def main() -> int:
         node = rclpy.create_node(f"ipn_video_dds_{config.get('nodeId', 'video')}".replace("-", "_")[:80])
         _write_status(status_path, running=True, phase="create_publisher", error="", videoPath=str(video_path), dataSharingDisabled=data_sharing_disabled)
         publisher = node.create_publisher(_import_type_class(type_name), topic, _topic_qos(type_name))
-    frame_size = width * height * 3
     count = 0
-    started = time.time()
+    started_perf = time.perf_counter()
+    first_publish_perf: float | None = None
+    last_publish_perf: float | None = None
     ended = False
     next_preview_at = 0.0
     next_status_at = 0.0
@@ -386,74 +363,74 @@ def main() -> int:
         discovery_deadline = time.time() + 3.0
         while RUNNING and time.time() < discovery_deadline and _matched_subscriptions(publisher) <= 0:
             time.sleep(0.05)
+    started_perf = time.perf_counter()
 
     try:
+        period_sec = 1.0 / publish_hz
+        schedule_started = time.perf_counter()
         while RUNNING:
-            proc = subprocess.Popen(_ffmpeg_cmd(ffmpeg, video_path, width, height, publish_hz, output_encoding), stdout=subprocess.PIPE)
-            assert proc.stdout is not None
-            jpeg_buffer = bytearray()
-            while RUNNING:
-                if output_encoding == "jpeg":
-                    eoi = jpeg_buffer.find(b"\xff\xd9")
-                    if eoi < 0:
-                        chunk = proc.stdout.read(65536)
-                        if not chunk:
-                            break
-                        jpeg_buffer.extend(chunk)
-                        eoi = jpeg_buffer.find(b"\xff\xd9")
-                    if eoi < 0:
-                        continue
-                    frame = bytes(jpeg_buffer[:eoi + 2])
-                    del jpeg_buffer[:eoi + 2]
-                else:
-                    frame = proc.stdout.read(frame_size)
-                    if len(frame) != frame_size:
-                        break
-                count += 1
-                if publisher is not None:
-                    _publish_frame(publisher, type_name, width, height, frame, output_encoding)
-                now = time.time()
-                if preview_writer is not None and now >= next_preview_at:
-                    elapsed = max(0.001, now - started)
-                    preview_writer.submit(
-                        count,
-                        frame,
-                        {
-                            "running": True,
-                            "error": "",
-                            "width": width,
-                            "height": height,
-                            "encoding": output_encoding,
-                            "sourceFps": src_fps,
-                            "published": count,
-                            "actualHz": count / elapsed,
-                            "matchedSubscriptions": _matched_subscriptions(publisher),
-                            "dataSharingDisabled": data_sharing_disabled,
-                        },
-                    )
-                    next_preview_at = now + (1.0 / preview_hz)
-                if now >= next_status_at:
-                    elapsed = max(0.001, now - started)
-                    _write_status(
-                        status_path,
-                        running=True,
-                        error="",
-                        width=width,
-                        height=height,
-                        encoding=output_encoding,
-                        sourceFps=src_fps,
-                        published=count,
-                        actualHz=count / elapsed,
-                        matchedSubscriptions=_matched_subscriptions(publisher),
-                        dataSharingDisabled=data_sharing_disabled,
-                        **(preview_writer.status_snapshot() if preview_writer is not None else {}),
-                    )
-                    next_status_at = now + 0.25
+            capture = _open_capture(video_path)
             try:
-                proc.terminate()
-                proc.wait(timeout=1.0)
-            except Exception:
-                proc.kill()
+                while RUNNING:
+                    target_publish_at = schedule_started + (count * period_sec)
+                    rgb_frame = _read_rgb_frame(capture, width, height)
+                    if rgb_frame is None:
+                        break
+                    frame = _jpeg_from_rgb(width, height, rgb_frame) if output_encoding == "jpeg" else rgb_frame
+                    delay = target_publish_at - time.perf_counter()
+                    while RUNNING and delay > 0:
+                        time.sleep(min(delay, 0.001))
+                        delay = target_publish_at - time.perf_counter()
+                    if delay < -period_sec:
+                        schedule_started = time.perf_counter() - (count * period_sec)
+                    if publisher is not None:
+                        _publish_frame(publisher, type_name, width, height, frame, output_encoding)
+                    published_at = time.perf_counter()
+                    if first_publish_perf is None:
+                        first_publish_perf = published_at
+                    last_publish_perf = published_at
+                    count += 1
+                    now = time.time()
+                    if preview_writer is not None and now >= next_preview_at:
+                        elapsed = max(0.001, (last_publish_perf or time.perf_counter()) - (first_publish_perf or started_perf))
+                        actual_hz = ((count - 1) / elapsed) if count >= 2 else 0.0
+                        preview_writer.submit(
+                            count,
+                            frame,
+                            {
+                                "running": True,
+                                "error": "",
+                                "width": width,
+                                "height": height,
+                                "encoding": output_encoding,
+                                "sourceFps": src_fps,
+                                "published": count,
+                                "actualHz": actual_hz,
+                                "matchedSubscriptions": _matched_subscriptions(publisher),
+                                "dataSharingDisabled": data_sharing_disabled,
+                            },
+                        )
+                        next_preview_at = now + (1.0 / preview_hz)
+                    if now >= next_status_at:
+                        elapsed = max(0.001, (last_publish_perf or time.perf_counter()) - (first_publish_perf or started_perf))
+                        actual_hz = ((count - 1) / elapsed) if count >= 2 else 0.0
+                        _write_status(
+                            status_path,
+                            running=True,
+                            error="",
+                            width=width,
+                            height=height,
+                            encoding=output_encoding,
+                            sourceFps=src_fps,
+                            published=count,
+                            actualHz=actual_hz,
+                            matchedSubscriptions=_matched_subscriptions(publisher),
+                            dataSharingDisabled=data_sharing_disabled,
+                            **(preview_writer.status_snapshot() if preview_writer is not None else {}),
+                        )
+                        next_status_at = now + (1.0 / GUI_DISPLAY_HZ)
+            finally:
+                capture.release()
             if not loop:
                 ended = True
                 break

@@ -1,3 +1,7 @@
+const UI_DISPLAY_FPS = 30;
+const UI_DISPLAY_FRAME_MS = 1000 / UI_DISPLAY_FPS;
+const IMAGE_FRAME_STALE_MS = UI_DISPLAY_FRAME_MS * 2;
+
 const state = {
   messageTypes: {},
   nodes: [],
@@ -106,7 +110,7 @@ const INTERFACE_NODE_TEMPLATES = [
       name: 'video_file_input',
       inputs: [],
       outputs: [{ id: 'out1', name: 'frame', dataType: 'sensor_msgs/msg/Image' }],
-      params: { loop: false, publishHz: 30, overrideHz: false, detectedFps: 0 },
+      params: { loop: false, publishHz: 30, detectedFps: 0 },
       loopCode: '',
     },
   },
@@ -908,17 +912,7 @@ function inspectorHint(node) {
 
 function effectiveVideoHz(node) {
   const p = node.params || {};
-  if (p.overrideHz) return Math.max(0.01, Number(p.publishHz || p.detectedFps || 30));
   return Math.max(0.01, Number(p.detectedFps || p.nativeFps || p.sourceFps || p.publishHz || 30));
-}
-
-function videoPlaybackRate(node) {
-  const p = node.params || {};
-  if (!p.overrideHz) return 1.0;
-  const detectedFps = Math.max(0.01, Number(p.detectedFps || 30));
-  const overrideHz = Math.max(0.01, Number(p.publishHz || 30));
-  // Clamp to browser-supported range (0.1 – 16)
-  return Math.min(16, Math.max(0.1, overrideHz / detectedFps));
 }
 
 function timerActionButtons(node) {
@@ -938,17 +932,13 @@ function toolActionHtml(node) {
   }
   if (node.toolType === 'video_file_input') {
     const loopChecked = node.params?.loop ? 'checked' : '';
-    const overrideHz = Boolean(node.params?.overrideHz);
-    const hz = Math.max(0.01, Number(node.params?.publishHz || 30));
+    const videoPath = node.params?.videoPath || '';
     const detectedFps = Number(node.params?.detectedFps || 0);
     const fpsLabel = detectedFps > 0 ? detectedFps.toFixed(2) + ' fps' : 'auto (30 fps)';
-    const hzField = overrideHz
-      ? `<label class="tool-field"><span>Hz</span><input data-tool-video-hz type="number" min="0.01" step="0.1" value="${escapeAttr(hz)}"></label>`
-      : `<label class="tool-field"><span>FPS</span><span class="tool-value-display">${escapeHtml(fpsLabel)}</span></label>`;
     return `<div class="node-actions tool-actions">
-      <label class="file-button">Load Video<input data-tool-file="video" type="file" accept="video/*"></label>
-      ${hzField}
-      <label class="tool-check"><input data-tool-video-hz-override type="checkbox" ${overrideHz ? 'checked' : ''}> Override Hz</label>
+      <label class="tool-field tool-field-wide"><span>Path</span><input data-tool-video-path type="text" value="${escapeAttr(videoPath)}" placeholder="No video selected" readonly tabindex="-1"></label>
+      <button data-action="select-video-file">Select Video</button>
+      <label class="tool-field"><span>FPS</span><span class="tool-value-display">${escapeHtml(fpsLabel)}</span></label>
       <label class="tool-check"><input data-tool-video-loop type="checkbox" ${loopChecked}> Loop</label>
     </div>`;
   }
@@ -1017,25 +1007,37 @@ function bindToolActions(el, node) {
   }
   const videoInput = el.querySelector('[data-tool-file="video"]');
   if (videoInput) videoInput.onchange = (ev) => loadVideoFile(node, ev.target.files[0]);
-  const videoHzOverride = el.querySelector('[data-tool-video-hz-override]');
-  if (videoHzOverride) {
-    videoHzOverride.onchange = (ev) => {
-      node.params = { ...(node.params || {}), overrideHz: ev.target.checked };
-      const ctrl1 = state.videoInputs[node.id];
-      if (ctrl1) ctrl1.video.playbackRate = videoPlaybackRate(node);
-      renderAll();
+  const videoPath = el.querySelector('[data-tool-video-path]');
+  const selectVideoFile = el.querySelector('[data-action="select-video-file"]');
+  const setVideoPath = (path) => {
+    path = String(path || '').trim();
+    if (!path) return;
+    stopVideoInput(node.id);
+    node.params = {
+      ...(node.params || {}),
+      fileName: path.split(/[\\/]/).filter(Boolean).pop() || path,
+      videoPath: path,
+      serverDecode: true,
+      publishHz: effectiveVideoHz(node),
+      maxSide: Number(node.params?.maxSide || 640),
+      embeddedVideo: false,
     };
-  }
-  const videoHz = el.querySelector('[data-tool-video-hz]');
-  if (videoHz) {
-    videoHz.onchange = (ev) => {
-      const value = Number(ev.target.value);
-      node.params = { ...(node.params || {}), publishHz: Math.max(0.01, Number.isFinite(value) && value > 0 ? value : 30) };
-      const ctrl2 = state.videoInputs[node.id];
-      if (ctrl2) ctrl2.video.playbackRate = videoPlaybackRate(node);
-      renderAll();
-    };
-  }
+    state.videoPayloadDirty = true;
+    state.videoDirtyNodes.add(node.id);
+    renderAll();
+    pushRunPayloadUpdate();
+  };
+  if (selectVideoFile) selectVideoFile.onclick = async () => {
+    selectVideoFile.disabled = true;
+    try {
+      const selected = await selectVideoFileFromServer();
+      if (selected?.path) setVideoPath(selected.path);
+    } catch (err) {
+      setExecutionStatus('error', `Video selection failed: ${err.message}`);
+    } finally {
+      selectVideoFile.disabled = false;
+    }
+  };
   const videoLoop = el.querySelector('[data-tool-video-loop]');
   if (videoLoop) {
     videoLoop.onchange = (ev) => {
@@ -1478,9 +1480,9 @@ async function startServerRun(durationSec = null) {
       return;
     }
     $('run-model').classList.add('active');
-    setExecutionStatus('running', durationSec === null
-      ? `Continuous run started on server at ${runLoopHz().toFixed(1)} Hz`
-      : `Run for ${durationSec.toFixed(1)} seconds on server at ${runLoopHz().toFixed(1)} Hz`);
+    setExecutionStatus('starting', durationSec === null
+      ? `Starting server run at ${runLoopHz().toFixed(1)} Hz; waiting for worker startup and DDS discovery`
+      : `Starting ${durationSec.toFixed(1)} second run at ${runLoopHz().toFixed(1)} Hz; waiting for worker startup and DDS discovery`);
     updateRunStatus(data);
     startRunStatusPolling();
   } catch (err) {
@@ -1524,11 +1526,14 @@ async function readyRun() {
 }
 
 function startRunStatusPolling() {
-  if (state.autoTimer) clearInterval(state.autoTimer);
+  if (state.autoTimer) clearTimeout(state.autoTimer);
   if (state.videoTimer) clearInterval(state.videoTimer);
-  pollRunStatus();
-  state.autoTimer = setInterval(pollRunStatus, 33);
-  state.videoTimer = setInterval(updateVideoFramePayloads, 33);
+  state.autoTimer = setTimeout(pollRunStatus, 0);
+  if (hasBrowserVideoRuntime()) {
+    state.videoTimer = setInterval(updateVideoFramePayloads, UI_DISPLAY_FRAME_MS);
+  } else {
+    state.videoTimer = null;
+  }
 }
 
 async function pollRunStatus() {
@@ -1541,6 +1546,7 @@ async function pollRunStatus() {
     setExecutionStatus('error', `Status API error: ${err.message}`);
   } finally {
     state.runStatusInFlight = false;
+    if (state.autoTimer) state.autoTimer = setTimeout(pollRunStatus, UI_DISPLAY_FRAME_MS);
   }
 }
 
@@ -1550,8 +1556,18 @@ function updateVideoPreviewFrames() {
 }
 
 function updateVideoFramePayloads() {
+  if (!hasBrowserVideoRuntime()) return;
   updateVideoInputsForRun({ markDirty: true });
   pushRunPayloadUpdate();
+}
+
+function hasBrowserVideoRuntime() {
+  const hasLegacyVideo = Object.values(state.videoInputs).some((controller) => {
+    const node = nodeFor(controller.nodeId);
+    return node?.toolType === 'video_file_input' && !node.params?.serverDecode;
+  });
+  if (hasLegacyVideo) return true;
+  return state.nodes.some((node) => node.toolType === 'video_file_input' && node.params?.embeddedVideo && (node.params.baseFrameMessage || node.params.frameMessage));
 }
 
 async function pushRunPayloadUpdate() {
@@ -1584,7 +1600,6 @@ function videoRuntimeParams(node) {
       fileName: p.fileName || '',
       videoPath: p.videoPath,
       serverDecode: true,
-      useSourceFps: !p.overrideHz,
       loop: Boolean(p.loop),
       publishHz: effectiveVideoHz(node),
       maxSide: Number(p.maxSide || 640),
@@ -1614,9 +1629,14 @@ function updateRunStatus(data) {
   if (run.error) {
     setExecutionStatus('error', `Server run error: ${run.error}`);
   } else if (run.running) {
-    setExecutionStatus('running', `Server tick ${state.tickCount} at ${Number(run.hz || runLoopHz()).toFixed(1)} Hz`);
+    const waiting = run.phase === 'starting' || state.tickCount <= 0 || runHasStartingNodes(data.nodes || {});
+    if (waiting) {
+      setExecutionStatus('starting', `Waiting for node startup and DDS discovery; server tick ${state.tickCount} at ${Number(run.hz || runLoopHz()).toFixed(1)} Hz`);
+    } else {
+      setExecutionStatus('running', `Server tick ${state.tickCount} at ${Number(run.hz || runLoopHz()).toFixed(1)} Hz`);
+    }
   } else if (state.autoTimer) {
-    clearInterval(state.autoTimer);
+    clearTimeout(state.autoTimer);
     state.autoTimer = null;
     if (state.videoTimer) {
       clearInterval(state.videoTimer);
@@ -1626,6 +1646,19 @@ function updateRunStatus(data) {
     $('run-model').classList.remove('active');
     setExecutionStatus('stopped', `Server run stopped after ${state.tickCount} ticks`);
   }
+}
+
+function runHasStartingNodes(nodes) {
+  return Object.values(nodes || {}).some((payload) => {
+    const env = String(payload?.meta?.environment || '').toLowerCase();
+    const status = String(payload?.view?.status || '').toLowerCase();
+    if (/starting|waiting|dds discovery|worker startup/.test(env)) return true;
+    if (/starting|waiting|dds discovery|worker startup/.test(status)) return true;
+    const view = payload?.view;
+    if (view?.kind === 'image' && !(view.dataUrl || view.raw || view.frameRef) && /worker/.test(status)) return true;
+    if (view?.kind === 'plot' && Array.isArray(view.series) && view.series.length === 0 && /worker/.test(status)) return true;
+    return false;
+  });
 }
 
 async function stopWorkers(force = false) {
@@ -1694,6 +1727,7 @@ function setExecutionStatus(kind, detail) {
   label.textContent = {
     idle: 'Idle',
     tick: 'Tick',
+    starting: 'Starting',
     running: 'Running',
     stopping: 'Stopping',
     stopped: 'Stopped',
@@ -1703,6 +1737,7 @@ function setExecutionStatus(kind, detail) {
 }
 
 function updateNodeViews(nodes) {
+  const changedNodeIds = new Set();
   Object.entries(nodes).forEach(([nodeId, payload]) => {
     if (payload?.view) {
       const newView = normalizedNodeView(nodeId, payload.view);
@@ -1711,15 +1746,37 @@ function updateNodeViews(nodes) {
       const existingHasImage = existing?.kind === 'image' && (existing?.dataUrl || existing?.raw?.data || existing?.frameRef);
       const newHasImage = newView?.kind === 'image' && (newView?.dataUrl || newView?.raw?.data || newView?.frameRef);
       if (existingHasImage && newView?.kind === 'image' && !newHasImage) {
-        state.nodeViews[nodeId] = { ...existing, status: newView.status || existing.status };
+        const nextView = { ...existing, status: newView.status || existing.status };
+        if (nodeViewSignature(existing) !== nodeViewSignature(nextView)) changedNodeIds.add(nodeId);
+        state.nodeViews[nodeId] = nextView;
       } else {
+        if (nodeViewSignature(existing) !== nodeViewSignature(newView)) changedNodeIds.add(nodeId);
         state.nodeViews[nodeId] = newView;
       }
     }
   });
+  if (!changedNodeIds.size) return;
   document.querySelectorAll('[data-node-view]').forEach((el) => {
+    if (!changedNodeIds.has(el.dataset.nodeView)) return;
     patchNodeViewEl(el, state.nodeViews[el.dataset.nodeView]);
   });
+}
+
+function nodeViewSignature(view) {
+  if (!view) return '';
+  if (view.kind === 'image') {
+    if (view.frameRef && isStreamFrameRef(view.frameRef)) return `image:stream:${view.frameRef.nodeId}:${view.status || ''}`;
+    if (view.frameRef) return `image:frame:${view.frameRef.nodeId}:${view.frameRef.seq}:${view.status || ''}`;
+    if (view.raw) return `image:raw:${view.raw.width}:${view.raw.height}:${view.raw.encoding}:${String(view.raw.data || '').length}:${view.status || ''}`;
+    if (view.dataUrl) return `image:data:${view.dataUrl.length}:${view.status || ''}`;
+    return `image:empty:${view.status || ''}`;
+  }
+  if (view.kind === 'plot') {
+    const series = Array.isArray(view.series) ? view.series : [];
+    const last = series.length ? series[series.length - 1] : null;
+    return `plot:${series.length}:${last?.t ?? ''}:${last?.y ?? ''}:${view.status || ''}`;
+  }
+  return JSON.stringify(view);
 }
 
 // Draw a dataUrl onto a canvas element without clearing during decode (no blank-frame flicker).
@@ -1777,15 +1834,31 @@ function drawRawImageToCanvas(canvas, raw) {
 
 const frameFetchControllers = new WeakMap();
 
-function latestFrameSignature(canvas) {
-  return canvas.dataset.desiredFrame || '';
+function cancelCanvasFrameLoad(canvas) {
+  const controller = frameFetchControllers.get(canvas);
+  if (controller) controller.abort();
+  if (typeof canvas?._frameImageResolve === 'function') {
+    const resolve = canvas._frameImageResolve;
+    canvas._frameImageResolve = null;
+    resolve();
+  }
+  if (canvas?._frameImage) {
+    canvas._frameImage.onload = null;
+    canvas._frameImage.onerror = null;
+    canvas._frameImage.removeAttribute('src');
+  }
 }
 
 function scheduleFrameRefDraw(canvas, frameRef) {
   if (!canvas || !frameRef) return;
   const signature = `${frameRef.nodeId}:${frameRef.seq}`;
+  const previousDesired = canvas.dataset.desiredFrame || '';
   canvas.dataset.desiredFrame = signature;
   canvas._nextFrameRef = frameRef;
+  if (canvas._frameDrawInProgress && previousDesired && previousDesired !== signature) {
+    const startedAt = Number(canvas.dataset.frameDrawStartedAt || 0);
+    if (performance.now() - startedAt > IMAGE_FRAME_STALE_MS) cancelCanvasFrameLoad(canvas);
+  }
   if (canvas._frameDrawScheduled) return;
   canvas._frameDrawScheduled = true;
   requestAnimationFrame(() => {
@@ -1802,8 +1875,10 @@ function pumpFrameRefDraw(canvas) {
   const signature = `${next.nodeId}:${next.seq}`;
   if (canvas.dataset.rawSignature === signature) return;
   canvas._frameDrawInProgress = true;
+  canvas.dataset.frameDrawStartedAt = String(performance.now());
   drawFrameRefToCanvas(canvas, next).finally(() => {
     canvas._frameDrawInProgress = false;
+    delete canvas.dataset.frameDrawStartedAt;
     const queued = canvas._nextFrameRef;
     if (!queued) return;
     const queuedSignature = `${queued.nodeId}:${queued.seq}`;
@@ -1813,24 +1888,6 @@ function pumpFrameRefDraw(canvas) {
     }
     requestAnimationFrame(() => pumpFrameRefDraw(canvas));
   });
-}
-
-async function imageBlobToBitmap(blob) {
-  if (typeof createImageBitmap === 'function') {
-    return createImageBitmap(blob);
-  }
-  const url = URL.createObjectURL(blob);
-  try {
-    const img = new Image();
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = reject;
-      img.src = url;
-    });
-    return img;
-  } finally {
-    URL.revokeObjectURL(url);
-  }
 }
 
 function drawBitmapLike(canvas, bitmap) {
@@ -1844,32 +1901,68 @@ function drawBitmapLike(canvas, bitmap) {
   if (typeof bitmap.close === 'function') bitmap.close();
 }
 
+function drawEncodedFrameImage(canvas, frameRef, signature) {
+  return new Promise((resolve) => {
+    const img = canvas._frameImage || new Image();
+    canvas._frameImage = img;
+    canvas._frameImageResolve = resolve;
+    const finish = () => {
+      if (canvas._frameImageResolve === resolve) canvas._frameImageResolve = null;
+      resolve();
+    };
+    img.onload = () => {
+      img.onload = null;
+      img.onerror = null;
+      if (canvas.dataset.desiredFrame !== signature) {
+        finish();
+        return;
+      }
+      drawBitmapLike(canvas, img);
+      canvas.dataset.rawSignature = signature;
+      finish();
+    };
+    img.onerror = () => {
+      img.onload = null;
+      img.onerror = null;
+      finish();
+    };
+    img.decoding = 'async';
+    if ('fetchPriority' in img) img.fetchPriority = 'high';
+    img.src = `/api/node-frame?nodeId=${encodeURIComponent(frameRef.nodeId)}&seq=${encodeURIComponent(frameRef.seq)}`;
+  });
+}
+
 async function drawFrameRefToCanvas(canvas, frameRef) {
   if (!frameRef?.nodeId || !frameRef.seq) return;
   const signature = `${frameRef.nodeId}:${frameRef.seq}`;
   canvas.dataset.desiredFrame = signature;
   if (canvas.dataset.rawSignature === signature) return;
   if (canvas.dataset.pendingFrame === signature) return;
+  cancelCanvasFrameLoad(canvas);
+  if (['jpeg', 'jpg', 'bmp', 'png', 'webp'].includes(String(frameRef.encoding || '').toLowerCase())) {
+    canvas.dataset.pendingFrame = signature;
+    try {
+      await drawEncodedFrameImage(canvas, frameRef, signature);
+    } finally {
+      if (canvas.dataset.pendingFrame === signature) delete canvas.dataset.pendingFrame;
+    }
+    return;
+  }
   const controller = new AbortController();
   frameFetchControllers.set(canvas, controller);
   canvas.dataset.pendingFrame = signature;
   try {
-    const response = await fetch(`/api/node-frame?nodeId=${encodeURIComponent(frameRef.nodeId)}&seq=${encodeURIComponent(frameRef.seq)}`, { signal: controller.signal });
+    const response = await fetch(`/api/node-frame?nodeId=${encodeURIComponent(frameRef.nodeId)}&seq=${encodeURIComponent(frameRef.seq)}`, {
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+    if (response.status === 204) return;
     if (!response.ok) return;
-    if (['jpeg', 'jpg', 'bmp', 'png', 'webp'].includes(String(frameRef.encoding || '').toLowerCase())) {
-      const blob = await response.blob();
-      if (latestFrameSignature(canvas) !== signature) return;
-      const bitmap = await imageBlobToBitmap(blob);
-      if (latestFrameSignature(canvas) !== signature) {
-        if (typeof bitmap.close === 'function') bitmap.close();
-        return;
-      }
-      drawBitmapLike(canvas, bitmap);
-      canvas.dataset.rawSignature = signature;
-      return;
-    }
+    const responseSeq = Number(response.headers.get('x-frame-seq') || frameRef.seq);
+    const drawnSignature = `${frameRef.nodeId}:${Number.isFinite(responseSeq) && responseSeq > 0 ? responseSeq : frameRef.seq}`;
+    if (canvas.dataset.desiredFrame !== signature && canvas.dataset.desiredFrame !== drawnSignature) return;
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (latestFrameSignature(canvas) !== signature) return;
+    if (canvas.dataset.desiredFrame !== signature && canvas.dataset.desiredFrame !== drawnSignature) return;
     const width = Math.max(1, Number(frameRef.width));
     const height = Math.max(1, Number(frameRef.height));
     if (!Number(frameRef.width) || !Number(frameRef.height)) return;
@@ -1893,7 +1986,7 @@ async function drawFrameRefToCanvas(canvas, frameRef) {
       canvas.height = height;
     }
     canvas.getContext('2d').putImageData(canvas._imageData, 0, 0);
-    canvas.dataset.rawSignature = signature;
+    canvas.dataset.rawSignature = drawnSignature;
   } catch (err) {
     if (err?.name !== 'AbortError') console.warn('Frame draw failed', err);
   } finally {
@@ -1904,18 +1997,39 @@ async function drawFrameRefToCanvas(canvas, frameRef) {
 
 // Update a node-view element in-place using canvas to avoid blank-frame flicker.
 function patchNodeViewEl(el, view) {
+  if (view?.kind === 'plot') {
+    patchPlotViewEl(el, view);
+    return;
+  }
   if (view?.kind === 'image' && (view.dataUrl || view.raw || view.frameRef)) {
     const existingFig = el.querySelector('figure.image-view');
     if (existingFig) {
-      const canvas = existingFig.querySelector('canvas.image-canvas');
-      const cap = existingFig.querySelector('figcaption');
-      if (canvas && cap) {
-        const newCap = view.status || '';
-        if (cap.textContent !== newCap) cap.textContent = newCap;
-        if (view.frameRef) scheduleFrameRefDraw(canvas, view.frameRef);
-        else if (view.raw) drawRawImageToCanvas(canvas, view.raw);
-        else drawToCanvas(canvas, view.dataUrl);
-        return;
+      if (view.frameRef && isStreamFrameRef(view.frameRef)) {
+        const img = existingFig.querySelector('img.image-stream');
+        const cap = existingFig.querySelector('figcaption');
+        if (img && cap) {
+          const newCap = view.status || '';
+          if (cap.textContent !== newCap) cap.textContent = newCap;
+          const streamSrc = frameStreamSrc(view.frameRef);
+          if (img.dataset.streamSrc !== streamSrc) {
+            img.dataset.streamSrc = streamSrc;
+            img.src = streamSrc;
+          }
+          return;
+        }
+      } else if (existingFig.querySelector('img.image-stream')) {
+        // Switching from MJPEG stream back to canvas/raw requires a full rebuild.
+      } else {
+        const canvas = existingFig.querySelector('canvas.image-canvas');
+        const cap = existingFig.querySelector('figcaption');
+        if (canvas && cap) {
+          const newCap = view.status || '';
+          if (cap.textContent !== newCap) cap.textContent = newCap;
+          if (view.frameRef) scheduleFrameRefDraw(canvas, view.frameRef);
+          else if (view.raw) drawRawImageToCanvas(canvas, view.raw);
+          else drawToCanvas(canvas, view.dataUrl);
+          return;
+        }
       }
     }
   }
@@ -1929,6 +2043,28 @@ function patchNodeViewEl(el, view) {
       else if (canvas) drawToCanvas(canvas, view.dataUrl);
     }
   }
+}
+
+function patchPlotViewEl(el, view) {
+  const now = performance.now();
+  const minIntervalMs = UI_DISPLAY_FRAME_MS;
+  const last = Number(el.dataset.plotRenderedAt || 0);
+  el._pendingPlotView = view;
+  if (now - last < minIntervalMs) {
+    if (!el._plotRenderTimer) {
+      el._plotRenderTimer = setTimeout(() => {
+        el._plotRenderTimer = null;
+        const pending = el._pendingPlotView;
+        if (pending) patchPlotViewEl(el, pending);
+      }, Math.max(1, minIntervalMs - (now - last)));
+    }
+    return;
+  }
+  const nextView = el._pendingPlotView || view;
+  el._pendingPlotView = null;
+  el.dataset.plotRenderedAt = String(now);
+  const newHtml = renderViewContent(nextView);
+  if (el.innerHTML !== newHtml) el.innerHTML = newHtml;
 }
 
 function normalizedNodeView(nodeId, view) {
@@ -1947,6 +2083,10 @@ function normalizedNodeView(nodeId, view) {
 function renderViewContent(view) {
   if (!view) return '<div class="view-empty">No data</div>';
   if (view.kind === 'image' && (view.dataUrl || view.raw || view.frameRef)) {
+    if (view.frameRef && isStreamFrameRef(view.frameRef)) {
+      const src = frameStreamSrc(view.frameRef);
+      return `<figure class="image-view"><img class="image-stream" data-stream-src="${escapeAttr(src)}" src="${escapeAttr(src)}" alt=""><figcaption>${escapeHtml(view.status || '')}</figcaption></figure>`;
+    }
     return `<figure class="image-view"><canvas class="image-canvas"></canvas><figcaption>${escapeHtml(view.status || '')}</figcaption></figure>`;
   }
   if (view.kind === 'plot') {
@@ -1955,13 +2095,26 @@ function renderViewContent(view) {
   return `<div class="view-empty">${escapeHtml(view.status || 'No data')}</div>`;
 }
 
+function isStreamFrameRef(frameRef) {
+  return ['jpeg', 'jpg'].includes(String(frameRef?.encoding || '').toLowerCase()) && frameRef?.nodeId;
+}
+
+function frameStreamSrc(frameRef) {
+  if (frameRef?.streamUrl) return String(frameRef.streamUrl);
+  return `/api/node-stream?nodeId=${encodeURIComponent(frameRef.nodeId)}`;
+}
+
 function renderPlot(series, label, view = {}) {
   const width = 280;
   const height = 120;
-  const pointsData = series.map((item, index) => {
+  const allPoints = series.map((item, index) => {
     if (item && typeof item === 'object') return { t: Number(item.t), y: Number(item.y) };
     return { t: index, y: Number(item) };
   }).filter((point) => Number.isFinite(point.t) && Number.isFinite(point.y));
+  const latestT = allPoints.length ? Math.max(...allPoints.map((point) => point.t)) : 0;
+  const windowSec = Math.max(0.1, Number(view.xAxisSeconds || (latestT - (allPoints[0]?.t || 0)) || 1));
+  const startT = latestT - windowSec;
+  const pointsData = allPoints.filter((point) => point.t >= startT);
   if (pointsData.length < 2) {
     return `<div class="plot-view"><svg viewBox="0 0 ${width} ${height}"></svg><span>${escapeHtml(label || 'Waiting for values')}</span></div>`;
   }
@@ -1977,9 +2130,6 @@ function renderPlot(series, label, view = {}) {
     min -= 0.5;
   }
   const span = max - min || 1;
-  const latestT = Math.max(...pointsData.map((point) => point.t));
-  const windowSec = Math.max(0.1, Number(view.xAxisSeconds || (latestT - pointsData[0].t) || 1));
-  const startT = latestT - windowSec;
   const plotPoints = decimatePlotPoints(pointsData, width);
   const points = plotPoints.map((point) => {
     const x = clamp(((point.t - startT) / windowSec) * width, 0, width);
@@ -2025,12 +2175,6 @@ function loadImageFile(node, file) {
 async function loadVideoFile(node, file) {
   if (!file) return;
   stopVideoInput(node.id);
-  let uploaded = null;
-  try {
-    uploaded = await uploadVideoFile(file);
-  } catch (err) {
-    setExecutionStatus('error', `Video upload failed: ${err.message}`);
-  }
   const video = document.createElement('video');
   video.muted = true;
   video.loop = false;
@@ -2048,17 +2192,6 @@ async function loadVideoFile(node, file) {
   video.onloadeddata = () => {
     video.pause();
     captureVideoFrame(node, controller, { updateGraph: false });
-    if (uploaded?.path) {
-      node.params = {
-        ...(node.params || {}),
-        fileName: uploaded.fileName || file.name,
-        videoPath: uploaded.path,
-        serverDecode: true,
-        useSourceFps: !node.params?.overrideHz,
-        publishHz: effectiveVideoHz(node),
-        maxSide: Number(node.params?.maxSide || 640),
-      };
-    }
     renderAll();
     // Detect native FPS by observing frame timestamps
     _detectVideoNativeFps(video, (fps) => {
@@ -2069,14 +2202,14 @@ async function loadVideoFile(node, file) {
         node.params = {
           ...(node.params || {}),
           detectedFps,
-          publishHz: node.params?.overrideHz ? Number(node.params?.publishHz || detectedFps) : detectedFps,
+          publishHz: detectedFps,
         };
         if (node.params.serverDecode && node.params.videoPath) {
           state.videoPayloadDirty = true;
           state.videoDirtyNodes.add(node.id);
           pushRunPayloadUpdate();
         }
-        if (!node.params.overrideHz) renderAll();
+        renderAll();
       }
     });
   };
@@ -2084,18 +2217,11 @@ async function loadVideoFile(node, file) {
   video.src = controller.url;
 }
 
-async function uploadVideoFile(file) {
-  const response = await fetch('/api/upload-video', {
-    method: 'POST',
-    headers: {
-      'content-type': file.type || 'application/octet-stream',
-      'x-file-name': encodeURIComponent(file.name),
-    },
-    body: file,
-  });
+async function selectVideoFileFromServer() {
+  const response = await fetch('/api/select-video-file', { method: 'POST' });
   const data = await response.json();
   if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-  return { ...data, fileName: decodeURIComponent(data.fileName || file.name) };
+  return data.canceled ? null : data;
 }
 
 function _detectVideoNativeFps(video, callback) {
@@ -2169,11 +2295,8 @@ function updateVideoInputsForRun(options = {}) {
     if (controller.ended && !controller.loop) return;
     const node = nodeFor(controller.nodeId);
     if (!node) return;
-    // Sync playback rate with override setting
-    const targetRate = videoPlaybackRate(node);
-    if (Math.abs(controller.video.playbackRate - targetRate) > 0.001) {
-      controller.video.playbackRate = targetRate;
-    }
+    if (node.params?.serverDecode) return;
+    controller.video.playbackRate = 1.0;
     const hz = effectiveVideoHz(node);
     const periodMs = 1000 / hz;
     const dueAt = controller.nextCaptureAt || now;
@@ -2265,7 +2388,7 @@ function startVideoInputs() {
       controller.ended = false;
     }
     const node = nodeFor(controller.nodeId);
-    if (node) controller.video.playbackRate = videoPlaybackRate(node);
+    if (node) controller.video.playbackRate = 1.0;
     controller.video.play().catch(() => {});
   });
 }
@@ -2460,7 +2583,7 @@ function runIntervalMs() {
 
 function stopRun(message = null) {
   if (state.autoTimer) {
-    clearInterval(state.autoTimer);
+    clearTimeout(state.autoTimer);
     state.autoTimer = null;
   }
   if (state.videoTimer) {
@@ -2479,7 +2602,7 @@ function stopRun(message = null) {
 
 function forceStopRun() {
   if (state.autoTimer) {
-    clearInterval(state.autoTimer);
+    clearTimeout(state.autoTimer);
     state.autoTimer = null;
   }
   if (state.videoTimer) {

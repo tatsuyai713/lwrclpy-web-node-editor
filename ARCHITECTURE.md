@@ -18,14 +18,15 @@ flowchart LR
   Runner[ContinuousGraphRunner<br>server-side run loop]
   Graph[GraphRuntime<br>graph.py]
   Runtime[LwrclpyRuntime<br>rclpy executor spin thread]
-  Builtin[Built-in node threads<br>Video/Input/Image View/Hz Monitor/etc.]
+  Builtin[Built-in worker processes<br>source/tap/video]
   Custom[Custom node worker processes<br>.node_envs per node]
-  VideoWorker[Video decode worker process<br>video_dds_worker.py + ffmpeg]
+  VideoWorker[Video decode worker process<br>video_dds_worker.py + OpenCV]
+  TapStream[DDS tap worker HTTP stream]
   DDS[(lwrclpy DDS topics)]
 
   Browser -->|POST /api/start<br>POST /api/stop<br>POST /api/force-stop| Server
   Browser -->|GET /api/run-status| Server
-  Browser -->|GET /api/node-frame| Server
+  Browser -->|MJPEG stream for image preview| TapStream
   Server --> Runner
   Runner --> Graph
   Graph --> Runtime
@@ -37,6 +38,7 @@ flowchart LR
   DDS --> Custom
   Builtin --> VideoWorker
   VideoWorker -->|latest frame IPC<br>.node_workers/*.rgb or jpeg| Builtin
+  Builtin --> TapStream
 ```
 
 重要な点は、グラフ内のデータフローはWebUI上の直接データ受け渡しではなく、バックエンドのlwrclpy topicを経由する設計になっていることです。WebUIは状態確認と表示を行うだけで、DDSの通信周期を直接駆動しません。
@@ -52,7 +54,7 @@ flowchart LR
 | built-in source worker | producerノード別プロセス | Function Generator、Image File InputのDDS publish |
 | DDS tap worker | sink/viewerノード別プロセス | Image View、Topic Hz Monitor、Graph View、Image File SaveのDDS receive |
 | custom node | node別プロセス | ユーザー作成ノード。`.node_envs/<node-id>` のvenvを使う |
-| Video decode worker | Video Input別プロセス | ffmpegで動画をデコードし、DDS publishとpreview frame IPCを行う |
+| Video decode worker | Video Input別プロセス | OpenCVでローカル動画をデコードし、DDS publishとpreview frame IPCを行う |
 
 カスタムノードはノードごとに別venv、別プロセスで動きます。built-inノードもTopic Input/Outputのような境界ノードを除き、DDS publish/receiveをserverプロセス内で行いません。Function GeneratorとImage File Inputは `builtin_source_worker.py`、Image View/Topic Hz Monitor/Graph View/Image File Saveは `dds_tap_worker.py`、Video Inputは `video_dds_worker.py` の独立プロセスで動きます。
 
@@ -107,12 +109,7 @@ flowchart LR
 
 ### Subscriber callbackとHz Monitor
 
-DDS subscriber callbackでデータを受信すると、`graph.py` の `_store_input()` が呼ばれます。この時点で次を更新します。
-
-- `last_inputs[input_id]`
-- `input_queues[input_id]`
-- `input_versions[input_id]`
-- `input_arrival_times[input_id]`
+DDS subscriber callbackでデータを受信すると、DDS tap workerプロセス内で最新状態だけを更新します。Hz Monitorでは画像本体やメッセージ本体を保持せず、受信時刻のリングバッファだけを使います。Image Viewでは最新フレームだけを表示変換workerへ渡し、古いフレームは捨てます。
 
 `Topic Hz Monitor` はWebUIの描画fpsではなく、DDS tap workerプロセス内のsubscriber callback到着時刻からHzを計算します。server.pyはworkerが書いたstatus JSONを読むだけで、DDS受信callbackを実行しません。
 
@@ -134,22 +131,22 @@ sequenceDiagram
 
 ## Video Inputの設計
 
-Video Inputは、ブラウザから毎フレーム画像をHTTP送信する方式ではありません。現在は動画ファイルを一度アップロードし、バックエンド側の独立プロセスでデコードします。
+Video Inputは、ブラウザから毎フレーム画像をHTTP送信する方式ではありません。また、動画ファイルをブラウザからサーバへアップロードする方式も使いません。WebUIの `Select Video` はサーバ側でファイル選択ダイアログを開き、選択されたローカルファイルパスをVideo Input設定に保存します。Path欄は表示専用で、直接入力はできません。
 
 ```mermaid
 sequenceDiagram
   participant UI as Browser
   participant API as server.py
-  participant VNode as Video Input built-in thread
+  participant VNode as Video Input controller
   participant Worker as video_dds_worker.py
   participant DDS as lwrclpy DDS
 
-  UI->>API: POST /api/upload-video
-  API-->>UI: uploaded videoPath
-  UI->>API: POST /api/start graph(videoPath)
+  UI->>API: POST /api/select-video-file
+  API-->>UI: selected local videoPath
+  UI->>API: POST /api/start graph(local videoPath)
   API->>VNode: start Video Input node
-  VNode->>Worker: spawn ffmpeg decode worker
-  Worker->>Worker: probe source fps and decode frames
+  VNode->>Worker: spawn OpenCV decode worker
+  Worker->>Worker: probe source fps and decode frames with VideoCapture
   loop publish period
     Worker->>DDS: publish Image or CompressedImage
   end
@@ -171,7 +168,7 @@ raw `sensor_msgs/msg/Image` は扱いやすく標準的です。一方で、Pyth
 
 ### 動画fpsとLoop
 
-`overrideHz` がOFFの場合、Video Inputは動画ファイルのsource fpsを使ってpublishします。ffmpeg probeで取得した `sourceFps` がworker statusに入り、server側publish周期にも使われます。
+Video Inputは動画ファイルのsource fpsを使ってpublishします。OpenCV probeで取得した `sourceFps` がworker statusに入り、server側publish周期にも使われます。フレーム読み込み、DDS publish、preview生成にかかった処理時間も含めて、絶対時刻ベースで次のpublish時刻を決めます。
 
 `loop=false` の場合、workerは動画終端で `ended=true` をstatusに書きます。Video Input側は `ended=true` を検出するとworkerを再起動せず、最後のフレームを再publishしません。
 
@@ -179,20 +176,20 @@ raw `sensor_msgs/msg/Image` は扱いやすく標準的です。一方で、Pyth
 
 Image ViewはDDSで受信した画像を表示します。ただし、画像本体を `/api/run-status` のJSONへ毎回入れると、JSON生成、base64、HTTP、ブラウザdecodeが重くなり、DDS callbackにも悪影響が出ます。
 
-そのため現在は、run-statusには画像本体ではなく `frameRef` だけを入れます。ブラウザは必要な画像だけ `/api/node-frame` で別取得します。
+そのため現在は、run-statusには画像本体ではなく `frameRef` だけを入れます。Image Viewは通常、DDS tap workerが直接公開するMJPEG streamを `<img>` で表示します。`/api/node-frame` と `/api/node-stream` はraw frameやstream URLがない場合のfallbackです。
 
 ```mermaid
 flowchart LR
-  DDS[(DDS topic)] --> ImageView[Image View built-in node]
-  ImageView -->|store latest display frame| FrameStore[GraphRuntime node frame]
-  ImageView -->|status + frameRef only| RunStatus[/api/run-status/]
+  DDS[(DDS topic)] --> TapWorker[DDS tap worker process]
+  TapWorker -->|receive callback timestamps| HzStatus[Hz/status JSON]
+  TapWorker -->|latest display JPEG only| Stream[worker MJPEG stream]
+  TapWorker -->|status + frameRef only| RunStatus[/api/run-status/]
   Browser[Browser UI] -->|poll status| RunStatus
-  Browser -->|GET binary frame by nodeId/seq| NodeFrame[/api/node-frame/]
-  NodeFrame --> FrameStore
-  Browser --> Canvas[Canvas draw at UI rate]
+  Browser -->|img src=streamUrl| Stream
+  Browser --> Display[Image element at UI rate]
 ```
 
-`/api/run-status` は軽量な状態確認APIです。画像本体の転送は `/api/node-frame` に分離されています。
+`/api/run-status` は軽量な状態確認APIです。画像本体の転送はrun-statusから分離され、Image Viewはworker直のMJPEG streamを主経路にします。表示用JPEG生成はDDS受信callbackとは別スレッドで最新フレームだけを処理するため、古いフレームがキューに溜まり続けない設計です。
 
 ## Frontendの役割
 
@@ -202,11 +199,10 @@ flowchart LR
 - プロジェクトの保存/読み込み
 - Run/Stop/Force StopのAPI呼び出し
 - `/api/run-status` のポーリング
-- Image Viewのcanvas描画
-- Video Inputのローカルプレビュー
-- 動画ファイルのアップロード
+- Image ViewのMJPEG stream表示
+- Video Inputのworkerプレビュー
 
-Video Inputのプレビューはブラウザ上の `<video>` 要素で表示されます。一方、DDS出力はバックエンドのVideo workerとVideo Input built-in nodeが担当します。したがって、プレビューの再生状態とDDS publish状態は同じ動画ファイルを元にしていますが、実行主体は別です。
+Video Inputのプレビューは、Video workerがデコードした最新フレームを `.node_workers/` に軽量previewとして書き、ブラウザが軽量な画像表示経路で表示します。DDS publishとプレビュー生成は同じworker内の同じデコードフレームから分岐しますが、プレビュー書き込みは別スレッドで最新フレームのみ保持するため、表示遅延がDDS publishをブロックしない設計です。
 
 ## Backend API
 
@@ -218,9 +214,9 @@ Video Inputのプレビューはブラウザ上の `<video>` 要素で表示さ�
 | `POST /api/stop` | Run停止、通常worker停止 |
 | `POST /api/force-stop` | Run停止、worker強制kill、残留プロセス掃除 |
 | `GET /api/run-status` | 軽量なノード状態取得 |
-| `GET /api/node-frame?nodeId=<id>` | Image View用の最新画像バイナリ取得 |
-| `POST /api/upload-video` | 動画ファイルをバックエンドへアップロード |
-| `POST /api/update-node-params` | Run中の動画fps、loopなどのruntime parameter更新 |
+| `GET /api/node-stream?nodeId=<id>` | worker直streamがない場合のMJPEG fallback |
+| `GET /api/node-frame?nodeId=<id>` | raw frameや旧表示経路用のbinary fallback |
+| `POST /api/update-node-params` | Run中の動画path、loopなどのruntime parameter更新 |
 
 ## データ形式
 
@@ -254,12 +250,12 @@ raw画像は扱いやすい一方で、Python経由のDDS publish/subではデ�
 現在の分離ポイントは次の通りです。
 
 - DDS subscriber callbackはlwrclpy executor spin threadで受信します。
-- built-in表示ノードは30fps程度で表示用状態だけを更新します。
-- Image Viewの画像本体はrun-statusから分離され、必要時だけbinary fetchします。
+- built-in表示ノードは30fpsで表示用状態だけを更新します。
+- Image Viewの画像本体はrun-statusから分離され、通常はDDS tap workerから直接MJPEG streamで表示します。
 - 動画デコードはserver本体ではなく `video_dds_worker.py` の別プロセスで実行します。
 - カスタムノードはnode別venv、node別プロセスで実行します。
 
-ただし、built-in nodeのDDS publish/sub処理は現在serverプロセス内のthreadで動きます。重いraw画像をPythonで大量にpublish/subする場合はGILやメッセージコピーの影響を受けます。必要に応じてCompressedImageを選択することで、この負荷を下げられます。
+重いraw画像をPythonで大量にpublish/subする場合は、プロセス分離していてもメッセージコピーとserializeの影響を受けます。必要に応じてCompressedImageを選択することで、この負荷を下げられます。
 
 ## 障害時の見方
 
@@ -269,7 +265,7 @@ raw画像は扱いやすい一方で、Python経由のDDS publish/subではデ�
 
 - raw `sensor_msgs/msg/Image` で高解像度・高fpsを流していないか
 - 必要に応じてVideo Inputの出力型を `sensor_msgs/msg/CompressedImage` に変更しているか
-- `overrideHz` がOFFならsource fps、ONなら指定Hzになっているか
+- Video Inputのsource fpsが想定通り取得されているか
 - `/api/run-status` が巨大化していないか
 
 ### Video previewは止まるがDDSが止まらない
@@ -278,4 +274,4 @@ raw画像は扱いやすい一方で、Python経由のDDS publish/subではデ�
 
 ### 画像表示がカクつく
 
-Image ViewはDDS受信自体とは別に、ブラウザcanvas描画と `/api/node-frame` の取得速度に依存します。Hz Monitorが正しい値ならDDS受信は成立しており、問題は表示側です。
+Image ViewはDDS受信自体とは別に、ブラウザのMJPEG表示とpreview JPEG生成速度に依存します。Hz Monitorが正しい値ならDDS受信は成立しており、問題は表示側です。

@@ -4,6 +4,7 @@ import argparse
 import atexit
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import signal
@@ -14,7 +15,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
 
@@ -28,7 +29,7 @@ VIDEO_WORKER_SCRIPT = Path(__file__).resolve().parent / "video_dds_worker.py"
 DDS_TAP_WORKER_SCRIPT = Path(__file__).resolve().parent / "dds_tap_worker.py"
 BUILTIN_SOURCE_WORKER_SCRIPT = Path(__file__).resolve().parent / "builtin_source_worker.py"
 WORKER_DIR = PROJECT_DIR / ".node_workers"
-UPLOAD_DIR = PROJECT_DIR / ".uploads" / "videos"
+GUI_DISPLAY_HZ = 30.0
 
 
 def _json_default(value):
@@ -37,10 +38,43 @@ def _json_default(value):
     return str(value)
 
 
-def _safe_upload_name(name: str) -> str:
-    base = Path(name or "video").name
-    cleaned = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in base)
-    return cleaned or "video"
+def _select_video_file() -> dict[str, object]:
+    if sys.platform == "darwin":
+        script = (
+            'set f to choose file with prompt "Select video file" '
+            'of type {"mp4", "mov", "m4v", "avi", "mkv", "webm"}\n'
+            "POSIX path of f"
+        )
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        if result.returncode != 0:
+            text = (result.stderr or result.stdout or "").strip()
+            if "User canceled" in text or result.returncode == 1:
+                return {"ok": True, "canceled": True}
+            raise RuntimeError(text or "video file selection failed")
+        path = result.stdout.strip()
+    else:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            path = filedialog.askopenfilename(
+                title="Select video file",
+                filetypes=[
+                    ("Video files", "*.mp4 *.mov *.m4v *.avi *.mkv *.webm"),
+                    ("All files", "*.*"),
+                ],
+            )
+        finally:
+            root.destroy()
+        if not path:
+            return {"ok": True, "canceled": True}
+    selected = Path(path).expanduser()
+    if not selected.is_file():
+        raise RuntimeError(f"selected file does not exist: {selected}")
+    return {"ok": True, "path": str(selected), "fileName": selected.name}
 
 
 def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
@@ -164,6 +198,7 @@ class ContinuousGraphRunner:
         self._error = ""
         self._pending_param_updates: list[dict] = []
         self._stopping = False
+        self._phase = "idle"
 
     def start(self, payload: dict) -> dict:
         graph_payload = {
@@ -192,6 +227,7 @@ class ContinuousGraphRunner:
             self._latest = {"nodes": {}, "setup": {"complete": True}, "lwrclpy": {"available": self.runtime.ros.available, "error": self.runtime.ros.error}}
             self._stop_event.clear()
             self._stopping = False
+            self._phase = "starting"
             self._running = True
             self._thread = threading.Thread(target=self._loop, name="lwrclpy-web-node-editor-runner", daemon=True)
             self._thread.start()
@@ -260,6 +296,7 @@ class ContinuousGraphRunner:
         self._stop_event.clear()
         if not self._running:
             self._stopping = False
+            self._phase = "stopped"
 
     def status(self) -> dict:
         with self._lock:
@@ -274,6 +311,7 @@ class ContinuousGraphRunner:
                     "hz": self._hz,
                     "durationSec": self._duration_sec,
                     "error": self._error,
+                    "phase": self._phase if self._running else "stopped",
                 },
             }
 
@@ -303,10 +341,12 @@ class ContinuousGraphRunner:
                 with self._lock:
                     self._latest = result
                     self._tick_count += 1
+                    self._phase = "running"
                     self._error = ""
             except Exception as exc:
                 with self._lock:
                     self._error = str(exc)
+                    self._phase = "error"
                     self._latest = {"error": str(exc), "nodes": {}, "setup": {"complete": False}}
                 stop_runtime = True
                 break
@@ -314,7 +354,7 @@ class ContinuousGraphRunner:
             # The server loop only starts workers and samples their status for
             # the Web UI, so spinning it at the model run frequency can starve
             # the HTTP server without improving DDS timing.
-            status_hz = min(max(1.0, hz), 30.0)
+            status_hz = GUI_DISPLAY_HZ
             next_at += 1.0 / status_hz
             sleep_for = next_at - time.time()
             if sleep_for > 0:
@@ -326,12 +366,15 @@ class ContinuousGraphRunner:
                 self._thread = None
             self._running = False
             self._stopping = False
+            if self._phase != "error":
+                self._phase = "stopped"
             self._stopped_at = time.time()
         if stop_runtime:
             self.runtime.stop(force=False)
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     runtime = GraphRuntime()
     runner = ContinuousGraphRunner(runtime)
     _last_image_view_data_urls: dict[str, str] = {}
@@ -355,7 +398,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args) -> None:
         path = self.path.split("?", 1)[0]
-        if path in {"/api/run", "/api/run-status", "/api/node-frame"} and args and str(args[1]) == "200":
+        if path in {"/api/run", "/api/run-status"} and args and str(args[1]) == "200":
+            return
+        if path in {"/api/node-frame", "/api/node-stream"} and args and str(args[1]) in {"200", "204"}:
             return
         print("[lwrclpy_web_node_editor]", fmt % args)
 
@@ -375,12 +420,19 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             self._send_node_frame(str((query.get("nodeId") or [""])[0]))
             return
+        if path == "/api/node-stream":
+            query = parse_qs(parsed.query)
+            self._send_node_stream(str((query.get("nodeId") or [""])[0]))
+            return
         self._send_static(path)
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path == "/api/upload-video":
-            self._handle_video_upload()
+        if path == "/api/select-video-file":
+            try:
+                self._send_json(_select_video_file())
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=500)
             return
         if path not in {"/api/run", "/api/ready", "/api/start", "/api/update-run-payload", "/api/update-node-params", "/api/stop", "/api/force-stop"}:
             self.send_error(404)
@@ -441,30 +493,6 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
 
-    def _handle_video_upload(self):
-        try:
-            length = int(self.headers.get("content-length", "0"))
-            original = unquote(self.headers.get("x-file-name", "video"))
-            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-            suffix = Path(original).suffix or ".video"
-            target = UPLOAD_DIR / f"{int(time.time() * 1000)}_{_safe_upload_name(original)}"
-            if not target.suffix:
-                target = target.with_suffix(suffix)
-            remaining = length
-            with target.open("wb") as out:
-                while remaining > 0:
-                    chunk = self.rfile.read(min(1024 * 1024, remaining))
-                    if not chunk:
-                        break
-                    out.write(chunk)
-                    remaining -= len(chunk)
-            if remaining:
-                self._send_json({"error": "upload interrupted"}, status=400)
-                return
-            self._send_json({"ok": True, "path": str(target), "fileName": Path(original).name, "size": length})
-        except Exception as exc:
-            self._send_json({"error": str(exc)}, status=500)
-
     def _send_json(self, payload, status=200):
         data = json.dumps(payload, ensure_ascii=False, default=_json_default).encode("utf-8")
         try:
@@ -479,12 +507,12 @@ class Handler(BaseHTTPRequestHandler):
     def _send_node_frame(self, node_id: str):
         frame = self.runtime.get_node_frame(node_id)
         if not frame:
-            self.send_error(404)
+            self._send_no_content()
             return
         data = frame.get("data")
         frame_path = Path(str(frame.get("path") or "")) if not isinstance(data, (bytes, bytearray)) else None
         if frame_path is not None and not frame_path.is_file():
-            self.send_error(404)
+            self._send_no_content()
             return
         encoding = str(frame.get("encoding") or "rgb8").lower()
         try:
@@ -498,6 +526,9 @@ class Handler(BaseHTTPRequestHandler):
                 "webp": "image/webp",
             }.get(encoding, "application/octet-stream")
             self.send_header("content-type", content_type)
+            self.send_header("cache-control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("pragma", "no-cache")
+            self.send_header("expires", "0")
             self.send_header("content-length", str(length))
             self.send_header("x-frame-seq", str(frame.get("seq") or 0))
             self.send_header("x-frame-width", str(frame.get("width") or 0))
@@ -512,6 +543,72 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
 
+    def _send_node_stream(self, node_id: str) -> None:
+        boundary = "lwrclpyframe"
+        try:
+            self.send_response(200)
+            self.send_header("content-type", f"multipart/x-mixed-replace; boundary={boundary}")
+            self.send_header("cache-control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("pragma", "no-cache")
+            self.send_header("expires", "0")
+            self.send_header("connection", "close")
+            self.end_headers()
+            last_seq = None
+            while True:
+                frame = self.runtime.get_node_frame(node_id)
+                if not frame:
+                    time.sleep(0.03)
+                    continue
+                encoding = str(frame.get("encoding") or "jpeg").lower()
+                if encoding not in {"jpeg", "jpg"}:
+                    time.sleep(0.03)
+                    continue
+                seq = int(frame.get("seq") or 0)
+                if seq == last_seq:
+                    time.sleep(0.005)
+                    continue
+                payload = self._frame_bytes(frame)
+                if payload is None:
+                    time.sleep(0.03)
+                    continue
+                last_seq = seq
+                header = (
+                    f"--{boundary}\r\n"
+                    "Content-Type: image/jpeg\r\n"
+                    f"Content-Length: {len(payload)}\r\n"
+                    f"X-Frame-Seq: {seq}\r\n"
+                    "\r\n"
+                ).encode("ascii")
+                self.wfile.write(header)
+                self.wfile.write(payload)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return
+
+    def _frame_bytes(self, frame: dict) -> bytes | None:
+        data = frame.get("data")
+        if isinstance(data, bytes):
+            return data
+        if isinstance(data, bytearray):
+            return bytes(data)
+        frame_path = Path(str(frame.get("path") or ""))
+        if not frame_path.is_file():
+            return None
+        try:
+            return frame_path.read_bytes()
+        except Exception:
+            return None
+
+    def _send_no_content(self) -> None:
+        try:
+            self.send_response(204)
+            self.send_header("cache-control", "no-store")
+            self.send_header("content-length", "0")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
     def _compact_run_status(self, payload):
         if not isinstance(payload, dict):
             return payload
@@ -522,6 +619,16 @@ class Handler(BaseHTTPRequestHandler):
         changed = False
         for node_id, node_payload in nodes.items():
             view = node_payload.get("view") if isinstance(node_payload, dict) else None
+            if isinstance(view, dict) and view.get("kind") == "plot" and isinstance(view.get("series"), list):
+                series = self._compact_plot_series(view.get("series"), view.get("xAxisSeconds"))
+                if series is not view.get("series"):
+                    next_view = dict(view)
+                    next_view["series"] = series
+                    next_node_payload = dict(node_payload)
+                    next_node_payload["view"] = next_view
+                    compact_nodes[node_id] = next_node_payload
+                    changed = True
+                    continue
             if not isinstance(view, dict) or view.get("kind") != "image" or not isinstance(view.get("dataUrl"), str):
                 raw = view.get("raw") if isinstance(view, dict) else None
                 if isinstance(raw, dict) and isinstance(raw.get("data"), str):
@@ -558,6 +665,34 @@ class Handler(BaseHTTPRequestHandler):
         compact["nodes"] = compact_nodes
         return compact
 
+    def _compact_plot_series(self, series, x_axis_seconds):
+        points = []
+        for item in series:
+            if not isinstance(item, dict):
+                continue
+            try:
+                t = float(item.get("t"))
+                y = float(item.get("y"))
+            except Exception:
+                continue
+            if math.isfinite(t) and math.isfinite(y):
+                points.append({"t": t, "y": y})
+        if len(points) <= 600:
+            return series
+        latest_t = max(point["t"] for point in points)
+        try:
+            window_sec = max(0.1, float(x_axis_seconds or 10.0))
+        except Exception:
+            window_sec = 10.0
+        window_points = [point for point in points if point["t"] >= latest_t - window_sec] or points[-1:]
+        if len(window_points) <= 600:
+            return window_points
+        step = len(window_points) / 600
+        sampled = [window_points[min(len(window_points) - 1, int(index * step))] for index in range(600)]
+        if sampled[-1] is not window_points[-1]:
+            sampled.append(window_points[-1])
+        return sampled
+
     def _send_static(self, path: str):
         if path == "/":
             path = "/index.html"
@@ -578,6 +713,8 @@ class Handler(BaseHTTPRequestHandler):
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
+    daemon_threads = True
+    block_on_close = False
     if hasattr(ThreadingHTTPServer, "allow_reuse_port"):
         allow_reuse_port = True
 

@@ -40,6 +40,7 @@ def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
 
 
 LWRCLPY_TYPE_TREE = discover_lwrclpy_types()
+GUI_DISPLAY_HZ = 30.0
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -725,6 +726,8 @@ class CustomLwrclNodeInstance:
             input_port.data_type if input_port else "",
             input_port.topics if input_port else (),
             float(self.config.params.get("windowSec") or 5.0),
+            float(self.config.params.get("xAxisSeconds") or 10.0),
+            int(self.config.params.get("sampleLimit") or 10000),
         )
 
     def _dds_tap_worker_config(self, status_path: Path, frame_path: Path) -> dict[str, Any]:
@@ -737,9 +740,11 @@ class CustomLwrclNodeInstance:
             "topic": input_port.topics[0],
             "dataType": input_port.data_type,
             "windowSec": max(0.5, float(self.config.params.get("windowSec") or 5.0)),
-            "displayHz": 30.0,
+            "displayHz": GUI_DISPLAY_HZ,
             "fieldPath": str(self.config.params.get("fieldPath") or "data"),
             "sampleLimit": int(self.config.params.get("sampleLimit") or 10000),
+            "graphWindowSec": max(0.1, float(self.config.params.get("xAxisSeconds") or 10.0)),
+            "graphDisplayLimit": 600,
             "outputDir": str(Path.cwd() / "saved_images"),
             "statusPath": str(status_path),
             "framePath": str(frame_path),
@@ -839,7 +844,6 @@ class CustomLwrclNodeInstance:
             self.config.id,
             self.config.params.get("videoPath"),
             float(self.config.params.get("publishHz") or 30.0),
-            bool(self.config.params.get("useSourceFps")),
             bool(self.config.params.get("loop", True)),
             int(self.config.params.get("maxSide") or 640),
             "preview:jpeg",
@@ -856,13 +860,13 @@ class CustomLwrclNodeInstance:
             "topic": output.topics[0],
             "dataType": output.data_type or "sensor_msgs/msg/Image",
             "publishHz": max(0.01, float(self.config.params.get("publishHz") or 30.0)),
-            "useSourceFps": bool(self.config.params.get("useSourceFps")),
+            "useSourceFps": True,
             "loop": bool(self.config.params.get("loop", True)),
             "maxSide": int(self.config.params.get("maxSide") or 640),
             "statusPath": str(status_path),
             "framePath": str(frame_path),
             "enableDdsPublish": True,
-            "previewHz": 30.0,
+            "previewHz": GUI_DISPLAY_HZ,
             "previewEncoding": "jpeg",
             "outputEncoding": "jpeg" if normalize_type(output.data_type) == "sensor_msgs/msg/CompressedImage" else "raw",
         }
@@ -880,6 +884,9 @@ class CustomLwrclNodeInstance:
                 elif data.get("ended"):
                     size = f"{data.get('width', '?')} x {data.get('height', '?')}"
                     status = f"{self.config.params.get('fileName') or 'video'} ended {size}"
+                elif data.get("phase") and not data.get("published"):
+                    phase = str(data.get("phase") or "starting")
+                    status = f"{self.config.params.get('fileName') or 'video'} starting: {phase}"
                 else:
                     size = f"{data.get('width', '?')} x {data.get('height', '?')}"
                     actual = float(data.get("actualHz") or 0.0)
@@ -918,34 +925,33 @@ class CustomLwrclNodeInstance:
             try:
                 if tool == "video_file_input":
                     if self._uses_video_worker():
-                        period = 1.0 / 30.0
+                        period = 1.0 / GUI_DISPLAY_HZ
                         self._ensure_video_worker()
-                        image = self._video_frame_message(force=True)
-                        if isinstance(image, dict) and self._should_update_background_view():
-                            self.view = self._image_view_payload(image, self._video_input_status())
+                        if self._should_update_background_view():
+                            self._update_video_worker_view()
                     else:
-                        period = 1.0 / 30.0
+                        period = 1.0 / GUI_DISPLAY_HZ
                         self._execute_source_worker_status_once()
                 elif tool == "function_generator":
-                    period = 1.0 / 30.0
+                    period = 1.0 / GUI_DISPLAY_HZ
                     self._execute_source_worker_status_once()
                 elif tool == "image_file_input":
-                    period = 1.0 / 30.0
+                    period = 1.0 / GUI_DISPLAY_HZ
                     self._execute_source_worker_status_once()
                 elif tool == "image_view":
-                    period = 1.0 / 30.0
+                    period = 1.0 / GUI_DISPLAY_HZ
                     if self._uses_dds_tap_worker():
                         self._execute_image_view_worker_once()
                     else:
                         self._execute_image_view_once()
                 elif tool == "topic_hz_monitor":
-                    period = 1.0 / 30.0
+                    period = 1.0 / GUI_DISPLAY_HZ
                     if self._uses_dds_tap_worker():
                         self._execute_topic_hz_monitor_worker_once()
                     else:
                         self._execute_topic_hz_monitor_once()
                 elif tool == "graph_view":
-                    period = 1.0 / 30.0
+                    period = 1.0 / GUI_DISPLAY_HZ
                     if self._uses_dds_tap_worker():
                         self._execute_graph_view_worker_once()
                     else:
@@ -971,7 +977,7 @@ class CustomLwrclNodeInstance:
                 next_at = time.time()
 
     def _should_update_background_view(self) -> bool:
-        hz = 30.0
+        hz = GUI_DISPLAY_HZ
         now = time.time()
         next_at = float(self.state.get("background_view_next_update_at") or 0.0)
         if now < next_at:
@@ -1055,14 +1061,27 @@ class CustomLwrclNodeInstance:
             self.view = {"kind": "image", "dataUrl": "", "status": str(status.get("error"))}
             return
         frame_path = Path(str(status.get("framePath") or ""))
+        stream_url = str(status.get("streamUrl") or "")
         seq = int(status.get("frameSeq") or 0)
-        if seq <= 0 or not frame_path.exists():
+        if seq <= 0 or (not stream_url and not frame_path.exists()):
             self.view = {"kind": "image", "dataUrl": "", "status": "No image"}
             return
         width = int(status.get("width") or 0)
         height = int(status.get("height") or 0)
-        encoding = str(status.get("encoding") or "rgb8").lower()
-        frame_signature = (seq, width, height, encoding, str(frame_path))
+        preview_width = int(status.get("previewWidth") or width)
+        preview_height = int(status.get("previewHeight") or height)
+        dds_encoding = str(status.get("ddsEncoding") or status.get("encoding") or "rgb8").lower()
+        frame_encoding = str(status.get("frameEncoding") or status.get("encoding") or "rgb8").lower()
+        dds_format = str(status.get("ddsFormat") or "")
+        if not dds_format:
+            data_type = normalize_type(str(status.get("dataType") or "sensor_msgs/msg/Image"))
+            if data_type == "sensor_msgs/msg/CompressedImage":
+                dds_format = f"CompressedImage/{dds_encoding or 'compressed'}"
+            elif data_type == "sensor_msgs/msg/Image":
+                dds_format = f"Image/{dds_encoding or 'raw'}"
+            else:
+                dds_format = f"{data_type}/{dds_encoding}" if dds_encoding else data_type
+        frame_signature = (seq, width, height, dds_encoding, frame_encoding, str(frame_path))
         if frame_signature == self.state.get("image_view_worker_last_signature"):
             return
         self.state["image_view_worker_last_seq"] = seq
@@ -1070,16 +1089,22 @@ class CustomLwrclNodeInstance:
         self.state["image_view_frame_seq"] = seq
         self.state["image_view_frame"] = {
             "seq": seq,
-            "width": width,
-            "height": height,
-            "encoding": encoding if encoding in {"jpeg", "jpg", "bmp", "png", "webp"} else "rgb8",
+            "width": preview_width,
+            "height": preview_height,
+            "sourceWidth": width,
+            "sourceHeight": height,
+            "encoding": frame_encoding if frame_encoding in {"jpeg", "jpg", "bmp", "png", "webp"} else "rgb8",
             "path": str(frame_path),
+            "streamUrl": stream_url,
             "updatedAt": time.time(),
         }
+        frame_ref = {"nodeId": self.config.id, "seq": seq, "width": preview_width, "height": preview_height, "encoding": self.state["image_view_frame"]["encoding"]}
+        if stream_url:
+            frame_ref["streamUrl"] = stream_url
         self.view = {
             "kind": "image",
-            "frameRef": {"nodeId": self.config.id, "seq": seq, "width": width, "height": height, "encoding": self.state["image_view_frame"]["encoding"]},
-            "status": f"{width} x {height} {encoding}" if width and height else encoding,
+            "frameRef": frame_ref,
+            "status": f"{width} x {height} {dds_format}" if width and height else dds_format,
         }
 
     def _read_dds_tap_status(self) -> dict[str, Any] | None:
@@ -1205,7 +1230,7 @@ class CustomLwrclNodeInstance:
         frame_path = Path(str(status.get("framePath") or ""))
         width = int(status.get("width") or 0)
         height = int(status.get("height") or 0)
-        encoding = str(status.get("encoding") or "raw").lower()
+        frame_encoding = str(status.get("frameEncoding") or status.get("encoding") or "jpeg").lower()
         if width <= 0 or height <= 0 or not frame_path.exists():
             return None
         try:
@@ -1213,40 +1238,30 @@ class CustomLwrclNodeInstance:
         except Exception:
             return None
         status_seq = int(status.get("frameSeq") or status.get("published") or 0)
-        seq = max(status_seq, int(stat.st_mtime_ns))
+        seq = status_seq if status_seq > 0 else int(stat.st_mtime_ns)
         if seq <= 0:
             return None
         if not force and seq <= int(self.state.get("video_worker_last_seq") or 0):
             return self.state.get("video_worker_last_frame")
-        try:
-            raw = frame_path.read_bytes()
-        except Exception:
-            return None
-        if encoding == "jpeg":
-            frame = {
-                "format": f"jpeg; width={width}; height={height}",
-                "data": raw,
-                "dataEncoding": "bytes",
-                "width": width,
-                "height": height,
-            }
-            self.state["video_worker_last_seq"] = seq
-            self.state["video_file_current_time"] = seq / max(0.01, float(self.config.params.get("publishHz") or 30.0))
-            self.state["video_worker_last_frame"] = frame
-            return frame
-        expected = width * height * 3
-        if len(raw) != expected:
-            return None
         self.state["video_worker_last_seq"] = seq
-        self.state["video_file_current_time"] = seq / max(0.01, float(self.config.params.get("publishHz") or 30.0))
-        frame = {
+        if status_seq > 0:
+            self.state["video_file_current_time"] = status_seq / max(0.01, float(self.config.params.get("publishHz") or 30.0))
+        self.state["image_view_frame"] = {
+            "seq": seq,
             "width": width,
             "height": height,
-            "encoding": "rgb8",
-            "is_bigendian": 0,
-            "step": width * 3,
-            "data": raw,
-            "dataEncoding": "bytes",
+            "encoding": frame_encoding if frame_encoding in {"jpeg", "jpg", "bmp", "png", "webp"} else "jpeg",
+            "path": str(frame_path),
+            "updatedAt": time.time(),
+        }
+        frame = {
+            "frameRef": {
+                "nodeId": self.config.id,
+                "seq": seq,
+                "width": width,
+                "height": height,
+                "encoding": self.state["image_view_frame"]["encoding"],
+            }
         }
         self.state["video_worker_last_frame"] = frame
         return frame
@@ -1271,16 +1286,15 @@ class CustomLwrclNodeInstance:
         return f"{name} {suffix} / {hz:g} Hz"
 
     def _effective_video_publish_hz(self) -> float:
-        if self.config.params.get("useSourceFps"):
-            status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.video.status.json"
-            if status_path.exists():
-                try:
-                    status = json.loads(status_path.read_text(encoding="utf-8"))
-                    source_fps = float(status.get("sourceFps") or 0.0)
-                    if source_fps > 0:
-                        return max(0.01, source_fps)
-                except Exception:
-                    pass
+        status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.video.status.json"
+        if status_path.exists():
+            try:
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+                source_fps = float(status.get("sourceFps") or 0.0)
+                if source_fps > 0:
+                    return max(0.01, source_fps)
+            except Exception:
+                pass
         return max(0.01, float(self.config.params.get("publishHz") or self.config.params.get("embeddedFps") or 30.0))
 
     def _synthetic_video_frame(self, base_frame: dict[str, Any]) -> dict[str, Any]:
@@ -1460,13 +1474,15 @@ class CustomLwrclNodeInstance:
     def _image_view_payload(self, image: Any, status: str) -> dict[str, Any]:
         if isinstance(image, dict) and isinstance(image.get("dataUrl"), str):
             return {"kind": "image", "dataUrl": image["dataUrl"], "status": status}
+        if isinstance(image, dict) and isinstance(image.get("frameRef"), dict):
+            return {"kind": "image", "frameRef": image["frameRef"], "status": status}
         frame_ref = self._image_frame_ref_payload(image)
         if frame_ref:
             return {"kind": "image", "frameRef": frame_ref, "status": status}
         return {"kind": "image", "dataUrl": self._image_data_url(image), "status": status}
 
     def _should_update_image_view(self) -> bool:
-        hz = 30.0
+        hz = GUI_DISPLAY_HZ
         now = time.time()
         next_at = float(self.state.get("image_view_next_update_at") or 0.0)
         if now < next_at:
@@ -2236,7 +2252,7 @@ class GraphRuntime:
         try:
             return req_file.read_text(encoding="utf-8").strip() + "\n"
         except Exception:
-            return "imageio-ffmpeg\n"
+            return "pillow\nopencv-python-headless\n"
 
     def _site_packages_for(self, env_root: Path) -> Path | None:
         if sys.platform.startswith("win"):

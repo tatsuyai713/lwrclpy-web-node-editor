@@ -8,10 +8,10 @@ ROS 2本体のインストールは不要です。`lwrclpy` が提供する `rcl
 
 - ブラウザでノードを作成し、入力・処理・表示・グラフ化・topic出力を接続できます。
 - `Image File Input` で画像を読み込み、`sensor_msgs/msg/Image` として処理できます。
-- `Video File Input` で動画を読み込み、Run中に現在フレームを `sensor_msgs/msg/Image` として流せます。
+- `Video File Input` で動画ファイルを選択し、Run中に `sensor_msgs/msg/Image` として流せます。
 - `Image Viewer` で画像を表示できます。
 - `Graph Viewer` で `std_msgs/msg/Float32` などの数値や、メッセージ内の数値フィールドをプロットできます。
-- `Topic Input` / `Topic Output` で、グラフの入口・出口をlwrclpy topicに接続できます。
+- `Topic Input` / `Topic Output` で、グラフ外部とのtopic境界を表現できます。
 - カスタムノードごとに `requirements.txt` を持たせ、実行前に `.node_envs/<node-id>` のvenvへ依存をセットアップできます。
 - プロジェクト全体をJSONとしてSave/Loadできます。
 - カスタムノードを個別のPythonファイルとしてExport/Importできます。
@@ -94,7 +94,7 @@ Webプレビューは、リンクごとのtopic名を使ってlwrclpy topic経�
 - グラフ内部の接続は、WebUI/サーバー内の直接データ受け渡しではなくlwrclpy topicで実行されます。
 - カスタムノードのコードは `lwrclpy` のcallbackに近いスコープで実行されます。
 - `Topic Input` と `Topic Output` は、グラフ外部との境界マーカーです。実際のPub/Subは接続された処理・表示ノードが行います。
-- 画像・動画フレームはJSON往復を軽くするため、ブラウザからbase64形式で送られます。
+- 画像入力は小さな埋め込みデータとして扱えます。動画入力はブラウザからアップロードせず、サーバー側のファイル選択ダイアログで選んだローカルファイルを独立workerがデコードしてDDS publishします。
 - 連続実行のtick周波数は `Run Hz` で設定します。Run中のtickループはサーバー側threadで動くため、ブラウザのtimer throttlingには依存しません。設定値が高い場合でも、実効周波数はノード処理時間やlwrclpy/DDS処理時間に制限されます。
 
 つまり、Webプレビューでもノード間通信の意味論はlwrclpy topicに寄せています。
@@ -194,7 +194,7 @@ if state.get("enabled", True):
 - `One Shot`: 同じ画像を数tickだけ出力します。
 - `Rate`: 指定Hzで画像を繰り返し出力します。
 
-`Video File Input` はブラウザで選んだ動画をHTML videoとして再生し、Run中に現在フレームを `Publish Hz` の周期で `sensor_msgs/msg/Image` としてTopic出力します。サンプルJSONの動画入力は実動画ファイルを持たないため、埋め込みフレームからサーバー側で簡易的な動画フレームを生成します。
+`Video File Input` はノード上の `Select Video` で動画ファイルを選択します。Path欄は選択結果の表示専用で、直接入力はできません。Run中は独立した `video_dds_worker.py` プロセスがOpenCVで動画をデコードし、動画ファイルのsource fpsに合わせて `sensor_msgs/msg/Image` としてTopic出力します。サンプルJSONの動画入力は実動画ファイルを持たないため、埋め込みフレームからサーバー側で簡易的な動画フレームを生成します。
 
 `Image File Save` は接続された画像を `saved_images/` にBMPとして保存します。
 
@@ -206,10 +206,10 @@ if state.get("enabled", True):
 
 ## Topic Input / Topic Output
 
-`Topic Input` と `Topic Output` は、Webグラフの外側とlwrclpy topicで接続するための境界ノードです。
+`Topic Input` と `Topic Output` は、Webグラフの外側とlwrclpy topicで接続するための境界ノードです。これら自体は処理を持たず、実際のpublish/subscribeは接続された処理ノード、source worker、tap workerが行います。
 
-- `Topic Input`: 接続先の入力型に合わせてtopicをsubscribeし、グラフへ値を流します。
-- `Topic Output`: 入力された値を、接続元の型に合わせてtopicへpublishします。
+- `Topic Input`: 外部topicから入る信号の入口を表します。接続先ノード側がsubscribeします。
+- `Topic Output`: 外部topicへ出る信号の出口を表します。接続元ノード側がpublishします。
 - topic名はエッジ名として表示・編集されます。
 - 同じ出力ポートから出る複数エッジは、同じtopic名に同期されます。
 
@@ -250,7 +250,7 @@ if state.get("enabled", True):
 ### 動画が動かない
 
 - `Run` を押して連続実行にしてください。1 tickだけでは動画は進みにくいです。
-- ブラウザで動画ファイルを読み込んだ場合は、`Video File Input` ノードのプレビューが `playing` になっているか確認してください。
+- 実動画を使う場合は、`Video File Input` ノードの `Select Video` でファイルを選択し、`Ready` 後に `Run` してください。
 - サンプル動画は `samples/image_video/02_video_motion_topic_graph.json` または `samples/image_video/04_video_low_light_colormap_topic_graph.json` を読み込み、`Run` で動作確認できます。
 
 ### ノードの処理結果が出ない
