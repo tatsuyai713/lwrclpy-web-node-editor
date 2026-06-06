@@ -400,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in {"/api/run", "/api/run-status"} and args and str(args[1]) == "200":
             return
-        if path in {"/api/node-frame", "/api/node-stream"} and args and str(args[1]) in {"200", "204"}:
+        if path == "/api/node-frame" and args and str(args[1]) in {"200", "204"}:
             return
         print("[lwrclpy_web_node_editor]", fmt % args)
 
@@ -419,10 +419,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/node-frame":
             query = parse_qs(parsed.query)
             self._send_node_frame(str((query.get("nodeId") or [""])[0]))
-            return
-        if path == "/api/node-stream":
-            query = parse_qs(parsed.query)
-            self._send_node_stream(str((query.get("nodeId") or [""])[0]))
             return
         self._send_static(path)
 
@@ -542,63 +538,6 @@ class Handler(BaseHTTPRequestHandler):
                     shutil.copyfileobj(handle, self.wfile, length=256 * 1024)
         except (BrokenPipeError, ConnectionResetError):
             return
-
-    def _send_node_stream(self, node_id: str) -> None:
-        boundary = "lwrclpyframe"
-        try:
-            self.send_response(200)
-            self.send_header("content-type", f"multipart/x-mixed-replace; boundary={boundary}")
-            self.send_header("cache-control", "no-store, no-cache, must-revalidate, max-age=0")
-            self.send_header("pragma", "no-cache")
-            self.send_header("expires", "0")
-            self.send_header("connection", "close")
-            self.end_headers()
-            last_seq = None
-            while True:
-                frame = self.runtime.get_node_frame(node_id)
-                if not frame:
-                    time.sleep(0.03)
-                    continue
-                encoding = str(frame.get("encoding") or "jpeg").lower()
-                if encoding not in {"jpeg", "jpg"}:
-                    time.sleep(0.03)
-                    continue
-                seq = int(frame.get("seq") or 0)
-                if seq == last_seq:
-                    time.sleep(0.005)
-                    continue
-                payload = self._frame_bytes(frame)
-                if payload is None:
-                    time.sleep(0.03)
-                    continue
-                last_seq = seq
-                header = (
-                    f"--{boundary}\r\n"
-                    "Content-Type: image/jpeg\r\n"
-                    f"Content-Length: {len(payload)}\r\n"
-                    f"X-Frame-Seq: {seq}\r\n"
-                    "\r\n"
-                ).encode("ascii")
-                self.wfile.write(header)
-                self.wfile.write(payload)
-                self.wfile.write(b"\r\n")
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, TimeoutError):
-            return
-
-    def _frame_bytes(self, frame: dict) -> bytes | None:
-        data = frame.get("data")
-        if isinstance(data, bytes):
-            return data
-        if isinstance(data, bytearray):
-            return bytes(data)
-        frame_path = Path(str(frame.get("path") or ""))
-        if not frame_path.is_file():
-            return None
-        try:
-            return frame_path.read_bytes()
-        except Exception:
-            return None
 
     def _send_no_content(self) -> None:
         try:

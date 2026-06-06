@@ -105,19 +105,27 @@ def import_type_class(type_name: str):
     return getattr(module, name)
 
 
-def topic_qos(data_type: str) -> Any:
+def topic_qos(data_type: str, depth: int = 1) -> Any:
     if normalize_type(data_type) not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
         return 10
     try:
         qos = importlib.import_module("rclpy.qos")
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=4,
+            depth=depth,
             reliability=qos.ReliabilityPolicy.RELIABLE,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
         return 1
+
+
+def publisher_qos(data_type: str) -> Any:
+    return topic_qos(data_type, depth=4)
+
+
+def subscriber_qos(data_type: str) -> Any:
+    return topic_qos(data_type, depth=1)
 
 
 class LwrclpyRuntime:
@@ -1074,9 +1082,8 @@ class CustomLwrclNodeInstance:
             self.view = {"kind": "image", "dataUrl": "", "status": str(status.get("error"))}
             return
         frame_path = Path(str(status.get("framePath") or ""))
-        stream_url = str(status.get("streamUrl") or "")
         seq = int(status.get("frameSeq") or 0)
-        if seq <= 0 or (not stream_url and not frame_path.exists()):
+        if seq <= 0 or not frame_path.exists():
             self.view = {"kind": "image", "dataUrl": "", "status": "No image"}
             return
         width = int(status.get("width") or 0)
@@ -1108,12 +1115,9 @@ class CustomLwrclNodeInstance:
             "sourceHeight": height,
             "encoding": frame_encoding if frame_encoding in {"jpeg", "jpg", "bmp", "png", "webp"} else "rgb8",
             "path": str(frame_path),
-            "streamUrl": stream_url,
             "updatedAt": time.time(),
         }
         frame_ref = {"nodeId": self.config.id, "seq": seq, "width": preview_width, "height": preview_height, "encoding": self.state["image_view_frame"]["encoding"]}
-        if stream_url:
-            frame_ref["streamUrl"] = stream_url
         self.view = {
             "kind": "image",
             "frameRef": frame_ref,
@@ -1712,7 +1716,7 @@ class CustomLwrclNodeInstance:
             _, kind, _ = split_type(output.data_type)
             for topic in topics:
                 if kind == "msg":
-                    self.publishers.setdefault(output.id, []).append(self.lwrcl_node.create_publisher(type_cls, topic, topic_qos(output.data_type)))
+                    self.publishers.setdefault(output.id, []).append(self.lwrcl_node.create_publisher(type_cls, topic, publisher_qos(output.data_type)))
                 else:
                     self.clients.setdefault(output.id, []).append(self.lwrcl_node.create_client(type_cls, topic))
         for input_port in self.config.inputs:
@@ -1723,7 +1727,7 @@ class CustomLwrclNodeInstance:
             _, kind, _ = split_type(input_port.data_type)
             for topic in topics:
                 if kind == "msg":
-                    sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port.id), topic_qos(input_port.data_type))
+                    sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port.id), subscriber_qos(input_port.data_type))
                     self.subscriptions.append(sub)
                 else:
                     srv = self.lwrcl_node.create_service(type_cls, topic, self._make_service_callback(input_port.id))
@@ -1736,7 +1740,7 @@ class CustomLwrclNodeInstance:
             if kind != "msg":
                 continue
             for topic in self._port_topics(output):
-                sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_output_subscription_callback(output.id), topic_qos(output.data_type))
+                sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_output_subscription_callback(output.id), subscriber_qos(output.data_type))
                 self.subscriptions.append(sub)
 
     def _port_topics(self, port: PortConfig) -> tuple[str, ...]:

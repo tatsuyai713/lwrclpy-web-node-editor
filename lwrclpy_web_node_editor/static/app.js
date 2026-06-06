@@ -1,6 +1,5 @@
 const UI_DISPLAY_FPS = 30;
 const UI_DISPLAY_FRAME_MS = 1000 / UI_DISPLAY_FPS;
-const IMAGE_FRAME_STALE_MS = UI_DISPLAY_FRAME_MS * 2;
 
 const state = {
   messageTypes: {},
@@ -1529,6 +1528,7 @@ function startRunStatusPolling() {
   if (state.autoTimer) clearTimeout(state.autoTimer);
   if (state.videoTimer) clearInterval(state.videoTimer);
   state.autoTimer = setTimeout(pollRunStatus, 0);
+  resumeFramePullLoops();
   if (hasBrowserVideoRuntime()) {
     state.videoTimer = setInterval(updateVideoFramePayloads, UI_DISPLAY_FRAME_MS);
   } else {
@@ -1643,6 +1643,7 @@ function updateRunStatus(data) {
       state.videoTimer = null;
     }
     pauseVideoInputs();
+    stopAllFramePullLoops();
     $('run-model').classList.remove('active');
     setExecutionStatus('stopped', `Server run stopped after ${state.tickCount} ticks`);
   }
@@ -1771,8 +1772,7 @@ function updateNodeViews(nodes) {
 function nodeViewSignature(view) {
   if (!view) return '';
   if (view.kind === 'image') {
-    if (view.frameRef && isStreamFrameRef(view.frameRef)) return `image:stream:${view.frameRef.nodeId}:${view.status || ''}`;
-    if (view.frameRef) return `image:frame:${view.frameRef.nodeId}:${view.frameRef.seq}:${view.status || ''}`;
+    if (view.frameRef) return `image:frame:${view.frameRef.nodeId}:${view.frameRef.encoding || ''}:${view.status || ''}`;
     if (view.raw) return `image:raw:${view.raw.width}:${view.raw.height}:${view.raw.encoding}:${String(view.raw.data || '').length}:${view.status || ''}`;
     if (view.dataUrl) return `image:data:${view.dataUrl.length}:${view.status || ''}`;
     return `image:empty:${view.status || ''}`;
@@ -1840,6 +1840,29 @@ function drawRawImageToCanvas(canvas, raw) {
 
 const frameFetchControllers = new WeakMap();
 
+function stopFramePullLoop(canvas) {
+  if (!canvas) return;
+  canvas._framePullActive = false;
+  if (canvas._framePullTimer) {
+    clearTimeout(canvas._framePullTimer);
+    canvas._framePullTimer = null;
+  }
+  cancelCanvasFrameLoad(canvas);
+}
+
+function stopAllFramePullLoops() {
+  document.querySelectorAll('canvas.image-canvas').forEach((canvas) => stopFramePullLoop(canvas));
+}
+
+function resumeFramePullLoops() {
+  document.querySelectorAll('[data-node-view]').forEach((el) => {
+    const view = state.nodeViews[el.dataset.nodeView];
+    if (view?.kind !== 'image' || !view.frameRef) return;
+    const canvas = el.querySelector('canvas.image-canvas');
+    if (canvas) scheduleFrameRefDraw(canvas, view.frameRef);
+  });
+}
+
 function cancelCanvasFrameLoad(canvas) {
   const controller = frameFetchControllers.get(canvas);
   if (controller) controller.abort();
@@ -1857,43 +1880,36 @@ function cancelCanvasFrameLoad(canvas) {
 
 function scheduleFrameRefDraw(canvas, frameRef) {
   if (!canvas || !frameRef) return;
-  const signature = `${frameRef.nodeId}:${frameRef.seq}`;
-  const previousDesired = canvas.dataset.desiredFrame || '';
-  canvas.dataset.desiredFrame = signature;
-  canvas._nextFrameRef = frameRef;
-  if (canvas._frameDrawInProgress && previousDesired && previousDesired !== signature) {
-    const startedAt = Number(canvas.dataset.frameDrawStartedAt || 0);
-    if (performance.now() - startedAt > IMAGE_FRAME_STALE_MS) cancelCanvasFrameLoad(canvas);
-  }
-  if (canvas._frameDrawScheduled) return;
-  canvas._frameDrawScheduled = true;
-  requestAnimationFrame(() => {
-    canvas._frameDrawScheduled = false;
-    pumpFrameRefDraw(canvas);
-  });
+  canvas._framePullRef = frameRef;
+  canvas.dataset.desiredFrame = `${frameRef.nodeId}:${frameRef.seq || 0}`;
+  if (canvas._framePullActive) return;
+  canvas._framePullActive = true;
+  pullLatestFrameToCanvas(canvas);
 }
 
-function pumpFrameRefDraw(canvas) {
-  if (!canvas || canvas._frameDrawInProgress) return;
-  const next = canvas._nextFrameRef;
-  canvas._nextFrameRef = null;
-  if (!next) return;
-  const signature = `${next.nodeId}:${next.seq}`;
-  if (canvas.dataset.rawSignature === signature) return;
-  canvas._frameDrawInProgress = true;
-  canvas.dataset.frameDrawStartedAt = String(performance.now());
-  drawFrameRefToCanvas(canvas, next).finally(() => {
-    canvas._frameDrawInProgress = false;
-    delete canvas.dataset.frameDrawStartedAt;
-    const queued = canvas._nextFrameRef;
-    if (!queued) return;
-    const queuedSignature = `${queued.nodeId}:${queued.seq}`;
-    if (canvas.dataset.rawSignature === queuedSignature) {
-      canvas._nextFrameRef = null;
-      return;
+async function pullLatestFrameToCanvas(canvas) {
+  if (!canvas || !canvas._framePullActive) return;
+  if (!canvas.isConnected) {
+    stopFramePullLoop(canvas);
+    return;
+  }
+  const frameRef = canvas._framePullRef;
+  if (!frameRef?.nodeId) {
+    stopFramePullLoop(canvas);
+    return;
+  }
+  const startedAt = performance.now();
+  if (!canvas._frameDrawInProgress) {
+    canvas._frameDrawInProgress = true;
+    try {
+      await drawFrameRefToCanvas(canvas, frameRef);
+    } finally {
+      canvas._frameDrawInProgress = false;
     }
-    requestAnimationFrame(() => pumpFrameRefDraw(canvas));
-  });
+  }
+  if (!canvas._framePullActive || !canvas.isConnected) return;
+  const elapsed = performance.now() - startedAt;
+  canvas._framePullTimer = setTimeout(() => pullLatestFrameToCanvas(canvas), Math.max(0, UI_DISPLAY_FRAME_MS - elapsed));
 }
 
 function drawBitmapLike(canvas, bitmap) {
@@ -1907,55 +1923,81 @@ function drawBitmapLike(canvas, bitmap) {
   if (typeof bitmap.close === 'function') bitmap.close();
 }
 
-function drawEncodedFrameImage(canvas, frameRef, signature) {
-  return new Promise((resolve) => {
-    const img = canvas._frameImage || new Image();
-    canvas._frameImage = img;
-    canvas._frameImageResolve = resolve;
-    const finish = () => {
-      if (canvas._frameImageResolve === resolve) canvas._frameImageResolve = null;
-      resolve();
-    };
-    img.onload = () => {
-      img.onload = null;
-      img.onerror = null;
-      if (canvas.dataset.desiredFrame !== signature) {
-        finish();
-        return;
-      }
-      drawBitmapLike(canvas, img);
-      canvas.dataset.rawSignature = signature;
-      finish();
-    };
-    img.onerror = () => {
-      img.onload = null;
-      img.onerror = null;
-      finish();
-    };
-    img.decoding = 'async';
-    if ('fetchPriority' in img) img.fetchPriority = 'high';
-    img.src = `/api/node-frame?nodeId=${encodeURIComponent(frameRef.nodeId)}&seq=${encodeURIComponent(frameRef.seq)}`;
+function frameSignature(nodeId, seq) {
+  return `${nodeId}:${seq}`;
+}
+
+function signatureSeq(signature) {
+  const value = Number(String(signature || '').split(':').pop());
+  return Number.isFinite(value) ? value : 0;
+}
+
+function shouldDrawResponseFrame(canvas, nodeId, responseSeq) {
+  const desired = canvas.dataset.desiredFrame || '';
+  const desiredSeq = signatureSeq(desired);
+  return desired.startsWith(`${nodeId}:`) && responseSeq >= desiredSeq;
+}
+
+async function blobToBitmapLike(blob) {
+  if (typeof createImageBitmap === 'function') {
+    return createImageBitmap(blob);
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = url;
+    });
+    return img;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function drawEncodedFrameImage(canvas, frameRef, signature, controller) {
+  const response = await fetch(`/api/node-frame?nodeId=${encodeURIComponent(frameRef.nodeId)}&seq=${encodeURIComponent(frameRef.seq)}`, {
+    signal: controller.signal,
+    cache: 'no-store',
   });
+  if (response.status === 204 || !response.ok) return;
+  const responseSeq = Number(response.headers.get('x-frame-seq') || frameRef.seq);
+  const drawnSeq = Number.isFinite(responseSeq) && responseSeq > 0 ? responseSeq : Number(frameRef.seq);
+  if (!shouldDrawResponseFrame(canvas, frameRef.nodeId, drawnSeq)) return;
+  const drawnSignature = frameSignature(frameRef.nodeId, drawnSeq);
+  if (canvas.dataset.rawSignature === drawnSignature) return;
+  const blob = await response.blob();
+  if (controller.signal.aborted || !shouldDrawResponseFrame(canvas, frameRef.nodeId, drawnSeq)) return;
+  const bitmap = await blobToBitmapLike(blob);
+  if (controller.signal.aborted || !shouldDrawResponseFrame(canvas, frameRef.nodeId, drawnSeq)) {
+    if (typeof bitmap.close === 'function') bitmap.close();
+    return;
+  }
+  drawBitmapLike(canvas, bitmap);
+  canvas.dataset.rawSignature = drawnSignature;
 }
 
 async function drawFrameRefToCanvas(canvas, frameRef) {
   if (!frameRef?.nodeId || !frameRef.seq) return;
   const signature = `${frameRef.nodeId}:${frameRef.seq}`;
   canvas.dataset.desiredFrame = signature;
-  if (canvas.dataset.rawSignature === signature) return;
   if (canvas.dataset.pendingFrame === signature) return;
   cancelCanvasFrameLoad(canvas);
+  const controller = new AbortController();
+  frameFetchControllers.set(canvas, controller);
   if (['jpeg', 'jpg', 'bmp', 'png', 'webp'].includes(String(frameRef.encoding || '').toLowerCase())) {
     canvas.dataset.pendingFrame = signature;
     try {
-      await drawEncodedFrameImage(canvas, frameRef, signature);
+      await drawEncodedFrameImage(canvas, frameRef, signature, controller);
+    } catch (err) {
+      if (err?.name !== 'AbortError') console.warn('Frame draw failed', err);
     } finally {
       if (canvas.dataset.pendingFrame === signature) delete canvas.dataset.pendingFrame;
+      if (frameFetchControllers.get(canvas) === controller) frameFetchControllers.delete(canvas);
     }
     return;
   }
-  const controller = new AbortController();
-  frameFetchControllers.set(canvas, controller);
   canvas.dataset.pendingFrame = signature;
   try {
     const response = await fetch(`/api/node-frame?nodeId=${encodeURIComponent(frameRef.nodeId)}&seq=${encodeURIComponent(frameRef.seq)}`, {
@@ -1965,13 +2007,15 @@ async function drawFrameRefToCanvas(canvas, frameRef) {
     if (response.status === 204) return;
     if (!response.ok) return;
     const responseSeq = Number(response.headers.get('x-frame-seq') || frameRef.seq);
-    const drawnSignature = `${frameRef.nodeId}:${Number.isFinite(responseSeq) && responseSeq > 0 ? responseSeq : frameRef.seq}`;
-    if (canvas.dataset.desiredFrame !== signature && canvas.dataset.desiredFrame !== drawnSignature) return;
+    const drawnSeq = Number.isFinite(responseSeq) && responseSeq > 0 ? responseSeq : Number(frameRef.seq);
+    const drawnSignature = frameSignature(frameRef.nodeId, drawnSeq);
+    if (!shouldDrawResponseFrame(canvas, frameRef.nodeId, drawnSeq)) return;
+    if (canvas.dataset.rawSignature === drawnSignature) return;
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (canvas.dataset.desiredFrame !== signature && canvas.dataset.desiredFrame !== drawnSignature) return;
-    const width = Math.max(1, Number(frameRef.width));
-    const height = Math.max(1, Number(frameRef.height));
-    if (!Number(frameRef.width) || !Number(frameRef.height)) return;
+    if (!shouldDrawResponseFrame(canvas, frameRef.nodeId, drawnSeq)) return;
+    const width = Math.max(1, Number(response.headers.get('x-frame-width') || frameRef.width));
+    const height = Math.max(1, Number(response.headers.get('x-frame-height') || frameRef.height));
+    if (!width || !height) return;
     const required = width * height * 4;
     if (!canvas._rgbaBuffer || canvas._rgbaBuffer.length !== required) {
       canvas._rgbaBuffer = new Uint8ClampedArray(required);
@@ -2010,32 +2054,20 @@ function patchNodeViewEl(el, view) {
   if (view?.kind === 'image' && (view.dataUrl || view.raw || view.frameRef)) {
     const existingFig = el.querySelector('figure.image-view');
     if (existingFig) {
-      if (view.frameRef && isStreamFrameRef(view.frameRef)) {
-        const img = existingFig.querySelector('img.image-stream');
-        const cap = existingFig.querySelector('figcaption');
-        if (img && cap) {
-          const newCap = view.status || '';
-          if (cap.textContent !== newCap) cap.textContent = newCap;
-          const streamSrc = frameStreamSrc(view.frameRef);
-          if (img.dataset.streamSrc !== streamSrc) {
-            img.dataset.streamSrc = streamSrc;
-            img.src = streamSrc;
-          }
-          return;
+      const canvas = existingFig.querySelector('canvas.image-canvas');
+      const cap = existingFig.querySelector('figcaption');
+      if (canvas && cap) {
+        const newCap = view.status || '';
+        if (cap.textContent !== newCap) cap.textContent = newCap;
+        if (view.frameRef) scheduleFrameRefDraw(canvas, view.frameRef);
+        else if (view.raw) {
+          stopFramePullLoop(canvas);
+          drawRawImageToCanvas(canvas, view.raw);
+        } else {
+          stopFramePullLoop(canvas);
+          drawToCanvas(canvas, view.dataUrl);
         }
-      } else if (existingFig.querySelector('img.image-stream')) {
-        // Switching from MJPEG stream back to canvas/raw requires a full rebuild.
-      } else {
-        const canvas = existingFig.querySelector('canvas.image-canvas');
-        const cap = existingFig.querySelector('figcaption');
-        if (canvas && cap) {
-          const newCap = view.status || '';
-          if (cap.textContent !== newCap) cap.textContent = newCap;
-          if (view.frameRef) scheduleFrameRefDraw(canvas, view.frameRef);
-          else if (view.raw) drawRawImageToCanvas(canvas, view.raw);
-          else drawToCanvas(canvas, view.dataUrl);
-          return;
-        }
+        return;
       }
     }
   }
@@ -2045,8 +2077,13 @@ function patchNodeViewEl(el, view) {
     if (view?.kind === 'image' && (view.dataUrl || view.raw || view.frameRef)) {
       const canvas = el.querySelector('canvas.image-canvas');
       if (canvas && view.frameRef) scheduleFrameRefDraw(canvas, view.frameRef);
-      else if (canvas && view.raw) drawRawImageToCanvas(canvas, view.raw);
-      else if (canvas) drawToCanvas(canvas, view.dataUrl);
+      else if (canvas && view.raw) {
+        stopFramePullLoop(canvas);
+        drawRawImageToCanvas(canvas, view.raw);
+      } else if (canvas) {
+        stopFramePullLoop(canvas);
+        drawToCanvas(canvas, view.dataUrl);
+      }
     }
   }
 }
@@ -2089,25 +2126,12 @@ function normalizedNodeView(nodeId, view) {
 function renderViewContent(view) {
   if (!view) return '<div class="view-empty">No data</div>';
   if (view.kind === 'image' && (view.dataUrl || view.raw || view.frameRef)) {
-    if (view.frameRef && isStreamFrameRef(view.frameRef)) {
-      const src = frameStreamSrc(view.frameRef);
-      return `<figure class="image-view"><img class="image-stream" data-stream-src="${escapeAttr(src)}" src="${escapeAttr(src)}" alt=""><figcaption>${escapeHtml(view.status || '')}</figcaption></figure>`;
-    }
     return `<figure class="image-view"><canvas class="image-canvas"></canvas><figcaption>${escapeHtml(view.status || '')}</figcaption></figure>`;
   }
   if (view.kind === 'plot') {
     return renderPlot(view.series || [], view.status || '', view);
   }
   return `<div class="view-empty">${escapeHtml(view.status || 'No data')}</div>`;
-}
-
-function isStreamFrameRef(frameRef) {
-  return ['jpeg', 'jpg'].includes(String(frameRef?.encoding || '').toLowerCase()) && frameRef?.nodeId;
-}
-
-function frameStreamSrc(frameRef) {
-  if (frameRef?.streamUrl) return String(frameRef.streamUrl);
-  return `/api/node-stream?nodeId=${encodeURIComponent(frameRef.nodeId)}`;
 }
 
 function renderPlot(series, label, view = {}) {
@@ -2601,6 +2625,7 @@ function stopRun(message = null) {
     state.runStopTimer = null;
   }
   pauseVideoInputs();
+  stopAllFramePullLoops();
   $('run-model').classList.remove('active');
   setExecutionStatus('stopping', message || `Stopping after ${state.tickCount} ticks`);
   stopWorkers(false);
@@ -2620,6 +2645,7 @@ function forceStopRun() {
     state.runStopTimer = null;
   }
   pauseVideoInputs();
+  stopAllFramePullLoops();
   $('run-model').classList.remove('active');
   setExecutionStatus('stopping', `Force stopping after ${state.tickCount} ticks`);
   stopWorkers(true);

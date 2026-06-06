@@ -363,8 +363,7 @@ body.panning, body.panning * {
   grid-template-rows: minmax(0, 1fr) 28px;
   height: 100%;
 }
-.image-view canvas,
-.image-view img.image-stream {
+.image-view canvas {
   display: block;
   width: 100%;
   height: auto;
@@ -372,8 +371,7 @@ body.panning, body.panning * {
   object-fit: contain;
   background: #050607;
 }
-.node-view-video .image-view canvas,
-.node-view-video .image-view img.image-stream {
+.node-view-video .image-view canvas {
   height: 100%;
   max-height: none;
 }

@@ -21,12 +21,11 @@ flowchart LR
   Builtin[Built-in worker processes<br>source/tap/video]
   Custom[Custom node worker processes<br>.node_envs per node]
   VideoWorker[Video decode worker process<br>video_dds_worker.py + OpenCV]
-  TapStream[DDS tap worker HTTP stream]
   DDS[(lwrclpy DDS topics)]
 
   Browser -->|POST /api/start<br>POST /api/stop<br>POST /api/force-stop| Server
   Browser -->|GET /api/run-status| Server
-  Browser -->|MJPEG stream for image preview| TapStream
+  Browser -->|GET /api/node-frame| Server
   Server --> Runner
   Runner --> Graph
   Graph --> Runtime
@@ -38,7 +37,6 @@ flowchart LR
   DDS --> Custom
   Builtin --> VideoWorker
   VideoWorker -->|latest frame IPC<br>.node_workers/*.rgb or jpeg| Builtin
-  Builtin --> TapStream
 ```
 
 重要な点は、グラフ内のデータフローはWebUI上の直接データ受け渡しではなく、バックエンドのlwrclpy topicを経由する設計になっていることです。WebUIは状態確認と表示を行うだけで、DDSの通信周期を直接駆動しません。
@@ -176,20 +174,20 @@ Video Inputは動画ファイルのsource fpsを使ってpublishします。Open
 
 Image ViewはDDSで受信した画像を表示します。ただし、画像本体を `/api/run-status` のJSONへ毎回入れると、JSON生成、base64、HTTP、ブラウザdecodeが重くなり、DDS callbackにも悪影響が出ます。
 
-そのため現在は、run-statusには画像本体ではなく `frameRef` だけを入れます。Image Viewは通常、DDS tap workerが直接公開するMJPEG streamを `<img>` で表示します。`/api/node-frame` と `/api/node-stream` はraw frameやstream URLがない場合のfallbackです。
+そのため現在は、run-statusには画像本体ではなく `frameRef` だけを入れます。Image Viewは `frameRef` のseqを見て、必要な最新preview frameだけを `/api/node-frame` で取得してcanvasへ描画します。MJPEG `<img>` streamはブラウザ内部バッファを制御しにくいため使いません。
 
 ```mermaid
 flowchart LR
   DDS[(DDS topic)] --> TapWorker[DDS tap worker process]
   TapWorker -->|receive callback timestamps| HzStatus[Hz/status JSON]
-  TapWorker -->|latest display JPEG only| Stream[worker MJPEG stream]
+  TapWorker -->|latest-only preview conversion thread| FrameFile[latest preview frame file]
   TapWorker -->|status + frameRef only| RunStatus[/api/run-status/]
   Browser[Browser UI] -->|poll status| RunStatus
-  Browser -->|img src=streamUrl| Stream
-  Browser --> Display[Image element at UI rate]
+  Browser -->|GET /api/node-frame by nodeId/seq| FrameFile
+  Browser --> Display[Canvas at 30fps]
 ```
 
-`/api/run-status` は軽量な状態確認APIです。画像本体の転送はrun-statusから分離され、Image Viewはworker直のMJPEG streamを主経路にします。表示用JPEG生成はDDS受信callbackとは別スレッドで最新フレームだけを処理するため、古いフレームがキューに溜まり続けない設計です。
+`/api/run-status` は軽量な状態確認APIです。画像本体の転送はrun-statusから分離されます。DDS callbackは受信時刻と最新msg参照だけを更新し、表示用JPEG生成はDDS受信callbackとは別スレッドで最新フレームだけを処理するため、古いフレームがキューに溜まり続けない設計です。
 
 ## Frontendの役割
 
@@ -199,7 +197,7 @@ flowchart LR
 - プロジェクトの保存/読み込み
 - Run/Stop/Force StopのAPI呼び出し
 - `/api/run-status` のポーリング
-- Image ViewのMJPEG stream表示
+- Image Viewのlatest-frame canvas表示
 - Video Inputのworkerプレビュー
 
 Video Inputのプレビューは、Video workerがデコードした最新フレームを `.node_workers/` に軽量previewとして書き、ブラウザが軽量な画像表示経路で表示します。DDS publishとプレビュー生成は同じworker内の同じデコードフレームから分岐しますが、プレビュー書き込みは別スレッドで最新フレームのみ保持するため、表示遅延がDDS publishをブロックしない設計です。
@@ -214,8 +212,7 @@ Video Inputのプレビューは、Video workerがデコードした最新フレ
 | `POST /api/stop` | Run停止、通常worker停止 |
 | `POST /api/force-stop` | Run停止、worker強制kill、残留プロセス掃除 |
 | `GET /api/run-status` | 軽量なノード状態取得 |
-| `GET /api/node-stream?nodeId=<id>` | worker直streamがない場合のMJPEG fallback |
-| `GET /api/node-frame?nodeId=<id>` | raw frameや旧表示経路用のbinary fallback |
+| `GET /api/node-frame?nodeId=<id>` | Image View/Video preview用の最新preview frame取得 |
 | `POST /api/update-node-params` | Run中の動画path、loopなどのruntime parameter更新 |
 
 ## データ形式
@@ -251,7 +248,7 @@ raw画像は扱いやすい一方で、Python経由のDDS publish/subではデ�
 
 - DDS subscriber callbackはlwrclpy executor spin threadで受信します。
 - built-in表示ノードは30fpsで表示用状態だけを更新します。
-- Image Viewの画像本体はrun-statusから分離され、通常はDDS tap workerから直接MJPEG streamで表示します。
+- Image Viewの画像本体はrun-statusから分離され、`/api/node-frame` で最新preview frameだけを取得します。
 - 動画デコードはserver本体ではなく `video_dds_worker.py` の別プロセスで実行します。
 - カスタムノードはnode別venv、node別プロセスで実行します。
 
@@ -274,4 +271,4 @@ raw画像は扱いやすい一方で、Python経由のDDS publish/subではデ�
 
 ### 画像表示がカクつく
 
-Image ViewはDDS受信自体とは別に、ブラウザのMJPEG表示とpreview JPEG生成速度に依存します。Hz Monitorが正しい値ならDDS受信は成立しており、問題は表示側です。
+Image ViewはDDS受信自体とは別に、preview JPEG生成とcanvas描画速度に依存します。Hz Monitorが正しい値ならDDS受信は成立しており、問題は表示側です。

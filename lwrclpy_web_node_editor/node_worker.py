@@ -21,19 +21,27 @@ def split_kind(type_name: str) -> str:
     return type_name.split("/")[1]
 
 
-def topic_qos(data_type: str) -> Any:
+def topic_qos(data_type: str, depth: int = 1) -> Any:
     if data_type.replace(".", "/") not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
         return 10
     try:
         qos = importlib.import_module("rclpy.qos")
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=4,
+            depth=depth,
             reliability=qos.ReliabilityPolicy.RELIABLE,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
         return 1
+
+
+def publisher_qos(data_type: str) -> Any:
+    return topic_qos(data_type, depth=4)
+
+
+def subscriber_qos(data_type: str) -> Any:
+    return topic_qos(data_type, depth=1)
 
 
 class LwrclpyWorkerNode:
@@ -68,14 +76,14 @@ class LwrclpyWorkerNode:
             type_cls = import_type_class(output["dataType"])
             for topic in self.port_topics.get("outputs", {}).get(output["id"], []):
                 if split_kind(output["dataType"]) == "msg":
-                    self.publishers.setdefault(output["id"], []).append(self.node.create_publisher(type_cls, topic, topic_qos(output["dataType"])))
+                    self.publishers.setdefault(output["id"], []).append(self.node.create_publisher(type_cls, topic, publisher_qos(output["dataType"])))
                 else:
                     self.clients.setdefault(output["id"], []).append(self.node.create_client(type_cls, topic))
         for input_port in self.node_config.get("inputs", []):
             type_cls = import_type_class(input_port["dataType"])
             for topic in self.port_topics.get("inputs", {}).get(input_port["id"], []):
                 if split_kind(input_port["dataType"]) == "msg":
-                    self.subscriptions.append(self.node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port), topic_qos(input_port["dataType"])))
+                    self.subscriptions.append(self.node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port), subscriber_qos(input_port["dataType"])))
                 else:
                     self.services.append(self.node.create_service(type_cls, topic, self._make_service_callback(input_port)))
 

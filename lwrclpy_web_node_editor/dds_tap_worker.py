@@ -8,7 +8,6 @@ import os
 import signal
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +48,7 @@ def _topic_qos(data_type: str) -> Any:
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=4,
+            depth=1,
             reliability=qos.ReliabilityPolicy.RELIABLE,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
@@ -136,86 +135,9 @@ class DdsTap:
         self._frame_item: tuple[int, Any] | None = None
         self._frame_writer_thread: threading.Thread | None = None
         self._frame_writer_stop = False
-        self._stream_condition = threading.Condition()
-        self._stream_frame: tuple[int, bytes] | None = None
-        self._stream_server: ThreadingHTTPServer | None = None
-        self._stream_thread: threading.Thread | None = None
-        self.stream_url = ""
         self.subscription: Any = None
         self.data_sharing_disabled = os.environ.get("LWRCLPY_NO_DATASHARING") == "1"
         self.transport = "callback"
-
-    def start_stream_server(self) -> None:
-        if self.mode != "image" or self._stream_server is not None:
-            return
-        tap = self
-
-        class StreamHandler(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def log_message(self, _fmt: str, *_args: Any) -> None:
-                return
-
-            def do_GET(self) -> None:
-                if self.path.split("?", 1)[0] != "/stream":
-                    self.send_error(404)
-                    return
-                boundary = "lwrclpyframe"
-                try:
-                    self.send_response(200)
-                    self.send_header("content-type", f"multipart/x-mixed-replace; boundary={boundary}")
-                    self.send_header("cache-control", "no-store, no-cache, must-revalidate, max-age=0")
-                    self.send_header("pragma", "no-cache")
-                    self.send_header("expires", "0")
-                    self.send_header("access-control-allow-origin", "*")
-                    self.send_header("connection", "close")
-                    self.end_headers()
-                    last_seq = 0
-                    while RUNNING:
-                        with tap._stream_condition:
-                            tap._stream_condition.wait_for(
-                                lambda: not RUNNING or (tap._stream_frame is not None and tap._stream_frame[0] != last_seq),
-                                timeout=1.0,
-                            )
-                            if not RUNNING:
-                                return
-                            item = tap._stream_frame
-                        if item is None:
-                            continue
-                        seq, payload = item
-                        last_seq = seq
-                        header = (
-                            f"--{boundary}\r\n"
-                            "Content-Type: image/jpeg\r\n"
-                            f"Content-Length: {len(payload)}\r\n"
-                            f"X-Frame-Seq: {seq}\r\n"
-                            "\r\n"
-                        ).encode("ascii")
-                        self.wfile.write(header)
-                        self.wfile.write(payload)
-                        self.wfile.write(b"\r\n")
-                        self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError, TimeoutError):
-                    return
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), StreamHandler)
-        server.daemon_threads = True
-        server.block_on_close = False
-        self._stream_server = server
-        host, port = server.server_address
-        self.stream_url = f"http://{host}:{port}/stream"
-        self._stream_thread = threading.Thread(target=server.serve_forever, name="dds-tap-mjpeg-stream", daemon=True)
-        self._stream_thread.start()
-
-    def stop_stream_server(self) -> None:
-        server = self._stream_server
-        if server is None:
-            return
-        with self._stream_condition:
-            self._stream_condition.notify_all()
-        server.shutdown()
-        server.server_close()
-        self._stream_server = None
 
     def callback(self, msg: Any) -> None:
         now = time.perf_counter()
@@ -383,10 +305,6 @@ class DdsTap:
             if source_width > 0 and source_height > 0:
                 data, frame_encoding, preview_width, preview_height = _preview_image_bytes(source_width, source_height, _rgb_preview_bytes(data, dds_encoding))
         dds_format = _dds_format_label(str(status.get("dataType") or self.data_type), dds_encoding)
-        if frame_encoding in {"jpeg", "jpg"}:
-            with self._stream_condition:
-                self._stream_frame = (seq, bytes(data))
-                self._stream_condition.notify_all()
         _write_bytes(self.frame_path, data)
         with self._lock:
             self._latest_frame_status = {
@@ -401,7 +319,6 @@ class DdsTap:
                 "previewHeight": preview_height,
                 "frameSeq": seq,
                 "framePath": str(self.frame_path),
-                "streamUrl": self.stream_url,
             }
         now = time.time()
         now_counter = time.perf_counter()
@@ -420,7 +337,6 @@ class DdsTap:
             "previewHeight": preview_height,
             "frameSeq": seq,
             "framePath": str(self.frame_path),
-            "streamUrl": self.stream_url,
             "time": now,
             "running": True,
             "subscribed": True,
@@ -615,7 +531,6 @@ def main() -> int:
     config_path = Path(args.config)
     config = json.loads(config_path.read_text(encoding="utf-8"))
     tap = DdsTap(config)
-    tap.start_stream_server()
     _write_json(tap.status_path, {"running": True, "mode": tap.mode, "topic": tap.topic, "dataType": tap.data_type, "hz": 0.0, "count": 0})
 
     import rclpy
@@ -664,7 +579,6 @@ def main() -> int:
             time.sleep(0.001)
     finally:
         tap.stop_frame_writer()
-        tap.stop_stream_server()
         status_thread.join(timeout=1.0)
         if executor is not None:
             try:

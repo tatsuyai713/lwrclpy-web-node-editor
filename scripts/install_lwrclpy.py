@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import platform
+import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 
 
-LATEST_TAG_RELEASE_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases/tags/latest"
+LATEST_TAG_RELEASE_URL = "https://github.com/tatsuyai713/lwrclpy/releases/expanded_assets/latest"
+GITHUB_BASE_URL = "https://github.com"
 
 
 def main() -> int:
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     system = platform.system().lower()
     machine = platform.machine().lower()
-    release = fetch_latest_tag_release()
-    assets = release.get("assets", [])
+    assets = fetch_latest_tag_assets()
     candidates = []
     for asset in assets:
         name = asset["name"]
@@ -34,8 +35,8 @@ def main() -> int:
         print(f"No lwrclpy wheel found for Python {py_tag} on {platform.platform()}", file=sys.stderr)
         return 1
     asset = prefer_platform(candidates)
-    print(f"Installing {asset['name']} from {release.get('tag_name', 'latest')}")
-    install_target(asset["browser_download_url"])
+    print(f"Installing {asset['name']} from latest")
+    install_target(asset["url"])
     return 0
 
 
@@ -48,10 +49,30 @@ def install_target(target: str) -> None:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", target])
 
 
-def fetch_latest_tag_release() -> dict:
-    with urllib.request.urlopen(LATEST_TAG_RELEASE_URL, timeout=20) as response:
-        release = json.load(response)
-    return release if release.get("assets") else {"tag_name": "latest", "assets": []}
+def fetch_latest_tag_assets() -> list[dict[str, str]]:
+    request = urllib.request.Request(
+        LATEST_TAG_RELEASE_URL,
+        headers={
+            "User-Agent": "lwrclpy-web-node-editor-installer",
+            "Accept": "text/html",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        html = response.read().decode("utf-8", errors="replace")
+    assets: dict[str, dict[str, str]] = {}
+    for href in re.findall(r'href="([^"]+\.whl(?:\?[^"]*)?)"', html):
+        decoded = urllib.parse.unquote(href.replace("&amp;", "&"))
+        path = decoded.split("?", 1)[0]
+        if "/tatsuyai713/lwrclpy/releases/download/latest/" not in path:
+            continue
+        url = urllib.parse.urljoin(GITHUB_BASE_URL, decoded)
+        name = _path_like_name(path)
+        assets[name] = {"name": name, "url": url}
+    return sorted(assets.values(), key=lambda asset: asset["name"])
+
+
+def _path_like_name(path: str) -> str:
+    return path.rstrip("/").rsplit("/", 1)[-1]
 
 
 def prefer_platform(assets: list[dict]) -> dict:
