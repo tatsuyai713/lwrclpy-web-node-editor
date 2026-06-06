@@ -9,15 +9,14 @@ import sys
 import urllib.request
 
 
-LATEST_RELEASE_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases/latest"
-RELEASES_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
+LATEST_TAG_RELEASE_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases/tags/latest"
 
 
 def main() -> int:
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     system = platform.system().lower()
     machine = platform.machine().lower()
-    release = fetch_latest_release()
+    release = fetch_latest_tag_release()
     assets = release.get("assets", [])
     candidates = []
     for asset in assets:
@@ -49,20 +48,10 @@ def install_target(target: str) -> None:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", target])
 
 
-def fetch_latest_release() -> dict:
-    try:
-        with urllib.request.urlopen(LATEST_RELEASE_URL, timeout=20) as response:
-            release = json.load(response)
-        if release.get("assets"):
-            return release
-    except Exception:
-        pass
-    with urllib.request.urlopen(RELEASES_URL, timeout=20) as response:
-        releases = json.load(response)
-    for release in releases:
-        if not release.get("draft") and not release.get("prerelease") and release.get("assets"):
-            return release
-    return {"tag_name": "latest", "assets": []}
+def fetch_latest_tag_release() -> dict:
+    with urllib.request.urlopen(LATEST_TAG_RELEASE_URL, timeout=20) as response:
+        release = json.load(response)
+    return release if release.get("assets") else {"tag_name": "latest", "assets": []}
 
 
 def prefer_platform(assets: list[dict]) -> dict:
