@@ -14,7 +14,7 @@ This directory contains loadable `lwrclpy Web Node Editor` project JSON files.
 3. Click `Load` and select one of the JSON files under the genre folders in this directory.
 4. Click `Run` or `Run For`.
 
-Image samples contain an embedded image. Video samples contain an embedded base frame that the browser animates during `Run`. Custom-node samples create one worker process and one `.node_envs/<node-id>` virtual environment per custom node.
+Image samples contain an embedded image. Video samples contain an embedded base frame that is animated during `Run` and published at each Video File Input node's `Publish Hz`. Custom-node samples create one worker process and one `.node_envs/<node-id>` virtual environment per custom node.
 
 ## Quick Start
 

@@ -322,6 +322,11 @@ body.panning, body.panning * {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
 }
+.tool-value-display {
+  color: var(--text);
+  font-size: 12px;
+  padding: 0 4px;
+}
 .tool-field select,
 .tool-field input {
   min-width: 0;
@@ -350,14 +355,15 @@ body.panning, body.panning * {
   grid-template-rows: minmax(0, 1fr) 28px;
   height: 100%;
 }
-.image-view img {
+.image-view canvas {
   display: block;
   width: 100%;
+  height: auto;
   max-height: 220px;
   object-fit: contain;
   background: #050607;
 }
-.node-view-video .image-view img {
+.node-view-video .image-view canvas {
   height: 100%;
   max-height: none;
 }

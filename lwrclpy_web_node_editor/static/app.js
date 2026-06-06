@@ -8,17 +8,30 @@ const state = {
   editingCode: null,
   nextId: 1,
   autoTimer: null,
+  videoTimer: null,
   runStopTimer: null,
   view: { x: 0, y: 0, scale: 1 },
   dragLink: null,
   lastRunAt: 0,
   runInFlight: false,
   runStatusInFlight: false,
+  runPayloadUpdateInFlight: false,
+  videoPayloadDirty: false,
+  videoDirtyNodes: new Set(),
   tickCount: 0,
   runState: 'idle',
   nodeViews: {},
   videoInputs: {},
   embeddedVideoInputs: {},
+  undoStack: [],
+  redoStack: [],
+  historySnapshot: '',
+  suppressHistory: false,
+  projectFileHandle: null,
+  projectFileName: 'lwrclpy_web_node_project.json',
+  ready: false,
+  readyInFlight: false,
+  readySignature: '',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -93,7 +106,7 @@ const INTERFACE_NODE_TEMPLATES = [
       name: 'video_file_input',
       inputs: [],
       outputs: [{ id: 'out1', name: 'frame', dataType: 'sensor_msgs/msg/Image' }],
-      params: { loop: false },
+      params: { loop: false, publishHz: 30, overrideHz: false, detectedFps: 0 },
       loopCode: '',
     },
   },
@@ -161,6 +174,17 @@ const INTERFACE_NODE_TEMPLATES = [
       loopCode: '',
     },
   },
+  {
+    label: 'Topic Hz Monitor',
+    toolType: 'topic_hz_monitor',
+    node: {
+      name: 'topic_hz_monitor',
+      inputs: [{ id: 'in1', name: 'topic', dataType: '', receiveMode: 'manual', callbackCode: '' }],
+      outputs: [],
+      params: { windowSec: 5.0 },
+      loopCode: '',
+    },
+  },
 ];
 
 async function init() {
@@ -170,18 +194,20 @@ async function init() {
   bindCanvas();
   renderInterfaceNodeList();
   renderAll();
+  resetHistory();
   setExecutionStatus('idle', 'Ready');
-  runGraph();
+  refreshRuntimeHealth();
 }
 
 function bindToolbar() {
   $('create-node-side').onclick = () => openNodeDialog();
+  $('ready-model').onclick = readyRun;
   $('run-model').onclick = startRun;
   $('stop-model').onclick = stopRun;
   $('force-stop-model').onclick = forceStopRun;
   $('run-hz').oninput = refreshRunTimer;
   $('run-duration-model').onclick = runForDuration;
-  $('save-project').onclick = saveProject;
+  $('save-project').onclick = () => saveProject(false);
   $('load-project').onchange = loadProject;
   $('export-ros2-package').onclick = exportRos2Package;
   $('config-input-count').oninput = renderConfigPorts;
@@ -227,6 +253,27 @@ function bindCanvas() {
     state.view.y += (after.y - before.y) * state.view.scale;
     applyView();
   }, { passive: false });
+  ws.addEventListener('dragover', (ev) => {
+    if (ev.dataTransfer.types.includes('application/x-node-template')) {
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'copy';
+    }
+  });
+  ws.addEventListener('drop', (ev) => {
+    const indexStr = ev.dataTransfer.getData('application/x-node-template');
+    if (!indexStr) return;
+    ev.preventDefault();
+    const template = INTERFACE_NODE_TEMPLATES[parseInt(indexStr, 10)];
+    if (!template) return;
+    const pos = screenToWorld(ev.clientX, ev.clientY);
+    const node = createInterfaceNode(template, pos);
+    state.nodes.push(node);
+    state.selectedNode = node.id;
+    state.selectedLink = null;
+    commitHistory();
+    renderAll();
+    scheduleRun();
+  });
 }
 
 function createDefaultNode(pos = centerWorld()) {
@@ -260,10 +307,15 @@ function createInterfaceNode(template, pos = centerWorld()) {
 function renderInterfaceNodeList() {
   const list = $('interface-node-list');
   list.innerHTML = '';
-  INTERFACE_NODE_TEMPLATES.forEach((template) => {
+  INTERFACE_NODE_TEMPLATES.forEach((template, index) => {
     const button = document.createElement('button');
     button.className = 'interface-node-item';
     button.textContent = template.label;
+    button.draggable = true;
+    button.addEventListener('dragstart', (ev) => {
+      ev.dataTransfer.setData('application/x-node-template', String(index));
+      ev.dataTransfer.effectAllowed = 'copy';
+    });
     button.onclick = () => {
       const node = createInterfaceNode(template);
       state.nodes.push(node);
@@ -664,7 +716,6 @@ function saveSignalDialog(ev) {
   $('signal-dialog').close();
   renderAll();
   refreshRunTimer();
-  scheduleRun();
 }
 
 function graphDefaults(params = {}) {
@@ -729,6 +780,7 @@ function saveGraphDialog(ev) {
 }
 
 function renderAll() {
+  commitHistory();
   renderNodeList();
   renderNodes();
   renderLinks();
@@ -831,6 +883,9 @@ function renderNodes() {
     makeNodeDraggable(el, node);
     renderPorts(el.querySelector('.inputs'), node, node.inputs, 'input');
     renderPorts(el.querySelector('.outputs'), node, node.outputs, 'output');
+    // Restore canvas views immediately after node element is added to DOM
+    const viewEl = el.querySelector('[data-node-view]');
+    if (viewEl) patchNodeViewEl(viewEl, state.nodeViews[node.id]);
   });
 }
 
@@ -851,6 +906,21 @@ function inspectorHint(node) {
   return 'Built-in processing/view node.';
 }
 
+function effectiveVideoHz(node) {
+  const p = node.params || {};
+  if (p.overrideHz) return Math.max(0.01, Number(p.publishHz || p.detectedFps || 30));
+  return Math.max(0.01, Number(p.detectedFps || p.nativeFps || p.sourceFps || p.publishHz || 30));
+}
+
+function videoPlaybackRate(node) {
+  const p = node.params || {};
+  if (!p.overrideHz) return 1.0;
+  const detectedFps = Math.max(0.01, Number(p.detectedFps || 30));
+  const overrideHz = Math.max(0.01, Number(p.publishHz || 30));
+  // Clamp to browser-supported range (0.1 – 16)
+  return Math.min(16, Math.max(0.1, overrideHz / detectedFps));
+}
+
 function timerActionButtons(node) {
   const timers = normalizeTimers(node);
   return timers.map((timer) => `<button data-timer-input="${escapeAttr(timer.id)}">Timer: ${escapeHtml(timer.name)}</button>`).join('');
@@ -868,8 +938,17 @@ function toolActionHtml(node) {
   }
   if (node.toolType === 'video_file_input') {
     const loopChecked = node.params?.loop ? 'checked' : '';
+    const overrideHz = Boolean(node.params?.overrideHz);
+    const hz = Math.max(0.01, Number(node.params?.publishHz || 30));
+    const detectedFps = Number(node.params?.detectedFps || 0);
+    const fpsLabel = detectedFps > 0 ? detectedFps.toFixed(2) + ' fps' : 'auto (30 fps)';
+    const hzField = overrideHz
+      ? `<label class="tool-field"><span>Hz</span><input data-tool-video-hz type="number" min="0.01" step="0.1" value="${escapeAttr(hz)}"></label>`
+      : `<label class="tool-field"><span>FPS</span><span class="tool-value-display">${escapeHtml(fpsLabel)}</span></label>`;
     return `<div class="node-actions tool-actions">
       <label class="file-button">Load Video<input data-tool-file="video" type="file" accept="video/*"></label>
+      ${hzField}
+      <label class="tool-check"><input data-tool-video-hz-override type="checkbox" ${overrideHz ? 'checked' : ''}> Override Hz</label>
       <label class="tool-check"><input data-tool-video-loop type="checkbox" ${loopChecked}> Loop</label>
     </div>`;
   }
@@ -912,7 +991,7 @@ function graphSummary(p) {
 }
 
 function viewNodeHtml(node) {
-  if (!['image_file_input', 'video_file_input', 'function_generator', 'image_view', 'image_file_save', 'graph_view'].includes(node.toolType)) return '';
+  if (!['image_file_input', 'video_file_input', 'function_generator', 'image_view', 'image_file_save', 'graph_view', 'topic_hz_monitor'].includes(node.toolType)) return '';
   const viewClass = node.toolType === 'video_file_input' ? ' node-view-video' : '';
   return `<div class="node-view${viewClass}" data-node-view="${escapeAttr(node.id)}">${renderViewContent(state.nodeViews[node.id])}</div>`;
 }
@@ -938,6 +1017,25 @@ function bindToolActions(el, node) {
   }
   const videoInput = el.querySelector('[data-tool-file="video"]');
   if (videoInput) videoInput.onchange = (ev) => loadVideoFile(node, ev.target.files[0]);
+  const videoHzOverride = el.querySelector('[data-tool-video-hz-override]');
+  if (videoHzOverride) {
+    videoHzOverride.onchange = (ev) => {
+      node.params = { ...(node.params || {}), overrideHz: ev.target.checked };
+      const ctrl1 = state.videoInputs[node.id];
+      if (ctrl1) ctrl1.video.playbackRate = videoPlaybackRate(node);
+      renderAll();
+    };
+  }
+  const videoHz = el.querySelector('[data-tool-video-hz]');
+  if (videoHz) {
+    videoHz.onchange = (ev) => {
+      const value = Number(ev.target.value);
+      node.params = { ...(node.params || {}), publishHz: Math.max(0.01, Number.isFinite(value) && value > 0 ? value : 30) };
+      const ctrl2 = state.videoInputs[node.id];
+      if (ctrl2) ctrl2.video.playbackRate = videoPlaybackRate(node);
+      renderAll();
+    };
+  }
   const videoLoop = el.querySelector('[data-tool-video-loop]');
   if (videoLoop) {
     videoLoop.onchange = (ev) => {
@@ -946,6 +1044,11 @@ function bindToolActions(el, node) {
       if (controller) {
         controller.loop = ev.target.checked;
         controller.video.loop = false;
+      }
+      if (node.params?.serverDecode && node.params?.videoPath) {
+        state.videoPayloadDirty = true;
+        state.videoDirtyNodes.add(node.id);
+        pushRunPayloadUpdate();
       }
       renderAll();
     };
@@ -1119,6 +1222,7 @@ function makeNodeDraggable(el, node) {
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      commitHistory();
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
@@ -1333,16 +1437,31 @@ async function runGraph() {
 function graphRunPayload() {
   normalizeSourceTopicNames();
   return {
-    nodes: state.nodes,
+    nodes: state.nodes.map(nodeForRunPayload),
     links: state.links.map(({ fromNode, fromPort, toNode, toPort, name }) => ({ fromNode, fromPort, toNode, toPort, name })),
   };
 }
 
+function nodeForRunPayload(node) {
+  if (node.toolType !== 'video_file_input' || node.params?.embeddedVideo) return node;
+  const params = { ...(node.params || {}) };
+  delete params.dataUrl;
+  if (params.serverDecode && params.videoPath) {
+    delete params.frameMessage;
+  }
+  return { ...node, params };
+}
+
 async function startServerRun(durationSec = null) {
   if (state.runInFlight) return;
+  if (!state.ready) {
+    setExecutionStatus('error', 'Ready is required before Run');
+    return;
+  }
   state.runInFlight = true;
   state.tickCount = 0;
   state.lastRunAt = performance.now();
+  prepareVideoInputsForRun();
   startVideoInputs();
   startEmbeddedVideoInputs();
   const payload = { ...graphRunPayload(), runHz: runLoopHz() };
@@ -1353,6 +1472,11 @@ async function startServerRun(durationSec = null) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
     }).then((res) => res.json());
+    if (data.error) {
+      setExecutionStatus('error', data.error);
+      updateRunStatus(data);
+      return;
+    }
     $('run-model').classList.add('active');
     setExecutionStatus('running', durationSec === null
       ? `Continuous run started on server at ${runLoopHz().toFixed(1)} Hz`
@@ -1366,10 +1490,45 @@ async function startServerRun(durationSec = null) {
   }
 }
 
+async function readyRun() {
+  if (state.readyInFlight || state.autoTimer) return;
+  state.readyInFlight = true;
+  state.ready = false;
+  state.readySignature = '';
+  $('ready-model').classList.add('active');
+  setExecutionStatus('running', 'Preparing node environments');
+  try {
+    const payload = graphRunPayload();
+    const data = await fetch('/api/ready', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then((res) => res.json());
+    updateStatus(data);
+    updateNodeViews(data.nodes || {});
+    if (data.ready) {
+      state.ready = true;
+      state.readySignature = data.signature || '';
+      setExecutionStatus('idle', 'Ready complete');
+    } else {
+      state.ready = false;
+      setExecutionStatus('error', data?.lwrclpy?.error || data?.error || 'Ready failed');
+    }
+  } catch (err) {
+    state.ready = false;
+    setExecutionStatus('error', `Ready API error: ${err.message}`);
+  } finally {
+    state.readyInFlight = false;
+    $('ready-model').classList.toggle('active', state.ready);
+  }
+}
+
 function startRunStatusPolling() {
   if (state.autoTimer) clearInterval(state.autoTimer);
+  if (state.videoTimer) clearInterval(state.videoTimer);
   pollRunStatus();
-  state.autoTimer = setInterval(pollRunStatus, 50);
+  state.autoTimer = setInterval(pollRunStatus, 33);
+  state.videoTimer = setInterval(updateVideoFramePayloads, 33);
 }
 
 async function pollRunStatus() {
@@ -1383,6 +1542,64 @@ async function pollRunStatus() {
   } finally {
     state.runStatusInFlight = false;
   }
+}
+
+function updateVideoPreviewFrames() {
+  updateVideoInputsForRun({ markDirty: false });
+  updateEmbeddedVideoInputsForRun();
+}
+
+function updateVideoFramePayloads() {
+  updateVideoInputsForRun({ markDirty: true });
+  pushRunPayloadUpdate();
+}
+
+async function pushRunPayloadUpdate() {
+  if ((!state.videoPayloadDirty && !state.videoDirtyNodes.size) || state.runPayloadUpdateInFlight) return;
+  const updates = Array.from(state.videoDirtyNodes)
+    .map((nodeId) => nodeFor(nodeId))
+    .filter((node) => node?.toolType === 'video_file_input' && (
+      (node.params?.serverDecode && node.params?.videoPath) || node.params?.frameMessage
+    ))
+    .map((node) => ({ nodeId: node.id, params: videoRuntimeParams(node) }));
+  state.videoDirtyNodes.clear();
+  state.videoPayloadDirty = false;
+  if (!updates.length) return;
+  state.runPayloadUpdateInFlight = true;
+  try {
+    await fetch('/api/update-node-params', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ updates }),
+    });
+  } finally {
+    state.runPayloadUpdateInFlight = false;
+  }
+}
+
+function videoRuntimeParams(node) {
+  const p = node.params || {};
+  if (p.serverDecode && p.videoPath) {
+    return {
+      fileName: p.fileName || '',
+      videoPath: p.videoPath,
+      serverDecode: true,
+      useSourceFps: !p.overrideHz,
+      loop: Boolean(p.loop),
+      publishHz: effectiveVideoHz(node),
+      maxSide: Number(p.maxSide || 640),
+    };
+  }
+  return {
+    fileName: p.fileName || '',
+    frameMessage: p.frameMessage,
+    loop: Boolean(p.loop),
+    publishHz: effectiveVideoHz(node),
+    duration: Number(p.duration || 0),
+    currentTime: Number(p.currentTime || 0),
+    ended: Boolean(p.ended),
+    embeddedVideo: false,
+  };
 }
 
 function updateRunStatus(data) {
@@ -1401,6 +1618,10 @@ function updateRunStatus(data) {
   } else if (state.autoTimer) {
     clearInterval(state.autoTimer);
     state.autoTimer = null;
+    if (state.videoTimer) {
+      clearInterval(state.videoTimer);
+      state.videoTimer = null;
+    }
     pauseVideoInputs();
     $('run-model').classList.remove('active');
     setExecutionStatus('stopped', `Server run stopped after ${state.tickCount} ticks`);
@@ -1431,6 +1652,19 @@ function updateStatus(data) {
   $('runtime-status').textContent = text;
   $('runtime-detail').textContent = text;
   $('node-count').textContent = `${state.nodes.length} nodes / ${state.links.length} links`;
+}
+
+async function refreshRuntimeHealth() {
+  try {
+    const data = await fetch('/api/health').then((res) => res.json());
+    const runtime = data.lwrclpy || {};
+    const text = runtime.available ? 'lwrclpy available' : `lwrclpy unavailable${runtime.error ? ': ' + runtime.error : ''}`;
+    $('runtime-status').textContent = text;
+    $('runtime-detail').textContent = text;
+  } catch (err) {
+    $('runtime-status').textContent = `API error: ${err.message}`;
+    $('runtime-detail').textContent = `API error: ${err.message}`;
+  }
 }
 
 function updateExecutionStatus(data, elapsedMs) {
@@ -1470,26 +1704,250 @@ function setExecutionStatus(kind, detail) {
 
 function updateNodeViews(nodes) {
   Object.entries(nodes).forEach(([nodeId, payload]) => {
-    if (payload?.view) state.nodeViews[nodeId] = normalizedNodeView(nodeId, payload.view);
+    if (payload?.view) {
+      const newView = normalizedNodeView(nodeId, payload.view);
+      const existing = state.nodeViews[nodeId];
+      // Don't replace a valid image view with an empty one (avoids flicker when frames are sparse)
+      const existingHasImage = existing?.kind === 'image' && (existing?.dataUrl || existing?.raw?.data || existing?.frameRef);
+      const newHasImage = newView?.kind === 'image' && (newView?.dataUrl || newView?.raw?.data || newView?.frameRef);
+      if (existingHasImage && newView?.kind === 'image' && !newHasImage) {
+        state.nodeViews[nodeId] = { ...existing, status: newView.status || existing.status };
+      } else {
+        state.nodeViews[nodeId] = newView;
+      }
+    }
   });
   document.querySelectorAll('[data-node-view]').forEach((el) => {
-    el.innerHTML = renderViewContent(state.nodeViews[el.dataset.nodeView]);
+    patchNodeViewEl(el, state.nodeViews[el.dataset.nodeView]);
   });
+}
+
+// Draw a dataUrl onto a canvas element without clearing during decode (no blank-frame flicker).
+function drawToCanvas(canvas, dataUrl) {
+  if (!dataUrl || canvas.dataset.pendingSrc === dataUrl) return;
+  canvas.dataset.pendingSrc = dataUrl;
+  const img = new Image();
+  img.onload = () => {
+    if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+    }
+    canvas.getContext('2d').drawImage(img, 0, 0);
+  };
+  img.src = dataUrl;
+}
+
+function drawRawImageToCanvas(canvas, raw) {
+  if (!raw?.data || !raw.width || !raw.height) return;
+  const signature = `${raw.width}x${raw.height}:${raw.encoding}:${raw.data.length}:${raw.data.slice(-24)}`;
+  if (canvas.dataset.rawSignature === signature) return;
+  const width = Math.max(1, Number(raw.width));
+  const height = Math.max(1, Number(raw.height));
+  const bytes = base64ToBytes(raw.data);
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  const encoding = String(raw.encoding || 'rgb8').toLowerCase();
+  const pixelCount = width * height;
+  if (encoding === 'mono8' || encoding === '8uc1') {
+    for (let i = 0; i < pixelCount; i += 1) {
+      const v = bytes[i] || 0;
+      const dst = i * 4;
+      rgba[dst] = v;
+      rgba[dst + 1] = v;
+      rgba[dst + 2] = v;
+      rgba[dst + 3] = 255;
+    }
+  } else {
+    const bgr = encoding === 'bgr8';
+    for (let i = 0; i < pixelCount; i += 1) {
+      const src = i * 3;
+      const dst = i * 4;
+      rgba[dst] = bytes[src + (bgr ? 2 : 0)] || 0;
+      rgba[dst + 1] = bytes[src + 1] || 0;
+      rgba[dst + 2] = bytes[src + (bgr ? 0 : 2)] || 0;
+      rgba[dst + 3] = 255;
+    }
+  }
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  canvas.getContext('2d').putImageData(new ImageData(rgba, width, height), 0, 0);
+  canvas.dataset.rawSignature = signature;
+}
+
+const frameFetchControllers = new WeakMap();
+
+function latestFrameSignature(canvas) {
+  return canvas.dataset.desiredFrame || '';
+}
+
+function scheduleFrameRefDraw(canvas, frameRef) {
+  if (!canvas || !frameRef) return;
+  const signature = `${frameRef.nodeId}:${frameRef.seq}`;
+  canvas.dataset.desiredFrame = signature;
+  canvas._nextFrameRef = frameRef;
+  if (canvas._frameDrawScheduled) return;
+  canvas._frameDrawScheduled = true;
+  requestAnimationFrame(() => {
+    canvas._frameDrawScheduled = false;
+    pumpFrameRefDraw(canvas);
+  });
+}
+
+function pumpFrameRefDraw(canvas) {
+  if (!canvas || canvas._frameDrawInProgress) return;
+  const next = canvas._nextFrameRef;
+  canvas._nextFrameRef = null;
+  if (!next) return;
+  const signature = `${next.nodeId}:${next.seq}`;
+  if (canvas.dataset.rawSignature === signature) return;
+  canvas._frameDrawInProgress = true;
+  drawFrameRefToCanvas(canvas, next).finally(() => {
+    canvas._frameDrawInProgress = false;
+    const queued = canvas._nextFrameRef;
+    if (!queued) return;
+    const queuedSignature = `${queued.nodeId}:${queued.seq}`;
+    if (canvas.dataset.rawSignature === queuedSignature) {
+      canvas._nextFrameRef = null;
+      return;
+    }
+    requestAnimationFrame(() => pumpFrameRefDraw(canvas));
+  });
+}
+
+async function imageBlobToBitmap(blob) {
+  if (typeof createImageBitmap === 'function') {
+    return createImageBitmap(blob);
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = url;
+    });
+    return img;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function drawBitmapLike(canvas, bitmap) {
+  const width = bitmap.naturalWidth || bitmap.width;
+  const height = bitmap.naturalHeight || bitmap.height;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  canvas.getContext('2d').drawImage(bitmap, 0, 0);
+  if (typeof bitmap.close === 'function') bitmap.close();
+}
+
+async function drawFrameRefToCanvas(canvas, frameRef) {
+  if (!frameRef?.nodeId || !frameRef.seq) return;
+  const signature = `${frameRef.nodeId}:${frameRef.seq}`;
+  canvas.dataset.desiredFrame = signature;
+  if (canvas.dataset.rawSignature === signature) return;
+  if (canvas.dataset.pendingFrame === signature) return;
+  const controller = new AbortController();
+  frameFetchControllers.set(canvas, controller);
+  canvas.dataset.pendingFrame = signature;
+  try {
+    const response = await fetch(`/api/node-frame?nodeId=${encodeURIComponent(frameRef.nodeId)}&seq=${encodeURIComponent(frameRef.seq)}`, { signal: controller.signal });
+    if (!response.ok) return;
+    if (['jpeg', 'jpg', 'bmp', 'png', 'webp'].includes(String(frameRef.encoding || '').toLowerCase())) {
+      const blob = await response.blob();
+      if (latestFrameSignature(canvas) !== signature) return;
+      const bitmap = await imageBlobToBitmap(blob);
+      if (latestFrameSignature(canvas) !== signature) {
+        if (typeof bitmap.close === 'function') bitmap.close();
+        return;
+      }
+      drawBitmapLike(canvas, bitmap);
+      canvas.dataset.rawSignature = signature;
+      return;
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (latestFrameSignature(canvas) !== signature) return;
+    const width = Math.max(1, Number(frameRef.width));
+    const height = Math.max(1, Number(frameRef.height));
+    if (!Number(frameRef.width) || !Number(frameRef.height)) return;
+    const required = width * height * 4;
+    if (!canvas._rgbaBuffer || canvas._rgbaBuffer.length !== required) {
+      canvas._rgbaBuffer = new Uint8ClampedArray(required);
+      canvas._imageData = new ImageData(canvas._rgbaBuffer, width, height);
+    }
+    const rgba = canvas._rgbaBuffer;
+    const pixelCount = width * height;
+    for (let i = 0; i < pixelCount; i += 1) {
+      const src = i * 3;
+      const dst = i * 4;
+      rgba[dst] = bytes[src] || 0;
+      rgba[dst + 1] = bytes[src + 1] || 0;
+      rgba[dst + 2] = bytes[src + 2] || 0;
+      rgba[dst + 3] = 255;
+    }
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    canvas.getContext('2d').putImageData(canvas._imageData, 0, 0);
+    canvas.dataset.rawSignature = signature;
+  } catch (err) {
+    if (err?.name !== 'AbortError') console.warn('Frame draw failed', err);
+  } finally {
+    if (canvas.dataset.pendingFrame === signature) delete canvas.dataset.pendingFrame;
+    if (frameFetchControllers.get(canvas) === controller) frameFetchControllers.delete(canvas);
+  }
+}
+
+// Update a node-view element in-place using canvas to avoid blank-frame flicker.
+function patchNodeViewEl(el, view) {
+  if (view?.kind === 'image' && (view.dataUrl || view.raw || view.frameRef)) {
+    const existingFig = el.querySelector('figure.image-view');
+    if (existingFig) {
+      const canvas = existingFig.querySelector('canvas.image-canvas');
+      const cap = existingFig.querySelector('figcaption');
+      if (canvas && cap) {
+        const newCap = view.status || '';
+        if (cap.textContent !== newCap) cap.textContent = newCap;
+        if (view.frameRef) scheduleFrameRefDraw(canvas, view.frameRef);
+        else if (view.raw) drawRawImageToCanvas(canvas, view.raw);
+        else drawToCanvas(canvas, view.dataUrl);
+        return;
+      }
+    }
+  }
+  const newHtml = renderViewContent(view);
+  if (el.innerHTML !== newHtml) {
+    el.innerHTML = newHtml;
+    if (view?.kind === 'image' && (view.dataUrl || view.raw || view.frameRef)) {
+      const canvas = el.querySelector('canvas.image-canvas');
+      if (canvas && view.frameRef) scheduleFrameRefDraw(canvas, view.frameRef);
+      else if (canvas && view.raw) drawRawImageToCanvas(canvas, view.raw);
+      else if (canvas) drawToCanvas(canvas, view.dataUrl);
+    }
+  }
 }
 
 function normalizedNodeView(nodeId, view) {
   const node = nodeFor(nodeId);
   const controller = state.videoInputs[nodeId];
-  if (node?.toolType === 'video_file_input' && controller && view?.kind === 'image') {
-    return { ...view, status: videoStatus(controller) };
+  if (node?.toolType === 'video_file_input' && controller) {
+    // Video files live in the browser. Keep the local canvas frame authoritative;
+    // server-side status may contain a stale/raw frame and must not overwrite it.
+    const localView = state.nodeViews[nodeId];
+    if (localView?.dataUrl || localView?.raw) return { ...localView, status: videoStatus(controller) };
+    return { kind: 'image', dataUrl: view?.dataUrl || '', status: videoStatus(controller) };
   }
   return view;
 }
 
 function renderViewContent(view) {
   if (!view) return '<div class="view-empty">No data</div>';
-  if (view.kind === 'image' && view.dataUrl) {
-    return `<figure class="image-view"><img src="${escapeAttr(view.dataUrl)}" alt=""><figcaption>${escapeHtml(view.status || '')}</figcaption></figure>`;
+  if (view.kind === 'image' && (view.dataUrl || view.raw || view.frameRef)) {
+    return `<figure class="image-view"><canvas class="image-canvas"></canvas><figcaption>${escapeHtml(view.status || '')}</figcaption></figure>`;
   }
   if (view.kind === 'plot') {
     return renderPlot(view.series || [], view.status || '', view);
@@ -1564,9 +2022,15 @@ function loadImageFile(node, file) {
   img.src = URL.createObjectURL(file);
 }
 
-function loadVideoFile(node, file) {
+async function loadVideoFile(node, file) {
   if (!file) return;
   stopVideoInput(node.id);
+  let uploaded = null;
+  try {
+    uploaded = await uploadVideoFile(file);
+  } catch (err) {
+    setExecutionStatus('error', `Video upload failed: ${err.message}`);
+  }
   const video = document.createElement('video');
   video.muted = true;
   video.loop = false;
@@ -1584,47 +2048,153 @@ function loadVideoFile(node, file) {
   video.onloadeddata = () => {
     video.pause();
     captureVideoFrame(node, controller, { updateGraph: false });
+    if (uploaded?.path) {
+      node.params = {
+        ...(node.params || {}),
+        fileName: uploaded.fileName || file.name,
+        videoPath: uploaded.path,
+        serverDecode: true,
+        useSourceFps: !node.params?.overrideHz,
+        publishHz: effectiveVideoHz(node),
+        maxSide: Number(node.params?.maxSide || 640),
+      };
+    }
     renderAll();
+    // Detect native FPS by observing frame timestamps
+    _detectVideoNativeFps(video, (fps) => {
+      video.pause();
+      video.currentTime = 0;
+      if (fps && Number.isFinite(fps) && fps > 0) {
+        const detectedFps = Math.round(fps * 100) / 100;
+        node.params = {
+          ...(node.params || {}),
+          detectedFps,
+          publishHz: node.params?.overrideHz ? Number(node.params?.publishHz || detectedFps) : detectedFps,
+        };
+        if (node.params.serverDecode && node.params.videoPath) {
+          state.videoPayloadDirty = true;
+          state.videoDirtyNodes.add(node.id);
+          pushRunPayloadUpdate();
+        }
+        if (!node.params.overrideHz) renderAll();
+      }
+    });
   };
   video.onended = () => handleVideoEnded(controller);
   video.src = controller.url;
 }
 
+async function uploadVideoFile(file) {
+  const response = await fetch('/api/upload-video', {
+    method: 'POST',
+    headers: {
+      'content-type': file.type || 'application/octet-stream',
+      'x-file-name': encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+  return { ...data, fileName: decodeURIComponent(data.fileName || file.name) };
+}
+
+function _detectVideoNativeFps(video, callback) {
+  if (typeof video.requestVideoFrameCallback !== 'function') {
+    callback(null);
+    return;
+  }
+  const times = [];
+  let done = false;
+  function finish() {
+    if (done) return;
+    done = true;
+    const span = times.length > 1 ? times[times.length - 1] - times[0] : 0;
+    callback(span > 0 ? (times.length - 1) / span : null);
+  }
+  function tick(_now, meta) {
+    if (done) return;
+    times.push(meta.mediaTime);
+    const elapsed = times[times.length - 1] - times[0];
+    if (times.length >= 7 || elapsed >= 0.5) {
+      finish();
+      return;
+    }
+    video.requestVideoFrameCallback(tick);
+  }
+  video.requestVideoFrameCallback(tick);
+  video.addEventListener('ended', finish, { once: true });
+  video.play().catch(() => callback(null));
+}
+
 function captureVideoFrame(node, controller, options = {}) {
   const video = controller.video;
   if (!video.videoWidth || !video.videoHeight || video.readyState < 2 || video.seeking) return;
-  const frame = imageElementToMessage(video, 360);
+  const frame = imageElementToMessage(video, 360, { includeDataUrl: options.includeDataUrl !== false });
   node.params = {
     ...(node.params || {}),
     fileName: controller.fileName,
     dataUrl: frame.dataUrl,
     frameMessage: frame.message,
     loop: controller.loop,
+    publishHz: effectiveVideoHz(node),
     duration: Number.isFinite(video.duration) ? video.duration : 0,
     currentTime: video.currentTime || 0,
     ended: controller.ended,
   };
-  state.nodeViews[node.id] = { kind: 'image', dataUrl: frame.dataUrl, status: videoStatus(controller) };
+  state.nodeViews[node.id] = frame.dataUrl
+    ? { kind: 'image', dataUrl: frame.dataUrl, status: videoStatus(controller) }
+    : { kind: 'image', raw: frame.message, status: videoStatus(controller) };
   updateNodeViews({ [node.id]: { view: state.nodeViews[node.id] } });
+  if (options.markDirty !== false) {
+    state.videoPayloadDirty = true;
+    state.videoDirtyNodes.add(node.id);
+  }
   if (options.renderAll) renderAll();
-  if (options.updateGraph) scheduleRun();
+  if (options.updateGraph) scheduleRun({ invalidateReady: false });
 }
 
 function videoStatus(controller) {
   const video = controller.video;
+  const node = nodeFor(controller.nodeId);
+  const fps = node ? effectiveVideoHz(node) : 30;
   const duration = Number.isFinite(video.duration) && video.duration > 0 ? ` / ${video.duration.toFixed(1)}s` : '';
   const stateText = controller.ended ? 'ended' : video.paused ? 'paused' : 'playing';
-  return `${controller.fileName} ${stateText} ${video.currentTime.toFixed(1)}s${duration}`;
+  return `${controller.fileName} ${stateText} ${video.currentTime.toFixed(1)}s${duration} @ ${fps.toFixed(1)}fps`;
 }
 
-function updateVideoInputsForRun() {
+function updateVideoInputsForRun(options = {}) {
+  const markDirty = options.markDirty !== false;
+  const now = performance.now();
   Object.values(state.videoInputs).forEach((controller) => {
     if (controller.ended && !controller.loop) return;
     const node = nodeFor(controller.nodeId);
     if (!node) return;
-    captureVideoFrame(node, controller, { updateGraph: false });
+    // Sync playback rate with override setting
+    const targetRate = videoPlaybackRate(node);
+    if (Math.abs(controller.video.playbackRate - targetRate) > 0.001) {
+      controller.video.playbackRate = targetRate;
+    }
+    const hz = effectiveVideoHz(node);
+    const periodMs = 1000 / hz;
+    const dueAt = controller.nextCaptureAt || now;
+    if (now + 1 < dueAt) return;
+    controller.nextCaptureAt = nextPeriodicTimeMs(dueAt, periodMs, now);
+    captureVideoFrame(node, controller, {
+      updateGraph: false,
+      markDirty: markDirty && !node.params?.serverDecode,
+      includeDataUrl: false,
+    });
   });
-  updateEmbeddedVideoInputsForRun();
+}
+
+function prepareVideoInputsForRun() {
+  Object.values(state.videoInputs).forEach((controller) => {
+    const node = nodeFor(controller.nodeId);
+    if (!node) return;
+    if (controller.video.readyState >= 2) {
+      captureVideoFrame(node, controller, { updateGraph: false, markDirty: false });
+    }
+  });
 }
 
 function updateEmbeddedVideoInputsForRun() {
@@ -1675,6 +2245,7 @@ function updateEmbeddedVideoInputsForRun() {
       baseFrameMessage: controller.baseFrame,
       embeddedVideo: true,
       embeddedFps: fps,
+      publishHz: Math.max(0.01, Number(params.publishHz || fps)),
       duration,
       currentTime: elapsed,
       ended: controller.ended,
@@ -1688,11 +2259,14 @@ function updateEmbeddedVideoInputsForRun() {
 
 function startVideoInputs() {
   Object.values(state.videoInputs).forEach((controller) => {
-    if (controller.ended && controller.loop) {
+    // Always rewind to the beginning when starting a new run, regardless of loop setting
+    if (controller.ended) {
       controller.video.currentTime = 0;
       controller.ended = false;
     }
-    if (!controller.ended) controller.video.play().catch(() => {});
+    const node = nodeFor(controller.nodeId);
+    if (node) controller.video.playbackRate = videoPlaybackRate(node);
+    controller.video.play().catch(() => {});
   });
 }
 
@@ -1743,13 +2317,10 @@ function handleVideoEnded(controller) {
   }
   controller.ended = true;
   if (node) captureVideoFrame(node, controller, { updateGraph: false });
-  const anyPlaying = Object.values(state.videoInputs).some((item) => !item.ended && !item.video.paused);
-  if (state.autoTimer && !anyPlaying) {
-    stopRun(`Video playback completed after ${state.tickCount} ticks`);
-  }
+  // Do not stop the run when a video ends; other nodes may still be running.
 }
 
-function imageElementToMessage(source, maxSide = 640) {
+function imageElementToMessage(source, maxSide = 640, options = {}) {
   const naturalWidth = source.videoWidth || source.naturalWidth || source.width;
   const naturalHeight = source.videoHeight || source.naturalHeight || source.height;
   const scale = Math.min(1, maxSide / Math.max(naturalWidth, naturalHeight));
@@ -1767,7 +2338,7 @@ function imageElementToMessage(source, maxSide = 640) {
     rgb[dst++] = image.data[src + 1];
     rgb[dst++] = image.data[src + 2];
   }
-  const dataUrl = canvas.toDataURL('image/png');
+  const dataUrl = options.includeDataUrl === false ? '' : canvas.toDataURL('image/png');
   return {
     dataUrl,
     message: {
@@ -1854,15 +2425,19 @@ function syntheticVideoFrame(baseFrame, frameIndex) {
   };
 }
 
-function scheduleRun() {
-  if (state.autoTimer) return;
-  const now = performance.now();
-  if (now - state.lastRunAt > 80) {
-    runGraph();
-    return;
-  }
-  clearTimeout(state.runTimer);
-  state.runTimer = setTimeout(runGraph, 120);
+function scheduleRun(options = {}) {
+  if (options.invalidateReady !== false) invalidateReady();
+  // Editing the graph must not start execution. Continuous Run is server-driven
+  // and is started only by the explicit Run / Run For controls.
+  return;
+}
+
+function invalidateReady() {
+  if (!state.ready && !state.readySignature) return;
+  state.ready = false;
+  state.readySignature = '';
+  const readyButton = $('ready-model');
+  if (readyButton) readyButton.classList.remove('active');
 }
 
 function startRun() {
@@ -1871,6 +2446,7 @@ function startRun() {
 }
 
 function refreshRunTimer() {
+  if (!state.autoTimer) return;
   startServerRun();
 }
 
@@ -1887,6 +2463,10 @@ function stopRun(message = null) {
     clearInterval(state.autoTimer);
     state.autoTimer = null;
   }
+  if (state.videoTimer) {
+    clearInterval(state.videoTimer);
+    state.videoTimer = null;
+  }
   if (state.runStopTimer) {
     clearTimeout(state.runStopTimer);
     state.runStopTimer = null;
@@ -1901,6 +2481,10 @@ function forceStopRun() {
   if (state.autoTimer) {
     clearInterval(state.autoTimer);
     state.autoTimer = null;
+  }
+  if (state.videoTimer) {
+    clearInterval(state.videoTimer);
+    state.videoTimer = null;
   }
   if (state.runStopTimer) {
     clearTimeout(state.runStopTimer);
@@ -1922,13 +2506,14 @@ function runForDuration() {
 }
 
 function clearGraph() {
+  invalidateReady();
   stopAllVideoInputs();
   state.nodes = [];
   state.links = [];
   state.selectedNode = null;
   state.selectedLink = null;
   renderAll();
-  runGraph();
+  setExecutionStatus('idle', 'Graph cleared');
 }
 
 function selectNode(ev, id) {
@@ -1978,8 +2563,96 @@ function projectConfig() {
   };
 }
 
-function saveProject() {
-  downloadText('lwrclpy_web_node_project.json', JSON.stringify(projectConfig(), null, 2), 'application/json');
+function projectSnapshot() {
+  return JSON.stringify({
+    format: 'lwrclpy-web-node-editor-project',
+    version: 1,
+    nodes: state.nodes,
+    links: state.links,
+    view: state.view,
+    nextId: state.nextId,
+  });
+}
+
+function resetHistory() {
+  state.undoStack = [];
+  state.redoStack = [];
+  state.historySnapshot = projectSnapshot();
+}
+
+function commitHistory() {
+  if (state.suppressHistory) return;
+  const snapshot = projectSnapshot();
+  if (!state.historySnapshot) {
+    state.historySnapshot = snapshot;
+    return;
+  }
+  if (snapshot === state.historySnapshot) return;
+  state.undoStack.push(state.historySnapshot);
+  if (state.undoStack.length > 100) state.undoStack.shift();
+  state.redoStack = [];
+  state.historySnapshot = snapshot;
+}
+
+function restoreProjectSnapshot(snapshot) {
+  invalidateReady();
+  const payload = JSON.parse(snapshot);
+  stopAllVideoInputs();
+  state.suppressHistory = true;
+  state.nodes = (payload.nodes || []).map(normalizeImportedNode);
+  state.links = (payload.links || []).map((link) => ({ id: link.id || `l${Date.now()}${Math.random()}`, ...link })).filter(isValidLink);
+  state.view = payload.view || { x: 0, y: 0, scale: 1 };
+  state.nextId = payload.nextId || Math.max(1, ...state.nodes.map((node) => Number(String(node.id).replace('n', '')) + 1));
+  state.selectedNode = null;
+  state.selectedLink = null;
+  renderAll();
+  state.suppressHistory = false;
+}
+
+function undoProject() {
+  if (!state.undoStack.length) return;
+  const current = projectSnapshot();
+  const previous = state.undoStack.pop();
+  state.redoStack.push(current);
+  state.historySnapshot = previous;
+  restoreProjectSnapshot(previous);
+  setExecutionStatus('idle', 'Undo');
+}
+
+function redoProject() {
+  if (!state.redoStack.length) return;
+  const current = projectSnapshot();
+  const next = state.redoStack.pop();
+  state.undoStack.push(current);
+  state.historySnapshot = next;
+  restoreProjectSnapshot(next);
+  setExecutionStatus('idle', 'Redo');
+}
+
+async function saveProject(saveAs = false) {
+  const text = JSON.stringify(projectConfig(), null, 2);
+  if (window.showSaveFilePicker) {
+    try {
+      if (saveAs || !state.projectFileHandle) {
+        state.projectFileHandle = await window.showSaveFilePicker({
+          suggestedName: state.projectFileName || 'lwrclpy_web_node_project.json',
+          types: [{ description: 'lwrclpy Web Node Editor Project', accept: { 'application/json': ['.json'] } }],
+        });
+      }
+      const writable = await state.projectFileHandle.createWritable();
+      await writable.write(text);
+      await writable.close();
+      state.projectFileName = state.projectFileHandle.name || state.projectFileName;
+      setExecutionStatus('idle', `Saved ${state.projectFileName}`);
+      return;
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
+      setExecutionStatus('error', `Save failed: ${err.message}`);
+      return;
+    }
+  }
+  downloadText(state.projectFileName || 'lwrclpy_web_node_project.json', text, 'application/json');
+  setExecutionStatus('idle', `Downloaded ${state.projectFileName || 'project JSON'}`);
 }
 
 async function loadProject(event) {
@@ -1988,13 +2661,20 @@ async function loadProject(event) {
   if (!file) return;
   stopAllVideoInputs();
   const imported = JSON.parse(await file.text());
+  state.suppressHistory = true;
   state.nodes = (imported.nodes || []).map(normalizeImportedNode);
   state.links = (imported.links || []).map((link) => ({ id: link.id || `l${Date.now()}${Math.random()}`, ...link }));
   state.links = state.links.filter(isValidLink);
   normalizeSourceTopicNames();
   state.view = imported.view || { x: 0, y: 0, scale: 1 };
   state.nextId = imported.nextId || Math.max(1, ...state.nodes.map((node) => Number(String(node.id).replace('n', '')) + 1));
+  state.selectedNode = null;
+  state.selectedLink = null;
+  state.projectFileHandle = null;
+  state.projectFileName = file.name || 'lwrclpy_web_node_project.json';
   renderAll();
+  state.suppressHistory = false;
+  resetHistory();
   scheduleRun();
 }
 
@@ -2067,7 +2747,7 @@ function projectPythonConfig() {
 }
 
   function projectRos2PackageConfig() {
-    const baseName = safePackageName(projectConfig().name || 'lwrclpy_exported_nodes');
+    const baseName = safePackageName(projectConfig().name || 'rclpy_exported_nodes');
     const usedModules = new Set();
     const nodes = state.nodes.filter((node) => !node.toolType).map((node) => {
     const config = nodePythonConfig(node);
@@ -2116,7 +2796,7 @@ function projectPythonConfig() {
   <package format="3">
     <name>${escapeXml(config.packageName)}</name>
     <version>0.0.0</version>
-    <description>ROS 2 package exported from lwrclpy Web Node Editor.</description>
+    <description>ROS 2 rclpy package exported from Web Node Editor.</description>
     <maintainer email="user@example.com">user</maintainer>
     <license>TODO</license>
 
@@ -2149,7 +2829,7 @@ function projectPythonConfig() {
     zip_safe=True,
     maintainer='user',
     maintainer_email='user@example.com',
-    description='ROS 2 package exported from lwrclpy Web Node Editor.',
+    description='ROS 2 rclpy package exported from Web Node Editor.',
     license='TODO',
     tests_require=['pytest'],
     entry_points={
@@ -2404,13 +3084,16 @@ function projectPythonConfig() {
       if hasattr(value, '_fields_and_field_types'):
         return value
       msg = msg_cls()
-      if hasattr(msg, 'data'):
-        msg.data = value
-      elif isinstance(value, dict):
+      self._populate_message(msg, value)
+      return msg
+
+    def _populate_message(self, msg, value):
+      if isinstance(value, dict):
         for key, item in value.items():
           if hasattr(msg, key):
             setattr(msg, key, item)
-      return msg
+      elif hasattr(msg, 'data'):
+        msg.data = value
 
     def _coerce_service_request(self, data_type, value):
       srv_cls = import_type_class(data_type)
@@ -2449,7 +3132,7 @@ function projectPythonConfig() {
     : '';
     return `# ${config.packageName}
 
-  ROS 2 Python package exported from lwrclpy Web Node Editor.
+  ROS 2 Python package exported for standard rclpy.
 
   ## Nodes
 
@@ -2490,7 +3173,7 @@ function projectPythonConfig() {
   }
 
   function safePackageName(value) {
-    let name = String(value || 'lwrclpy_exported_nodes').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+    let name = String(value || 'rclpy_exported_nodes').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
     if (!name || /^[0-9]/.test(name)) name = `ros2_${name || 'exported_nodes'}`;
     return name;
   }
@@ -2522,8 +3205,8 @@ function projectPythonConfig() {
 function renderProjectPythonFile(config) {
   const metadata = JSON.stringify(config, null, 2);
   return `#!/usr/bin/env python3
-# Generated by lwrclpy Web Node Editor.
-# This file runs exported custom lwrclpy nodes from one saved project.
+# Generated by Web Node Editor for standard ROS 2 rclpy.
+# This file runs exported custom ROS 2 nodes from one saved project.
 
 import importlib
 import hashlib
@@ -2744,13 +3427,16 @@ class ProjectNode:
         if hasattr(value, "_fields_and_field_types"):
             return value
         msg = msg_cls()
-        if hasattr(msg, "data"):
-            msg.data = value
-        elif isinstance(value, dict):
+        self._populate_message(msg, value)
+        return msg
+
+    def _populate_message(self, msg, value):
+        if isinstance(value, dict):
             for key, item in value.items():
                 if hasattr(msg, key):
                     setattr(msg, key, item)
-        return msg
+        elif hasattr(msg, "data"):
+            msg.data = value
 
     def _coerce_service_request(self, data_type, value):
         srv_cls = import_type_class(data_type)
@@ -2797,10 +3483,10 @@ from launch.substitutions import PathJoinSubstitution, ThisLaunchFileDir
 
 
 def generate_launch_description():
-    # Put lwrclpy_project.py next to this launch file or edit this path.
+    # Put rclpy_project.py next to this launch file or edit this path.
     project_script = PathJoinSubstitution([
         ThisLaunchFileDir(),
-        'lwrclpy_project.py',
+        'rclpy_project.py',
     ])
     return LaunchDescription([
         ExecuteProcess(
@@ -2814,7 +3500,7 @@ def generate_launch_description():
 function renderPythonNodeFile(config) {
   const metadata = JSON.stringify(config, null, 2);
   return `#!/usr/bin/env python3
-# Generated by lwrclpy Web Node Editor.
+# Generated by Web Node Editor for standard ROS 2 rclpy.
 # LWRCLPY_WEB_NODE_EDITOR_CONFIG_START
 ${metadata.split('\n').map((line) => `# ${line}`).join('\n')}
 # LWRCLPY_WEB_NODE_EDITOR_CONFIG_END
@@ -3034,13 +3720,16 @@ class ExportedNode:
         if hasattr(value, "_fields_and_field_types"):
             return value
         msg = msg_cls()
-        if hasattr(msg, "data"):
-            msg.data = value
-        elif isinstance(value, dict):
+        self._populate_message(msg, value)
+        return msg
+
+    def _populate_message(self, msg, value):
+        if isinstance(value, dict):
             for key, item in value.items():
                 if hasattr(msg, key):
                     setattr(msg, key, item)
-        return msg
+        elif hasattr(msg, "data"):
+            msg.data = value
 
     def _coerce_service_request(self, data_type, value):
         srv_cls = import_type_class(data_type)
@@ -3301,6 +3990,12 @@ function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
+function nextPeriodicTimeMs(previousNext, periodMs, now) {
+  let next = (previousNext > 0 ? previousNext : now) + periodMs;
+  while (next <= now) next += periodMs;
+  return next;
+}
+
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 }
@@ -3311,7 +4006,27 @@ function escapeAttr(value) {
 
 window.addEventListener('resize', renderLinks);
 window.addEventListener('keydown', (ev) => {
+  const shortcut = ev.metaKey || ev.ctrlKey;
+  const target = ev.target;
+  const textEditing = target?.closest?.('input, textarea, select, [contenteditable="true"]');
+  if (shortcut && ev.key.toLowerCase() === 's') {
+    ev.preventDefault();
+    saveProject(ev.shiftKey);
+    return;
+  }
+  if (shortcut && !textEditing && ev.key.toLowerCase() === 'z') {
+    ev.preventDefault();
+    if (ev.shiftKey) redoProject();
+    else undoProject();
+    return;
+  }
+  if (shortcut && !textEditing && ev.key.toLowerCase() === 'y') {
+    ev.preventDefault();
+    redoProject();
+    return;
+  }
   if (ev.key === 'Delete' || ev.key === 'Backspace') {
+    if (textEditing) return;
     if (state.selectedNode) deleteNode(state.selectedNode);
     else if (state.selectedLink) deleteLink(state.selectedLink);
   }

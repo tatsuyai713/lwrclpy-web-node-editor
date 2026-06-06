@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
+
+os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
 
 def import_type_class(type_name: str):
     package, kind, name = type_name.split("/")
@@ -16,6 +19,21 @@ def import_type_class(type_name: str):
 
 def split_kind(type_name: str) -> str:
     return type_name.split("/")[1]
+
+
+def topic_qos(data_type: str) -> Any:
+    if data_type.replace(".", "/") not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
+        return 10
+    try:
+        qos = importlib.import_module("rclpy.qos")
+        return qos.QoSProfile(
+            history=qos.HistoryPolicy.KEEP_LAST,
+            depth=4,
+            reliability=qos.ReliabilityPolicy.RELIABLE,
+            durability=qos.DurabilityPolicy.VOLATILE,
+        )
+    except Exception:
+        return 1
 
 
 class LwrclpyWorkerNode:
@@ -50,14 +68,14 @@ class LwrclpyWorkerNode:
             type_cls = import_type_class(output["dataType"])
             for topic in self.port_topics.get("outputs", {}).get(output["id"], []):
                 if split_kind(output["dataType"]) == "msg":
-                    self.publishers.setdefault(output["id"], []).append(self.node.create_publisher(type_cls, topic, 10))
+                    self.publishers.setdefault(output["id"], []).append(self.node.create_publisher(type_cls, topic, topic_qos(output["dataType"])))
                 else:
                     self.clients.setdefault(output["id"], []).append(self.node.create_client(type_cls, topic))
         for input_port in self.node_config.get("inputs", []):
             type_cls = import_type_class(input_port["dataType"])
             for topic in self.port_topics.get("inputs", {}).get(input_port["id"], []):
                 if split_kind(input_port["dataType"]) == "msg":
-                    self.subscriptions.append(self.node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port), 10))
+                    self.subscriptions.append(self.node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port), topic_qos(input_port["dataType"])))
                 else:
                     self.services.append(self.node.create_service(type_cls, topic, self._make_service_callback(input_port)))
 
@@ -296,13 +314,16 @@ class LwrclpyWorkerNode:
         if hasattr(value, "_fields_and_field_types"):
             return value
         msg = msg_cls()
+        self._populate_message(msg, value)
+        return msg
+
+    def _populate_message(self, msg: Any, value: Any) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
                 if hasattr(msg, key):
                     self._set_field(msg, key, item)
         elif hasattr(msg, "data"):
             self._set_field(msg, "data", value)
-        return msg
 
     def _coerce_service_request(self, data_type: str, value: Any) -> Any:
         srv_cls = import_type_class(data_type)

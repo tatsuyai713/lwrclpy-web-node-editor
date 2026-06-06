@@ -53,6 +53,15 @@ lwrclpy Web Node Editor: http://127.0.0.1:8765
 
 `Run Hz` で連続実行時のtick周波数を設定できます。デフォルトは1000Hzです。`Run` の連続実行ループはサーバー側で動くため、ブラウザタブがフォーカスを失ってもTopic出力は継続します。`Duration sec` に秒数を入力して `Run For` を使うと、指定秒数だけ実行して自動停止できます。
 
+## ショートカット
+
+- `Ctrl+S` / `Cmd+S`: 上書き保存します。まだ保存先がない場合は保存先を選びます。
+- `Ctrl+Shift+S` / `Cmd+Shift+S`: 名前を付けて保存します。
+- `Ctrl+Z` / `Cmd+Z`: 元に戻します。
+- `Ctrl+Shift+Z` / `Cmd+Shift+Z` または `Ctrl+Y`: やり直します。
+
+ブラウザがFile System Access APIに対応していない場合、保存は従来通りJSONファイルのダウンロードになります。
+
 ## サンプルプロジェクト
 
 `samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
@@ -185,7 +194,7 @@ if state.get("enabled", True):
 - `One Shot`: 同じ画像を数tickだけ出力します。
 - `Rate`: 指定Hzで画像を繰り返し出力します。
 
-`Video File Input` はブラウザで選んだ動画をHTML videoとして再生し、Run中に現在フレームを出力します。サンプルJSONの動画入力は実動画ファイルを持たないため、埋め込みフレームから簡易的な動画フレームを生成します。
+`Video File Input` はブラウザで選んだ動画をHTML videoとして再生し、Run中に現在フレームを `Publish Hz` の周期で `sensor_msgs/msg/Image` としてTopic出力します。サンプルJSONの動画入力は実動画ファイルを持たないため、埋め込みフレームからサーバー側で簡易的な動画フレームを生成します。
 
 `Image File Save` は接続された画像を `saved_images/` にBMPとして保存します。
 
@@ -224,7 +233,7 @@ if state.get("enabled", True):
 
 アプリ本体は `.venv` で動きます。カスタムノードは、ノードごとに `.node_envs/<node-id>` のvenvを持ちます。
 
-ノードの `requirements.txt` に依存を書くと、実行前に `uv` がそのノード用venvを作成し、必要なパッケージとlwrclpyをインストールします。lwrclpyはGitHub Releasesのlatest releaseから、現在のPython ABIとOS/CPUに合うwheelを自動選択してインストールします。Webプレビューでは、カスタムノードごとに `.node_envs/<node-id>` のPythonで別ワーカープロセスを起動し、ノード間や組み込みツールノードとの接続はlwrclpy topicで橋渡しします。
+ノードの `requirements.txt` に依存を書くと、実行前に `uv` がそのノード用venvを作成し、必要なパッケージとlwrclpyをインストールします。lwrclpyは `/Users/tatsuyai/repos/lwrclpy/dist` または `LWRCLPY_WHEEL_DIR` のローカルwheelを優先し、現在は `0.4.9` を優先して使います。該当wheelがない場合だけGitHub Releasesから、現在のPython ABIとOS/CPUに合うwheelを自動選択してインストールします。Webプレビューでは、カスタムノードごとに `.node_envs/<node-id>` のPythonで別ワーカープロセスを起動し、ノード間や組み込みツールノードとの接続はlwrclpy topicで橋渡しします。
 
 `Stop` は実行中の全カスタムノードワーカーへ停止指示を送り、通常停止できない場合はタイムアウト後にkillします。`Force Stop` は最初から全カスタムノードワーカーを強制終了します。サーバー起動時と終了時にも、このフレームワークが起動した残存 `node_worker.py` プロセスを検出して強制終了します。
 
@@ -242,7 +251,7 @@ if state.get("enabled", True):
 
 - `Run` を押して連続実行にしてください。1 tickだけでは動画は進みにくいです。
 - ブラウザで動画ファイルを読み込んだ場合は、`Video File Input` ノードのプレビューが `playing` になっているか確認してください。
-- サンプル動画は `samples/02_video_motion_topic_graph.json` または `samples/04_video_low_light_colormap_topic_graph.json` を読み込み、`Run` で動作確認できます。
+- サンプル動画は `samples/image_video/02_video_motion_topic_graph.json` または `samples/image_video/04_video_low_light_colormap_topic_graph.json` を読み込み、`Run` で動作確認できます。
 
 ### ノードの処理結果が出ない
 

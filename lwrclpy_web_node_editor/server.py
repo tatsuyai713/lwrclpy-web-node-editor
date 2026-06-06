@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import hashlib
 import json
 import mimetypes
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+
+os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
 
 from .graph import GraphRuntime, LWRCLPY_TYPE_TREE
 
@@ -20,13 +24,23 @@ from .graph import GraphRuntime, LWRCLPY_TYPE_TREE
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PROJECT_DIR = Path.cwd()
 WORKER_SCRIPT = Path(__file__).resolve().parent / "node_worker.py"
+VIDEO_WORKER_SCRIPT = Path(__file__).resolve().parent / "video_dds_worker.py"
+DDS_TAP_WORKER_SCRIPT = Path(__file__).resolve().parent / "dds_tap_worker.py"
+BUILTIN_SOURCE_WORKER_SCRIPT = Path(__file__).resolve().parent / "builtin_source_worker.py"
 WORKER_DIR = PROJECT_DIR / ".node_workers"
+UPLOAD_DIR = PROJECT_DIR / ".uploads" / "videos"
 
 
 def _json_default(value):
     if hasattr(value, "__dict__"):
         return value.__dict__
     return str(value)
+
+
+def _safe_upload_name(name: str) -> str:
+    base = Path(name or "video").name
+    cleaned = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in base)
+    return cleaned or "video"
 
 
 def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
@@ -104,8 +118,16 @@ def _command_line_worker_pids() -> set[int]:
 
 def _is_framework_worker_command(command: str) -> bool:
     worker_script = str(WORKER_SCRIPT)
+    video_worker_script = str(VIDEO_WORKER_SCRIPT)
+    dds_tap_worker_script = str(DDS_TAP_WORKER_SCRIPT)
+    builtin_source_worker_script = str(BUILTIN_SOURCE_WORKER_SCRIPT)
     worker_dir = str(WORKER_DIR)
-    return worker_script in command and worker_dir in command
+    return (
+        worker_script in command
+        or video_worker_script in command
+        or dds_tap_worker_script in command
+        or builtin_source_worker_script in command
+    ) and worker_dir in command
 
 
 def _cleanup_pid_files() -> None:
@@ -140,6 +162,8 @@ class ContinuousGraphRunner:
         self._hz = 1000.0
         self._duration_sec: float | None = None
         self._error = ""
+        self._pending_param_updates: list[dict] = []
+        self._stopping = False
 
     def start(self, payload: dict) -> dict:
         graph_payload = {
@@ -153,6 +177,11 @@ class ContinuousGraphRunner:
             duration_sec = max(0.1, float(duration_value))
         with self._lock:
             self._stop_locked()
+            # A new Run must start from a clean graph runtime. In particular,
+            # non-looping video workers can finish with an ended status, and
+            # keeping the old instance would prevent the next Run from
+            # recreating the DDS publisher process.
+            self.runtime.close()
             self._payload = graph_payload
             self._hz = hz
             self._duration_sec = duration_sec
@@ -162,6 +191,7 @@ class ContinuousGraphRunner:
             self._error = ""
             self._latest = {"nodes": {}, "setup": {"complete": True}, "lwrclpy": {"available": self.runtime.ros.available, "error": self.runtime.ros.error}}
             self._stop_event.clear()
+            self._stopping = False
             self._running = True
             self._thread = threading.Thread(target=self._loop, name="lwrclpy-web-node-editor-runner", daemon=True)
             self._thread.start()
@@ -172,16 +202,64 @@ class ContinuousGraphRunner:
             self._stop_locked()
             return self.status()
 
+    def update_payload(self, payload: dict) -> dict:
+        graph_payload = {
+            "nodes": payload.get("nodes", []),
+            "links": payload.get("links", []),
+        }
+        with self._lock:
+            if self._running and not self._stopping:
+                self._payload = graph_payload
+            return self.status()
+
+    def update_node_params(self, payload: dict) -> dict:
+        updates = payload.get("updates") or []
+        if not isinstance(updates, list):
+            return {"ok": True, "updated": 0}
+        clean_updates = [item for item in updates if isinstance(item, dict)]
+        if not clean_updates:
+            return {"ok": True, "updated": 0}
+        with self._lock:
+            if self._running and not self._stopping:
+                self._pending_param_updates.extend(clean_updates)
+                self._pending_param_updates = self._coalesce_param_updates(self._pending_param_updates)
+                return {"ok": True, "queued": len(clean_updates), "pending": len(self._pending_param_updates)}
+        updated = self.runtime.update_node_params(clean_updates)
+        return {"ok": True, "updated": updated}
+
+    def _coalesce_param_updates(self, updates: list[dict]) -> list[dict]:
+        merged: dict[str, dict] = {}
+        order: list[str] = []
+        for item in updates:
+            node_id = str(item.get("nodeId") or "")
+            params = item.get("params")
+            if not node_id or not isinstance(params, dict):
+                continue
+            if node_id not in merged:
+                merged[node_id] = {"nodeId": node_id, "params": {}}
+                order.append(node_id)
+            merged[node_id]["params"].update(params)
+        return [merged[node_id] for node_id in order]
+
     def _stop_locked(self) -> None:
         thread = self._thread
+        self._stopping = True
+        self._payload = None
+        self._pending_param_updates = []
         if thread is not None and thread.is_alive():
             self._stop_event.set()
-            thread.join(timeout=2.0)
-        self._thread = None
-        if self._running:
-            self._stopped_at = time.time()
-        self._running = False
+            thread.join(timeout=1.0)
+            if thread.is_alive():
+                self._error = "runner stop timed out"
+            else:
+                self._thread = None
+        else:
+            self._thread = None
+        self._stopped_at = time.time()
+        self._running = bool(self._thread is not None and self._thread.is_alive())
         self._stop_event.clear()
+        if not self._running:
+            self._stopping = False
 
     def status(self) -> dict:
         with self._lock:
@@ -208,13 +286,19 @@ class ContinuousGraphRunner:
                 duration_sec = self._duration_sec
                 started_at = self._started_at
                 hz = self._hz
+                pending_updates = self._pending_param_updates
+                self._pending_param_updates = []
             if payload is None:
+                break
+            if self._stop_event.is_set():
                 break
             now = time.time()
             if duration_sec is not None and now - started_at >= duration_sec:
                 stop_runtime = True
                 break
             try:
+                if pending_updates:
+                    self.runtime.update_node_params(pending_updates)
                 result = self.runtime.run(payload)
                 with self._lock:
                     self._latest = result
@@ -226,14 +310,22 @@ class ContinuousGraphRunner:
                     self._latest = {"error": str(exc), "nodes": {}, "setup": {"complete": False}}
                 stop_runtime = True
                 break
-            next_at += 1.0 / max(1.0, hz)
+            # All built-in and custom nodes run in isolated worker processes.
+            # The server loop only starts workers and samples their status for
+            # the Web UI, so spinning it at the model run frequency can starve
+            # the HTTP server without improving DDS timing.
+            status_hz = min(max(1.0, hz), 30.0)
+            next_at += 1.0 / status_hz
             sleep_for = next_at - time.time()
             if sleep_for > 0:
                 self._stop_event.wait(sleep_for)
             else:
                 next_at = time.time()
         with self._lock:
+            if threading.current_thread() is self._thread:
+                self._thread = None
             self._running = False
+            self._stopping = False
             self._stopped_at = time.time()
         if stop_runtime:
             self.runtime.stop(force=False)
@@ -242,14 +334,34 @@ class ContinuousGraphRunner:
 class Handler(BaseHTTPRequestHandler):
     runtime = GraphRuntime()
     runner = ContinuousGraphRunner(runtime)
+    _last_image_view_data_urls: dict[str, str] = {}
+    _last_image_view_raw_signatures: dict[str, str] = {}
+    _ready_signature = ""
+
+    @classmethod
+    def _payload_signature(cls, payload: dict) -> str:
+        nodes = []
+        for node in payload.get("nodes", []):
+            if not isinstance(node, dict):
+                continue
+            nodes.append({
+                "id": str(node.get("id") or ""),
+                "toolType": str(node.get("toolType") or ""),
+                "requirements": str(node.get("requirements") or ""),
+                "importCode": str(node.get("importCode") or ""),
+            })
+        encoded = json.dumps({"nodes": nodes}, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     def log_message(self, fmt: str, *args) -> None:
-        if self.path in {"/api/run", "/api/run-status"} and args and str(args[1]) == "200":
+        path = self.path.split("?", 1)[0]
+        if path in {"/api/run", "/api/run-status", "/api/node-frame"} and args and str(args[1]) == "200":
             return
         print("[lwrclpy_web_node_editor]", fmt % args)
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/message-types":
             self._send_json({"types": LWRCLPY_TYPE_TREE})
             return
@@ -257,32 +369,99 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "lwrclpy": {"available": self.runtime.ros.available, "error": self.runtime.ros.error}})
             return
         if path == "/api/run-status":
-            self._send_json(self.runner.status())
+            self._send_json(self._compact_run_status(self.runner.status()))
+            return
+        if path == "/api/node-frame":
+            query = parse_qs(parsed.query)
+            self._send_node_frame(str((query.get("nodeId") or [""])[0]))
             return
         self._send_static(path)
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/run", "/api/start", "/api/stop", "/api/force-stop"}:
+        if path == "/api/upload-video":
+            self._handle_video_upload()
+            return
+        if path not in {"/api/run", "/api/ready", "/api/start", "/api/update-run-payload", "/api/update-node-params", "/api/stop", "/api/force-stop"}:
             self.send_error(404)
             return
         try:
             length = int(self.headers.get("content-length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             if path == "/api/run":
+                signature = self._payload_signature(payload)
+                if self.__class__._ready_signature != signature:
+                    self._send_json({
+                        "error": "Ready is required before Run",
+                        "ready": False,
+                        "setup": {"complete": False},
+                    }, status=409)
+                    return
                 result = self.runtime.run(payload)
+            elif path == "/api/ready":
+                self.runner.stop()
+                self.runtime.stop(force=True)
+                cleanup_framework_processes(force=True)
+                shutil.rmtree(Path.cwd() / ".node_envs", ignore_errors=True)
+                shutil.rmtree(WORKER_DIR, ignore_errors=True)
+                WORKER_DIR.mkdir(parents=True, exist_ok=True)
+                result = self.runtime.prepare(payload)
+                if result.get("ready"):
+                    self.__class__._ready_signature = self._payload_signature(payload)
+                    result["signature"] = self.__class__._ready_signature
+                else:
+                    self.__class__._ready_signature = ""
             elif path == "/api/start":
+                signature = self._payload_signature(payload)
+                if self.__class__._ready_signature != signature:
+                    self._send_json({
+                        "error": "Ready is required before Run",
+                        "ready": False,
+                        "setup": {"complete": False},
+                        "run": {"running": False, "tickCount": 0, "error": "Ready is required before Run"},
+                    }, status=409)
+                    return
+                self._last_image_view_data_urls.clear()
+                self._last_image_view_raw_signatures.clear()
                 result = self.runner.start(payload)
+            elif path == "/api/update-run-payload":
+                result = self.runner.update_payload(payload)
+            elif path == "/api/update-node-params":
+                result = self.runner.update_node_params(payload)
             elif path == "/api/force-stop":
                 self.runner.stop()
                 result = self.runtime.stop(force=True)
                 result["orphanProcesses"] = cleanup_framework_processes(force=True)
             else:
                 self.runner.stop()
-                result = self.runtime.stop(force=bool(payload.get("force", False)))
+                result = self.runtime.stop(force=bool(payload.get("force", True)))
             self._send_json(result)
         except (BrokenPipeError, ConnectionResetError):
             return
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=500)
+
+    def _handle_video_upload(self):
+        try:
+            length = int(self.headers.get("content-length", "0"))
+            original = unquote(self.headers.get("x-file-name", "video"))
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            suffix = Path(original).suffix or ".video"
+            target = UPLOAD_DIR / f"{int(time.time() * 1000)}_{_safe_upload_name(original)}"
+            if not target.suffix:
+                target = target.with_suffix(suffix)
+            remaining = length
+            with target.open("wb") as out:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    remaining -= len(chunk)
+            if remaining:
+                self._send_json({"error": "upload interrupted"}, status=400)
+                return
+            self._send_json({"ok": True, "path": str(target), "fileName": Path(original).name, "size": length})
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
 
@@ -296,6 +475,88 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
             return
+
+    def _send_node_frame(self, node_id: str):
+        frame = self.runtime.get_node_frame(node_id)
+        if not frame:
+            self.send_error(404)
+            return
+        data = frame.get("data")
+        frame_path = Path(str(frame.get("path") or "")) if not isinstance(data, (bytes, bytearray)) else None
+        if frame_path is not None and not frame_path.is_file():
+            self.send_error(404)
+            return
+        encoding = str(frame.get("encoding") or "rgb8").lower()
+        try:
+            length = len(data) if isinstance(data, (bytes, bytearray)) else frame_path.stat().st_size
+            self.send_response(200)
+            content_type = {
+                "jpeg": "image/jpeg",
+                "jpg": "image/jpeg",
+                "bmp": "image/bmp",
+                "png": "image/png",
+                "webp": "image/webp",
+            }.get(encoding, "application/octet-stream")
+            self.send_header("content-type", content_type)
+            self.send_header("content-length", str(length))
+            self.send_header("x-frame-seq", str(frame.get("seq") or 0))
+            self.send_header("x-frame-width", str(frame.get("width") or 0))
+            self.send_header("x-frame-height", str(frame.get("height") or 0))
+            self.send_header("x-frame-encoding", encoding)
+            self.end_headers()
+            if isinstance(data, (bytes, bytearray)):
+                self.wfile.write(data)
+            else:
+                with frame_path.open("rb") as handle:
+                    shutil.copyfileobj(handle, self.wfile, length=256 * 1024)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def _compact_run_status(self, payload):
+        if not isinstance(payload, dict):
+            return payload
+        nodes = payload.get("nodes")
+        if not isinstance(nodes, dict):
+            return payload
+        compact_nodes = {}
+        changed = False
+        for node_id, node_payload in nodes.items():
+            view = node_payload.get("view") if isinstance(node_payload, dict) else None
+            if not isinstance(view, dict) or view.get("kind") != "image" or not isinstance(view.get("dataUrl"), str):
+                raw = view.get("raw") if isinstance(view, dict) else None
+                if isinstance(raw, dict) and isinstance(raw.get("data"), str):
+                    raw_data = raw.get("data") or ""
+                    signature = f"{raw.get('width')}x{raw.get('height')}:{raw.get('encoding')}:{hashlib.blake2s(raw_data.encode('ascii'), digest_size=12).hexdigest()}"
+                    if signature and self._last_image_view_raw_signatures.get(str(node_id)) == signature:
+                        next_raw = dict(raw)
+                        next_raw["data"] = ""
+                        next_view = dict(view)
+                        next_view["raw"] = next_raw
+                        next_node_payload = dict(node_payload)
+                        next_node_payload["view"] = next_view
+                        compact_nodes[node_id] = next_node_payload
+                        changed = True
+                        continue
+                    self._last_image_view_raw_signatures[str(node_id)] = signature
+                compact_nodes[node_id] = node_payload
+                continue
+            data_url = view.get("dataUrl") or ""
+            if data_url and self._last_image_view_data_urls.get(str(node_id)) == data_url:
+                next_view = dict(view)
+                next_view["dataUrl"] = ""
+                next_node_payload = dict(node_payload)
+                next_node_payload["view"] = next_view
+                compact_nodes[node_id] = next_node_payload
+                changed = True
+                continue
+            if data_url:
+                self._last_image_view_data_urls[str(node_id)] = data_url
+            compact_nodes[node_id] = node_payload
+        if not changed:
+            return payload
+        compact = dict(payload)
+        compact["nodes"] = compact_nodes
+        return compact
 
     def _send_static(self, path: str):
         if path == "/":
@@ -315,6 +576,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    if hasattr(ThreadingHTTPServer, "allow_reuse_port"):
+        allow_reuse_port = True
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
@@ -326,7 +593,7 @@ def main(argv: list[str] | None = None):
         print(f"Cleaned up {killed_count} stale lwrclpy Web Node Editor worker process(es).")
     atexit.register(_cleanup_at_exit)
     try:
-        server = ThreadingHTTPServer((args.host, args.port), Handler)
+        server = ReusableThreadingHTTPServer((args.host, args.port), Handler)
     except OSError as exc:
         if exc.errno == 48:
             print(f"Port {args.port} is already in use. Stop the existing server or run with --port {args.port + 1}.", file=sys.stderr)

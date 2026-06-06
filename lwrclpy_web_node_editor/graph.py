@@ -42,6 +42,12 @@ def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
 LWRCLPY_TYPE_TREE = discover_lwrclpy_types()
 
 
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+    tmp_path.replace(path)
+
+
 @dataclass
 class PortConfig:
     id: str
@@ -97,6 +103,21 @@ def import_type_class(type_name: str):
     return getattr(module, name)
 
 
+def topic_qos(data_type: str) -> Any:
+    if normalize_type(data_type) not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
+        return 10
+    try:
+        qos = importlib.import_module("rclpy.qos")
+        return qos.QoSProfile(
+            history=qos.HistoryPolicy.KEEP_LAST,
+            depth=4,
+            reliability=qos.ReliabilityPolicy.RELIABLE,
+            durability=qos.DurabilityPolicy.VOLATILE,
+        )
+    except Exception:
+        return 1
+
+
 class LwrclpyRuntime:
     def __init__(self) -> None:
         self.available = False
@@ -104,6 +125,8 @@ class LwrclpyRuntime:
         self.error = ""
         self.rclpy = None
         self.executor = None
+        self._spin_thread: threading.Thread | None = None
+        self._stop_spin = threading.Event()
         try:
             self.rclpy = importlib.import_module("rclpy")
             self.available = True
@@ -119,24 +142,37 @@ class LwrclpyRuntime:
             executors = importlib.import_module("rclpy.executors")
             if not self.rclpy.ok():
                 self.rclpy.init(args=None)
-            self.executor = executors.MultiThreadedExecutor()
+            self.executor = executors.MultiThreadedExecutor(num_threads=max(4, min(16, (os.cpu_count() or 4))))
+            # Spin the executor in a dedicated background thread so ROS subscription
+            # callbacks are not driven by the main graph processing loop.
+            self._stop_spin.clear()
+            self._spin_thread = threading.Thread(
+                target=self._spin_loop, daemon=True, name="lwrclpy-executor-spin"
+            )
+            self._spin_thread.start()
             self.initialized = True
             return True
         except Exception as exc:
             self.error = str(exc)
             return False
 
-    def spin_once(self) -> None:
+    def _spin_loop(self) -> None:
+        """Background thread: lets lwrclpy's executor drain callbacks with its worker pool."""
         if self.executor is None:
             return
         try:
-            self.executor.spin_once(timeout_sec=0.0)
+            self.executor.spin()
         except Exception as exc:
-            self.error = str(exc)
+            if not self._stop_spin.is_set():
+                self.error = str(exc)
+
+    def spin_once(self) -> None:
+        # No-op: executor is now spun by the dedicated background thread.
+        pass
 
     def spin_some(self, count: int = 8) -> None:
-        for _ in range(max(1, count)):
-            self.spin_once()
+        # No-op: executor is now spun by the dedicated background thread.
+        pass
 
 
 class PreviewLogger:
@@ -172,6 +208,9 @@ class CustomLwrclNodeInstance:
         self.state: dict[str, Any] = {}
         self.last_inputs: dict[str, Any] = {}
         self.input_queues: dict[str, list[Any]] = {}
+        self.input_versions: dict[str, int] = {}
+        self.input_arrival_times: dict[str, list[float]] = {}
+        self._input_lock = threading.Lock()  # protects input_queues, last_inputs, input_arrival_times
         self.last_outputs: dict[str, Any] = {}
         self.logs: list[str] = []
         self.view: dict[str, Any] = {}
@@ -191,12 +230,16 @@ class CustomLwrclNodeInstance:
         self.subscriptions: list[Any] = []
         self.services: list[Any] = []
         self.lwrcl_node = None
+        self.node_executor = None
+        self.node_executor_thread: threading.Thread | None = None
         self.preview_node = PreviewNode(config.name, self.log)
         self.worker_process: subprocess.Popen | None = None
         self.worker_signature = None
         self.worker_config_path: Path | None = None
         self.worker_log_path: Path | None = None
         self.worker_pid_path: Path | None = None
+        self._builtin_thread: threading.Thread | None = None
+        self._builtin_stop = threading.Event()
         self.env_signature = None
         self.signature = None
         self._setup_transport()
@@ -212,10 +255,10 @@ class CustomLwrclNodeInstance:
             self.config = config
 
     def close(self) -> None:
+        self._stop_builtin_thread()
+        self._stop_node_executor()
         if self.lwrcl_node is not None and self.runtime.available:
             try:
-                if self.runtime.executor is not None:
-                    self.runtime.executor.remove_node(self.lwrcl_node)
                 self.lwrcl_node.destroy_node()
             except Exception:
                 pass
@@ -226,7 +269,7 @@ class CustomLwrclNodeInstance:
         self.services = []
         self.stop_worker()
 
-    def stop_worker(self, force: bool = False) -> bool:
+    def stop_worker(self, force: bool = False, timeout: float | None = None) -> bool:
         process = self.worker_process
         self.worker_process = None
         if process is None or process.poll() is not None:
@@ -237,11 +280,15 @@ class CustomLwrclNodeInstance:
                     pass
             return False
         self._signal_worker(process, force)
+        wait_timeout = 0.2 if force else (0.5 if timeout is None else max(0.0, float(timeout)))
         try:
-            process.wait(timeout=2)
+            process.wait(timeout=wait_timeout)
         except subprocess.TimeoutExpired:
             self._signal_worker(process, True)
-            process.wait(timeout=2)
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                pass
         if self.worker_pid_path:
             try:
                 self.worker_pid_path.unlink(missing_ok=True)
@@ -314,16 +361,23 @@ class CustomLwrclNodeInstance:
                 client.call_async(request)
 
     def latest(self, input_id: str, default: Any = None) -> Any:
-        return self.last_inputs.get(input_id, default)
+        with self._input_lock:
+            return self.last_inputs.get(input_id, default)
+
+    def latest_with_version(self, input_id: str, default: Any = None) -> tuple[Any, int]:
+        with self._input_lock:
+            return self.last_inputs.get(input_id, default), int(self.input_versions.get(input_id, 0))
 
     def take(self, input_id: str, default: Any = None) -> Any:
-        queue = self.input_queues.get(input_id) or []
-        if not queue:
-            return default
-        return queue.pop(0)
+        with self._input_lock:
+            queue = self.input_queues.get(input_id) or []
+            if not queue:
+                return default
+            return queue.pop(0)
 
     def has_input(self, input_id: str) -> bool:
-        return bool(self.input_queues.get(input_id))
+        with self._input_lock:
+            return bool(self.input_queues.get(input_id))
 
     def log(self, *values: Any) -> None:
         self.logs.append(" ".join(str(v) for v in values))
@@ -343,6 +397,8 @@ class CustomLwrclNodeInstance:
         self.signature = self._signature(self.config)
         if self.config.tool_type in {"topic_input", "topic_output"}:
             return
+        if self.config.tool_type in {"function_generator", "image_file_input", "video_file_input", "image_view", "topic_hz_monitor", "graph_view", "image_file_save"}:
+            return
         needs_transport = any(self._port_topics(port) for port in [*self.config.inputs, *self.config.outputs])
         if not needs_transport:
             return
@@ -353,11 +409,69 @@ class CustomLwrclNodeInstance:
             self._setup_tool_transport()
         else:
             self._setup_worker_bridge_transport()
-        if self.runtime.executor is not None:
-            self.runtime.executor.add_node(self.lwrcl_node)
+        self._start_node_executor()
+
+    def _start_node_executor(self) -> None:
+        if self.lwrcl_node is None:
+            return
+        try:
+            executors = importlib.import_module("rclpy.executors")
+            self.node_executor = executors.MultiThreadedExecutor(num_threads=1)
+            self.node_executor.add_node(self.lwrcl_node)
+            self.node_executor_thread = threading.Thread(
+                target=self._spin_node_executor,
+                daemon=True,
+                name=f"dds-node-{self.config.id}",
+            )
+            self.node_executor_thread.start()
+        except Exception as exc:
+            self.node_executor = None
+            self.node_executor_thread = None
+            self.env_status = f"node executor start failed: {exc}"
+            self.log(self.env_status)
+
+    def _spin_node_executor(self) -> None:
+        executor = self.node_executor
+        if executor is None:
+            return
+        try:
+            executor.spin()
+        except Exception as exc:
+            if self.node_executor is executor:
+                name = exc.__class__.__name__
+                if name != "ExternalShutdownException":
+                    self.log(f"node executor error: {exc}")
+
+    def _stop_node_executor(self) -> None:
+        executor = self.node_executor
+        thread = self.node_executor_thread
+        self.node_executor = None
+        self.node_executor_thread = None
+        if executor is not None:
+            try:
+                if self.lwrcl_node is not None:
+                    executor.remove_node(self.lwrcl_node)
+            except Exception:
+                pass
+            try:
+                executor.shutdown(timeout_sec=0.2)
+            except Exception:
+                pass
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.2)
 
     def _execute_tool(self, linked_inputs: dict[str, Any]) -> bool:
         tool = self.config.tool_type
+        if self._builtin_runs_in_background():
+            self._ensure_builtin_workers_once()
+            self._execute_builtin_worker_status_once()
+            if not self.view:
+                self.view = {"kind": "text", "status": "running in background"}
+            return True
+        if tool in {"function_generator", "image_file_input", "video_file_input", "image_view", "topic_hz_monitor", "graph_view", "image_file_save"}:
+            self.last_outputs.clear()
+            self.view = {"kind": "text", "status": "DDS topic is required; node execution is isolated in worker processes"}
+            return True
         if tool == "image_file_input":
             image = self.config.params.get("imageMessage")
             if isinstance(image, dict):
@@ -373,13 +487,20 @@ class CustomLwrclNodeInstance:
                 self.view = {"kind": "empty", "status": "No media selected"}
             return True
         if tool == "video_file_input":
-            image = self.config.params.get("imageMessage") or self.config.params.get("frameMessage")
+            should_publish = self._should_publish_video_input()
+            image = self._video_frame_message(force=should_publish)
             if isinstance(image, dict):
                 image = self._normalize_image_message(image)
-                self.last_outputs["out1"] = image
-                self.publish("out1", image)
-                self.view = {"kind": "image", "dataUrl": self.config.params.get("dataUrl", ""), "status": self.config.params.get("fileName", "")}
+                if should_publish:
+                    self.last_outputs["out1"] = image
+                    self.publish("out1", image)
+                    self.view = self._image_view_payload(image, self._video_input_status())
+                else:
+                    self.last_outputs.pop("out1", None)
+                    if not self.view:
+                        self.view = self._image_view_payload(image, self._video_input_status())
             else:
+                self.last_outputs.pop("out1", None)
                 self.view = {"kind": "empty", "status": "No media selected"}
             return True
         if tool == "function_generator":
@@ -392,10 +513,11 @@ class CustomLwrclNodeInstance:
                 self.last_outputs.pop("out1", None)
             self.view = {"kind": "text", "status": status}
             return True
+        if tool == "topic_hz_monitor":
+            self._execute_topic_hz_monitor_once()
+            return True
         if tool == "image_view":
-            image = self.take("in1", None) or self.last_inputs.get("in1")
-            data_url = self._image_data_url(image)
-            self.view = {"kind": "image", "dataUrl": data_url, "status": self._image_status(image) if data_url else "No image"}
+            self._execute_image_view_once()
             return True
         if tool == "image_file_save":
             image = self.take("in1", None) or self.last_inputs.get("in1")
@@ -403,37 +525,632 @@ class CustomLwrclNodeInstance:
             self.view = {"kind": "text", "status": path or "No image to save"}
             return True
         if tool == "graph_view":
-            queued_values = []
-            while self.has_input("in1"):
-                queued_values.append(self.take("in1"))
-            now = time.time()
-            if "graph_view_start_at" not in self.state:
-                self.state["graph_view_start_at"] = now
-            elapsed = max(0.0, now - float(self.state["graph_view_start_at"]))
-            limit = max(8, min(int(self.config.params.get("sampleLimit") or 10000), 100000))
-            for value in queued_values:
-                y = self._extract_number(value, str(self.config.params.get("fieldPath") or "data"))
-                if y is None:
-                    continue
-                self._series.append({"t": elapsed, "y": y})
-                del self._series[:-limit]
-                window = max(0.1, float(self.config.params.get("xAxisSeconds") or 10.0))
-                cutoff = elapsed - window
-                self._series = [point for point in self._series if point.get("t", 0.0) >= cutoff]
-            y_mode = str(self.config.params.get("yAxisMode") or "auto")
-            self.view = {
-                "kind": "plot",
-                "series": self._series[-limit:],
-                "status": str(self.config.params.get("fieldPath") or "data"),
-                "xAxisSeconds": max(0.1, float(self.config.params.get("xAxisSeconds") or 10.0)),
-                "yAxis": {
-                    "mode": "fixed" if y_mode == "fixed" else "auto",
-                    "min": float(self.config.params.get("yMin") if self.config.params.get("yMin") is not None else -1.0),
-                    "max": float(self.config.params.get("yMax") if self.config.params.get("yMax") is not None else 1.0),
-                },
-            }
+            self._execute_graph_view_once()
             return True
         return False
+
+    def _builtin_runs_in_background(self) -> bool:
+        tool = self.config.tool_type
+        if self._uses_builtin_source_worker():
+            return True
+        if tool == "video_file_input" and self._uses_video_worker():
+            return True
+        if tool in {"video_file_input", "function_generator"}:
+            return bool(self.publishers)
+        if tool in {"image_view", "topic_hz_monitor", "graph_view", "image_file_save"} and self._uses_dds_tap_worker():
+            return True
+        return False
+
+    def _ensure_builtin_workers_once(self) -> None:
+        if self._uses_video_worker():
+            self._ensure_video_worker()
+        if self._uses_dds_tap_worker():
+            self._ensure_dds_tap_worker()
+        if self._uses_builtin_source_worker():
+            self._ensure_builtin_source_worker()
+
+    def _execute_builtin_worker_status_once(self) -> None:
+        tool = self.config.tool_type
+        if tool == "video_file_input":
+            if self._uses_video_worker():
+                self._update_video_worker_view()
+            else:
+                self._execute_source_worker_status_once()
+        elif tool in {"function_generator", "image_file_input"}:
+            self._execute_source_worker_status_once()
+        elif tool == "image_view":
+            self._execute_image_view_worker_once()
+        elif tool == "topic_hz_monitor":
+            self._execute_topic_hz_monitor_worker_once()
+        elif tool == "graph_view":
+            self._execute_graph_view_worker_once()
+        elif tool == "image_file_save":
+            self._execute_image_save_worker_once()
+
+    def _ensure_builtin_thread(self) -> None:
+        if self._uses_video_worker():
+            self._ensure_video_worker()
+        if self._uses_dds_tap_worker():
+            self._ensure_dds_tap_worker()
+        if self._uses_builtin_source_worker():
+            self._ensure_builtin_source_worker()
+        if self._builtin_thread is not None and self._builtin_thread.is_alive():
+            return
+        self._builtin_stop.clear()
+        self._builtin_thread = threading.Thread(target=self._builtin_loop, name=f"builtin-{self.config.id}", daemon=True)
+        self._builtin_thread.start()
+        self.env_status = "built-in background"
+
+    def _stop_builtin_thread(self) -> None:
+        self._builtin_stop.set()
+        thread = self._builtin_thread
+        self._builtin_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+        self._builtin_stop.clear()
+
+    def _uses_video_worker(self) -> bool:
+        return (
+            self.config.tool_type == "video_file_input"
+            and bool(self.config.params.get("serverDecode"))
+            and bool(self.config.params.get("videoPath"))
+            and any(port.topics for port in self.config.outputs)
+        )
+
+    def _uses_dds_tap_worker(self) -> bool:
+        return self.config.tool_type in {"image_view", "topic_hz_monitor", "graph_view", "image_file_save"} and any(port.topics for port in self.config.inputs)
+
+    def _uses_builtin_source_worker(self) -> bool:
+        if self.config.tool_type == "video_file_input" and self._uses_video_worker():
+            return False
+        return self.config.tool_type in {"function_generator", "image_file_input", "video_file_input"} and any(port.topics for port in self.config.outputs)
+
+    def _ensure_builtin_source_worker(self) -> None:
+        signature = self._builtin_source_worker_signature()
+        if self.worker_process is not None and self.worker_process.poll() is None and self.worker_signature == signature:
+            self.env_status = "built-in source worker running"
+            return
+        self.stop_worker(force=True)
+        worker_dir = Path.cwd() / ".node_workers"
+        worker_dir.mkdir(parents=True, exist_ok=True)
+        config_path = worker_dir / f"{self.config.id}.source.json"
+        log_path = worker_dir / f"{self.config.id}.source.log"
+        pid_path = worker_dir / f"{self.config.id}.source.pid"
+        status_path = worker_dir / f"{self.config.id}.source.status.json"
+        try:
+            status_path.unlink(missing_ok=True)
+            log_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        write_json_atomic(config_path, self._builtin_source_worker_config(status_path))
+        worker_script = Path(__file__).resolve().parent / "builtin_source_worker.py"
+        try:
+            log_file = log_path.open("a", encoding="utf-8")
+            self.worker_process = subprocess.Popen(
+                [str(self._worker_python()), str(worker_script), str(config_path)],
+                cwd=Path.cwd(),
+                env=self._worker_env(),
+                stdout=log_file,
+                stderr=log_file,
+                text=True,
+                start_new_session=(os.name != "nt"),
+            )
+            self.worker_signature = signature
+            self.worker_config_path = config_path
+            self.worker_log_path = log_path
+            self.worker_pid_path = pid_path
+            pid_path.write_text(str(self.worker_process.pid), encoding="utf-8")
+            self.env_status = "built-in source worker running"
+        except Exception as exc:
+            self.env_status = f"built-in source worker start failed: {exc}"
+            self.view = {"kind": "text", "status": self.env_status}
+            self.log(self.env_status)
+
+    def _builtin_source_worker_signature(self) -> tuple[Any, ...]:
+        output = next((port for port in self.config.outputs if port.topics), None)
+        return (
+            self.config.id,
+            self.config.tool_type,
+            output.data_type if output else "",
+            output.topics if output else (),
+            json.dumps(self.config.params, sort_keys=True, default=str),
+        )
+
+    def _builtin_source_worker_config(self, status_path: Path) -> dict[str, Any]:
+        output = next((port for port in self.config.outputs if port.topics), None)
+        if output is None:
+            raise RuntimeError(f"{self.config.tool_type} has no DDS output topic")
+        return {
+            "nodeId": self.config.id,
+            "toolType": self.config.tool_type,
+            "topic": output.topics[0],
+            "dataType": output.data_type,
+            "params": self.config.params,
+            "statusPath": str(status_path),
+        }
+
+    def _ensure_dds_tap_worker(self) -> None:
+        shared_status_path = self.state.get("shared_tap_status_path")
+        if shared_status_path:
+            self.stop_worker(force=True)
+            self.env_status = "DDS tap worker shared"
+            return
+        signature = self._dds_tap_worker_signature()
+        if self.worker_process is not None and self.worker_process.poll() is None and self.worker_signature == signature:
+            self.env_status = "DDS tap worker running"
+            return
+        self.stop_worker(force=True)
+        worker_dir = Path.cwd() / ".node_workers"
+        worker_dir.mkdir(parents=True, exist_ok=True)
+        config_path = worker_dir / f"{self.config.id}.tap.json"
+        log_path = worker_dir / f"{self.config.id}.tap.log"
+        pid_path = worker_dir / f"{self.config.id}.tap.pid"
+        status_path = worker_dir / f"{self.config.id}.tap.status.json"
+        frame_path = worker_dir / f"{self.config.id}.tap.frame"
+        try:
+            status_path.unlink(missing_ok=True)
+            frame_path.unlink(missing_ok=True)
+            log_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        write_json_atomic(config_path, self._dds_tap_worker_config(status_path, frame_path))
+        worker_script = Path(__file__).resolve().parent / "dds_tap_worker.py"
+        try:
+            log_file = log_path.open("a", encoding="utf-8")
+            self.worker_process = subprocess.Popen(
+                [str(self._worker_python()), str(worker_script), str(config_path)],
+                cwd=Path.cwd(),
+                env=self._worker_env(),
+                stdout=log_file,
+                stderr=log_file,
+                text=True,
+                start_new_session=(os.name != "nt"),
+            )
+            self.worker_signature = signature
+            self.worker_config_path = config_path
+            self.worker_log_path = log_path
+            self.worker_pid_path = pid_path
+            pid_path.write_text(str(self.worker_process.pid), encoding="utf-8")
+            self.env_status = "DDS tap worker running"
+        except Exception as exc:
+            self.env_status = f"DDS tap worker start failed: {exc}"
+            self.view = {"kind": "text", "status": self.env_status}
+            self.log(self.env_status)
+
+    def _dds_tap_worker_signature(self) -> tuple[Any, ...]:
+        input_port = next((port for port in self.config.inputs if port.topics), None)
+        return (
+            self.config.id,
+            self.config.tool_type,
+            input_port.data_type if input_port else "",
+            input_port.topics if input_port else (),
+            float(self.config.params.get("windowSec") or 5.0),
+        )
+
+    def _dds_tap_worker_config(self, status_path: Path, frame_path: Path) -> dict[str, Any]:
+        input_port = next((port for port in self.config.inputs if port.topics), None)
+        if input_port is None:
+            raise RuntimeError(f"{self.config.tool_type} has no DDS input topic")
+        return {
+            "nodeId": self.config.id,
+            "mode": self._dds_tap_mode(),
+            "topic": input_port.topics[0],
+            "dataType": input_port.data_type,
+            "windowSec": max(0.5, float(self.config.params.get("windowSec") or 5.0)),
+            "displayHz": 30.0,
+            "fieldPath": str(self.config.params.get("fieldPath") or "data"),
+            "sampleLimit": int(self.config.params.get("sampleLimit") or 10000),
+            "outputDir": str(Path.cwd() / "saved_images"),
+            "statusPath": str(status_path),
+            "framePath": str(frame_path),
+        }
+
+    def _dds_tap_mode(self) -> str:
+        if self.config.tool_type == "image_view":
+            return "image"
+        if self.config.tool_type == "graph_view":
+            return "graph"
+        if self.config.tool_type == "image_file_save":
+            return "save"
+        return "hz"
+
+    def _ensure_video_worker(self) -> None:
+        signature = self._video_worker_signature()
+        if self.worker_signature == signature and self._video_worker_completed():
+            self.env_status = "video DDS worker completed"
+            self._update_video_worker_view()
+            return
+        if self.state.get("video_worker_failed_signature") == signature:
+            self.env_status = "video DDS worker failed"
+            self._update_video_worker_view()
+            return
+        if self.worker_process is not None and self.worker_process.poll() is None and self.worker_signature == signature:
+            self.env_status = "video DDS worker running"
+            self._update_video_worker_view()
+            return
+        if self.worker_process is not None and self.worker_signature == signature and self.worker_process.poll() is not None:
+            self._update_video_worker_view()
+            if "failed" in self.env_status or "error" in str(self.view.get("status", "")).lower():
+                self.state["video_worker_failed_signature"] = signature
+                self.env_status = "video DDS worker failed"
+                return
+        self.stop_worker(force=True)
+        worker_dir = Path.cwd() / ".node_workers"
+        worker_dir.mkdir(parents=True, exist_ok=True)
+        config_path = worker_dir / f"{self.config.id}.video.json"
+        log_path = worker_dir / f"{self.config.id}.video.log"
+        pid_path = worker_dir / f"{self.config.id}.video.pid"
+        status_path = worker_dir / f"{self.config.id}.video.status.json"
+        frame_path = worker_dir / f"{self.config.id}.video.preview"
+        try:
+            status_path.unlink(missing_ok=True)
+            frame_path.unlink(missing_ok=True)
+            log_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        write_json_atomic(config_path, self._video_worker_config(status_path, frame_path))
+        worker_script = Path(__file__).resolve().parent / "video_dds_worker.py"
+        try:
+            log_file = log_path.open("a", encoding="utf-8")
+            self.worker_process = subprocess.Popen(
+                [str(self._worker_python()), str(worker_script), str(config_path)],
+                cwd=Path.cwd(),
+                env=self._worker_env(),
+                stdout=log_file,
+                stderr=log_file,
+                text=True,
+                start_new_session=(os.name != "nt"),
+            )
+            self.worker_signature = signature
+            self.worker_config_path = config_path
+            self.worker_log_path = log_path
+            self.worker_pid_path = pid_path
+            pid_path.write_text(str(self.worker_process.pid), encoding="utf-8")
+            self.env_status = "video DDS worker running"
+            self.state.pop("video_worker_failed_signature", None)
+            self.view = {"kind": "text", "status": f"{self.config.params.get('fileName') or 'video'} DDS worker starting"}
+        except Exception as exc:
+            self.env_status = f"video DDS worker start failed: {exc}"
+            self.view = {"kind": "text", "status": self.env_status}
+            self.log(self.env_status)
+
+    def _worker_python(self) -> Path:
+        return self.env_python_bin if self.env_python_bin is not None else Path(sys.executable)
+
+    def _worker_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        env["LWRCLPY_NO_DATASHARING"] = "1"
+        return env
+
+    def _video_worker_completed(self) -> bool:
+        if bool(self.config.params.get("loop", True)):
+            return False
+        status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.video.status.json"
+        if not status_path.exists():
+            return False
+        try:
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        return bool(data.get("ended")) and not bool(data.get("running"))
+
+    def _video_worker_signature(self) -> tuple[Any, ...]:
+        return (
+            self.config.id,
+            self.config.params.get("videoPath"),
+            float(self.config.params.get("publishHz") or 30.0),
+            bool(self.config.params.get("useSourceFps")),
+            bool(self.config.params.get("loop", True)),
+            int(self.config.params.get("maxSide") or 640),
+            "preview:jpeg",
+            tuple((p.id, p.data_type, p.topics) for p in self.config.outputs),
+        )
+
+    def _video_worker_config(self, status_path: Path, frame_path: Path) -> dict[str, Any]:
+        output = next((port for port in self.config.outputs if port.topics), None)
+        if output is None:
+            raise RuntimeError("Video Input has no DDS output topic")
+        return {
+            "nodeId": self.config.id,
+            "videoPath": str(self.config.params.get("videoPath")),
+            "topic": output.topics[0],
+            "dataType": output.data_type or "sensor_msgs/msg/Image",
+            "publishHz": max(0.01, float(self.config.params.get("publishHz") or 30.0)),
+            "useSourceFps": bool(self.config.params.get("useSourceFps")),
+            "loop": bool(self.config.params.get("loop", True)),
+            "maxSide": int(self.config.params.get("maxSide") or 640),
+            "statusPath": str(status_path),
+            "framePath": str(frame_path),
+            "enableDdsPublish": True,
+            "previewHz": 30.0,
+            "previewEncoding": "jpeg",
+            "outputEncoding": "jpeg" if normalize_type(output.data_type) == "sensor_msgs/msg/CompressedImage" else "raw",
+        }
+
+    def _update_video_worker_view(self) -> None:
+        status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.video.status.json"
+        status = ""
+        data: dict[str, Any] | None = None
+        if status_path.exists():
+            try:
+                data = json.loads(status_path.read_text(encoding="utf-8"))
+                if data.get("error"):
+                    status = str(data.get("error"))
+                    self.env_status = "video DDS worker failed"
+                elif data.get("ended"):
+                    size = f"{data.get('width', '?')} x {data.get('height', '?')}"
+                    status = f"{self.config.params.get('fileName') or 'video'} ended {size}"
+                else:
+                    size = f"{data.get('width', '?')} x {data.get('height', '?')}"
+                    actual = float(data.get("actualHz") or 0.0)
+                    hz = f" / {actual:.1f} Hz actual" if actual > 0 else ""
+                    status = f"{self.config.params.get('fileName') or 'video'} DDS worker {size}{hz}"
+            except Exception:
+                status = "video DDS worker running"
+        if not status:
+            status = "video DDS worker running"
+        frame_path = Path(str(data.get("framePath") or "")) if isinstance(data, dict) else Path("")
+        seq = int(data.get("frameSeq") or 0) if isinstance(data, dict) else 0
+        width = int(data.get("width") or 0) if isinstance(data, dict) else 0
+        height = int(data.get("height") or 0) if isinstance(data, dict) else 0
+        encoding = str(data.get("frameEncoding") or data.get("encoding") or "jpeg").lower() if isinstance(data, dict) else "jpeg"
+        if seq > 0 and frame_path.is_file():
+            self.state["image_view_frame"] = {
+                "seq": seq,
+                "width": width,
+                "height": height,
+                "encoding": encoding if encoding in {"jpeg", "jpg", "bmp", "png", "webp"} else "jpeg",
+                "path": str(frame_path),
+                "updatedAt": time.time(),
+            }
+            self.view = {
+                "kind": "image",
+                "frameRef": {"nodeId": self.config.id, "seq": seq, "width": width, "height": height, "encoding": self.state["image_view_frame"]["encoding"]},
+                "status": status,
+            }
+            return
+        self.view = {"kind": "text", "status": status}
+
+    def _builtin_loop(self) -> None:
+        next_at = time.time()
+        while not self._builtin_stop.is_set():
+            tool = self.config.tool_type
+            try:
+                if tool == "video_file_input":
+                    if self._uses_video_worker():
+                        period = 1.0 / 30.0
+                        self._ensure_video_worker()
+                        image = self._video_frame_message(force=True)
+                        if isinstance(image, dict) and self._should_update_background_view():
+                            self.view = self._image_view_payload(image, self._video_input_status())
+                    else:
+                        period = 1.0 / 30.0
+                        self._execute_source_worker_status_once()
+                elif tool == "function_generator":
+                    period = 1.0 / 30.0
+                    self._execute_source_worker_status_once()
+                elif tool == "image_file_input":
+                    period = 1.0 / 30.0
+                    self._execute_source_worker_status_once()
+                elif tool == "image_view":
+                    period = 1.0 / 30.0
+                    if self._uses_dds_tap_worker():
+                        self._execute_image_view_worker_once()
+                    else:
+                        self._execute_image_view_once()
+                elif tool == "topic_hz_monitor":
+                    period = 1.0 / 30.0
+                    if self._uses_dds_tap_worker():
+                        self._execute_topic_hz_monitor_worker_once()
+                    else:
+                        self._execute_topic_hz_monitor_once()
+                elif tool == "graph_view":
+                    period = 1.0 / 30.0
+                    if self._uses_dds_tap_worker():
+                        self._execute_graph_view_worker_once()
+                    else:
+                        self._execute_graph_view_once()
+                elif tool == "image_file_save":
+                    period = 1.0 / 10.0
+                    if self._uses_dds_tap_worker():
+                        self._execute_image_save_worker_once()
+                    else:
+                        image = self.take("in1", None) or self.last_inputs.get("in1")
+                        path = self._save_image(image)
+                        self.view = {"kind": "text", "status": path or "No image to save"}
+                else:
+                    break
+            except Exception as exc:
+                self.log(f"background {tool} error: {exc}")
+                period = 0.1
+            next_at += period
+            sleep_for = next_at - time.time()
+            if sleep_for > 0:
+                self._builtin_stop.wait(sleep_for)
+            else:
+                next_at = time.time()
+
+    def _should_update_background_view(self) -> bool:
+        hz = 30.0
+        now = time.time()
+        next_at = float(self.state.get("background_view_next_update_at") or 0.0)
+        if now < next_at:
+            return False
+        self.state["background_view_next_update_at"] = self._next_periodic_time(next_at, 1.0 / hz, now)
+        return True
+
+    def _execute_topic_hz_monitor_once(self) -> None:
+        now = time.time()
+        window = max(0.5, float(self.config.params.get("windowSec") or 5.0))
+        with self._input_lock:
+            all_times = list(self.input_arrival_times.get("in1", []))
+        cutoff = now - window
+        windowed = [t for t in all_times if t >= cutoff]
+        with self._input_lock:
+            self.input_arrival_times["in1"] = windowed
+        count = len(windowed)
+        if count >= 2:
+            span = max(0.001, min(window, now - windowed[0]))
+            hz = count / span
+            status = f"{hz:.2f} Hz  ({count} msgs / {window:.1f}s window)"
+        elif count == 1:
+            status = "1 msg received (waiting for more...)"
+        else:
+            status = "No messages received"
+        self.view = {"kind": "text", "status": status}
+
+    def _execute_topic_hz_monitor_worker_once(self) -> None:
+        status = self._read_dds_tap_status()
+        if not status:
+            self.view = {"kind": "text", "status": "DDS tap worker starting"}
+            return
+        if status.get("error"):
+            self.view = {"kind": "text", "status": str(status.get("error"))}
+            return
+        hz = float(status.get("hz") or 0.0)
+        count = int(status.get("count") or 0)
+        window = float(status.get("windowSec") or self.config.params.get("windowSec") or 5.0)
+        if count >= 2:
+            text = f"{hz:.2f} Hz  ({count} msgs / {window:.1f}s window)"
+        elif count == 1:
+            text = "1 msg received (waiting for more...)"
+        else:
+            text = "No messages received"
+        self.view = {"kind": "text", "status": text}
+
+    def _execute_source_worker_status_once(self) -> None:
+        status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.source.status.json"
+        if not status_path.exists():
+            self.view = {"kind": "text", "status": "source worker starting"}
+            return
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        text = str(status.get("status") or "source worker running")
+        if self.config.tool_type == "image_file_input":
+            image = self.config.params.get("imageMessage")
+            if isinstance(image, dict):
+                self.view = {"kind": "image", "dataUrl": self.config.params.get("dataUrl", ""), "status": text}
+                return
+        self.view = {"kind": "text", "status": text}
+
+    def _execute_image_view_once(self) -> None:
+        new_image, version = self.latest_with_version("in1")
+        if new_image is not None and version != self.state.get("image_view_last_version"):
+            if self._should_update_image_view():
+                view = self._image_view_payload(new_image, self._image_status(new_image))
+                if view.get("dataUrl") or view.get("raw") or view.get("frameRef"):
+                    self.view = view
+                    self.state["image_view_last_version"] = version
+        elif not self.view:
+            self.view = {"kind": "image", "dataUrl": "", "status": "No image"}
+
+    def _execute_image_view_worker_once(self) -> None:
+        status = self._read_dds_tap_status()
+        if not status:
+            self.view = {"kind": "image", "dataUrl": "", "status": "DDS tap worker starting"}
+            return
+        if status.get("error"):
+            self.view = {"kind": "image", "dataUrl": "", "status": str(status.get("error"))}
+            return
+        frame_path = Path(str(status.get("framePath") or ""))
+        seq = int(status.get("frameSeq") or 0)
+        if seq <= 0 or not frame_path.exists():
+            self.view = {"kind": "image", "dataUrl": "", "status": "No image"}
+            return
+        width = int(status.get("width") or 0)
+        height = int(status.get("height") or 0)
+        encoding = str(status.get("encoding") or "rgb8").lower()
+        frame_signature = (seq, width, height, encoding, str(frame_path))
+        if frame_signature == self.state.get("image_view_worker_last_signature"):
+            return
+        self.state["image_view_worker_last_seq"] = seq
+        self.state["image_view_worker_last_signature"] = frame_signature
+        self.state["image_view_frame_seq"] = seq
+        self.state["image_view_frame"] = {
+            "seq": seq,
+            "width": width,
+            "height": height,
+            "encoding": encoding if encoding in {"jpeg", "jpg", "bmp", "png", "webp"} else "rgb8",
+            "path": str(frame_path),
+            "updatedAt": time.time(),
+        }
+        self.view = {
+            "kind": "image",
+            "frameRef": {"nodeId": self.config.id, "seq": seq, "width": width, "height": height, "encoding": self.state["image_view_frame"]["encoding"]},
+            "status": f"{width} x {height} {encoding}" if width and height else encoding,
+        }
+
+    def _read_dds_tap_status(self) -> dict[str, Any] | None:
+        shared_status_path = self.state.get("shared_tap_status_path")
+        status_path = Path(str(shared_status_path)) if shared_status_path else Path.cwd() / ".node_workers" / f"{self.config.id}.tap.status.json"
+        if not status_path.exists():
+            return None
+        try:
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def _execute_graph_view_once(self) -> None:
+        queued_values = []
+        while self.has_input("in1"):
+            queued_values.append(self.take("in1"))
+        now = time.time()
+        if "graph_view_start_at" not in self.state:
+            self.state["graph_view_start_at"] = now
+        elapsed = max(0.0, now - float(self.state["graph_view_start_at"]))
+        limit = max(8, min(int(self.config.params.get("sampleLimit") or 10000), 100000))
+        for value in queued_values:
+            y = self._extract_number(value, str(self.config.params.get("fieldPath") or "data"))
+            if y is None:
+                continue
+            self._series.append({"t": elapsed, "y": y})
+            del self._series[:-limit]
+            window = max(0.1, float(self.config.params.get("xAxisSeconds") or 10.0))
+            cutoff = elapsed - window
+            self._series = [point for point in self._series if point.get("t", 0.0) >= cutoff]
+        y_mode = str(self.config.params.get("yAxisMode") or "auto")
+        self.view = {
+            "kind": "plot",
+            "series": self._series[-limit:],
+            "status": str(self.config.params.get("fieldPath") or "data"),
+            "xAxisSeconds": max(0.1, float(self.config.params.get("xAxisSeconds") or 10.0)),
+            "yAxis": {
+                "mode": "fixed" if y_mode == "fixed" else "auto",
+                "min": float(self.config.params.get("yMin") if self.config.params.get("yMin") is not None else -1.0),
+                "max": float(self.config.params.get("yMax") if self.config.params.get("yMax") is not None else 1.0),
+            },
+        }
+
+    def _execute_graph_view_worker_once(self) -> None:
+        status = self._read_dds_tap_status()
+        if not status:
+            self.view = {"kind": "plot", "series": [], "status": "DDS tap worker starting"}
+            return
+        series = status.get("series")
+        if not isinstance(series, list):
+            series = []
+        y_mode = str(self.config.params.get("yAxisMode") or "auto")
+        self.view = {
+            "kind": "plot",
+            "series": series,
+            "status": str(status.get("fieldPath") or self.config.params.get("fieldPath") or "data"),
+            "xAxisSeconds": max(0.1, float(self.config.params.get("xAxisSeconds") or 10.0)),
+            "yAxis": {
+                "mode": "fixed" if y_mode == "fixed" else "auto",
+                "min": float(self.config.params.get("yMin") if self.config.params.get("yMin") is not None else -1.0),
+                "max": float(self.config.params.get("yMax") if self.config.params.get("yMax") is not None else 1.0),
+            },
+        }
+
+    def _execute_image_save_worker_once(self) -> None:
+        status = self._read_dds_tap_status()
+        if not status:
+            self.view = {"kind": "text", "status": "DDS tap worker starting"}
+            return
+        self.view = {"kind": "text", "status": str(status.get("savedPath") or "No image to save")}
 
     def _should_publish_image_input(self, image: dict[str, Any]) -> bool:
         signature = self._image_signature(image)
@@ -457,6 +1174,158 @@ class CustomLwrclNodeInstance:
             return False
         self.state["image_file_sent_count"] = sent_count + 1
         return True
+
+    def _video_frame_message(self, force: bool = False) -> dict[str, Any] | None:
+        if self.config.params.get("serverDecode") and self.config.params.get("videoPath"):
+            return self._video_worker_frame_message(force=force)
+        if self.config.params.get("embeddedVideo"):
+            base = self.config.params.get("baseFrameMessage") or self.config.params.get("frameMessage") or self.config.params.get("imageMessage")
+            if isinstance(base, dict):
+                cached = self.state.get("video_file_cached_frame")
+                if not force and isinstance(cached, dict):
+                    return cached
+                frame = self._synthetic_video_frame(base)
+                self.state["video_file_cached_frame"] = frame
+                return frame
+        frame = self.config.params.get("frameMessage") or self.config.params.get("imageMessage")
+        return frame if isinstance(frame, dict) else None
+
+    def _video_worker_frame_message(self, force: bool = False) -> dict[str, Any] | None:
+        status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.video.status.json"
+        if not status_path.exists():
+            return None
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if status.get("error"):
+            return None
+        if status.get("ended") and not bool(self.config.params.get("loop", True)):
+            return None
+        frame_path = Path(str(status.get("framePath") or ""))
+        width = int(status.get("width") or 0)
+        height = int(status.get("height") or 0)
+        encoding = str(status.get("encoding") or "raw").lower()
+        if width <= 0 or height <= 0 or not frame_path.exists():
+            return None
+        try:
+            stat = frame_path.stat()
+        except Exception:
+            return None
+        status_seq = int(status.get("frameSeq") or status.get("published") or 0)
+        seq = max(status_seq, int(stat.st_mtime_ns))
+        if seq <= 0:
+            return None
+        if not force and seq <= int(self.state.get("video_worker_last_seq") or 0):
+            return self.state.get("video_worker_last_frame")
+        try:
+            raw = frame_path.read_bytes()
+        except Exception:
+            return None
+        if encoding == "jpeg":
+            frame = {
+                "format": f"jpeg; width={width}; height={height}",
+                "data": raw,
+                "dataEncoding": "bytes",
+                "width": width,
+                "height": height,
+            }
+            self.state["video_worker_last_seq"] = seq
+            self.state["video_file_current_time"] = seq / max(0.01, float(self.config.params.get("publishHz") or 30.0))
+            self.state["video_worker_last_frame"] = frame
+            return frame
+        expected = width * height * 3
+        if len(raw) != expected:
+            return None
+        self.state["video_worker_last_seq"] = seq
+        self.state["video_file_current_time"] = seq / max(0.01, float(self.config.params.get("publishHz") or 30.0))
+        frame = {
+            "width": width,
+            "height": height,
+            "encoding": "rgb8",
+            "is_bigendian": 0,
+            "step": width * 3,
+            "data": raw,
+            "dataEncoding": "bytes",
+        }
+        self.state["video_worker_last_frame"] = frame
+        return frame
+
+    def _should_publish_video_input(self) -> bool:
+        hz = self._effective_video_publish_hz()
+        now = time.time()
+        next_at = float(self.state.get("video_file_next_publish_at") or 0.0)
+        if now < next_at:
+            return False
+        self.state["video_file_next_publish_at"] = self._next_periodic_time(next_at, 1.0 / hz, now)
+        return True
+
+    def _video_input_status(self) -> str:
+        hz = self._effective_video_publish_hz()
+        name = str(self.config.params.get("fileName") or "video")
+        current = float(self.state.get("video_file_current_time") or self.config.params.get("currentTime") or 0.0)
+        duration = float(self.config.params.get("duration") or 0.0)
+        suffix = f"{current:.1f}s"
+        if duration > 0:
+            suffix += f" / {duration:.1f}s"
+        return f"{name} {suffix} / {hz:g} Hz"
+
+    def _effective_video_publish_hz(self) -> float:
+        if self.config.params.get("useSourceFps"):
+            status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.video.status.json"
+            if status_path.exists():
+                try:
+                    status = json.loads(status_path.read_text(encoding="utf-8"))
+                    source_fps = float(status.get("sourceFps") or 0.0)
+                    if source_fps > 0:
+                        return max(0.01, source_fps)
+                except Exception:
+                    pass
+        return max(0.01, float(self.config.params.get("publishHz") or self.config.params.get("embeddedFps") or 30.0))
+
+    def _synthetic_video_frame(self, base_frame: dict[str, Any]) -> dict[str, Any]:
+        base = self._normalize_image_message(base_frame)
+        width = int(base.get("width") or 0)
+        height = int(base.get("height") or 0)
+        source = self._image_rgb_bytes(base, width, height)
+        if width <= 0 or height <= 0 or not source:
+            return base
+        now = time.time()
+        if "video_file_started_at" not in self.state:
+            self.state["video_file_started_at"] = now
+        duration = max(0.1, float(self.config.params.get("duration") or 10.0))
+        fps = max(1.0, float(self.config.params.get("embeddedFps") or self.config.params.get("publishHz") or 12.0))
+        loop = bool(self.config.params.get("loop", True))
+        elapsed = now - float(self.state["video_file_started_at"])
+        if elapsed >= duration:
+            if loop:
+                elapsed = elapsed % duration
+                self.state["video_file_started_at"] = now - elapsed
+            else:
+                elapsed = duration
+        self.state["video_file_current_time"] = elapsed
+        frame_index = int(elapsed * fps)
+        shift = frame_index % max(1, width)
+        band = (frame_index * 3) % max(1, width + height)
+        output = bytearray(width * height * 3)
+        for y in range(height):
+            for x in range(width):
+                src_x = (x + shift) % width
+                src = (y * width + src_x) * 3
+                dst = (y * width + x) * 3
+                highlight = 34 if abs((x + y) - band) < 4 else 0
+                output[dst] = max(0, min(255, int(source[src]) + highlight))
+                output[dst + 1] = max(0, min(255, int(source[src + 1]) + highlight // 2))
+                output[dst + 2] = max(0, min(255, int(source[src + 2])))
+        return {
+            "width": width,
+            "height": height,
+            "encoding": "rgb8",
+            "is_bigendian": 0,
+            "step": width * 3,
+            "data": bytes(output),
+            "dataEncoding": "bytes",
+        }
 
     def _function_generator_value(self) -> tuple[float, str, bool]:
         p = self.config.params
@@ -566,6 +1435,11 @@ class CustomLwrclNodeInstance:
         return f"{base} / one shot {'sent' if sent else 'ready'}"
 
     def _image_status(self, image: Any) -> str:
+        fmt = self._field(image, "format")
+        if fmt:
+            width = self._field(image, "width") or self._compressed_image_format_int(str(fmt), "width")
+            height = self._field(image, "height") or self._compressed_image_format_int(str(fmt), "height")
+            return f"{width} x {height} {fmt}" if width and height else str(fmt)
         width = self._field(image, "width")
         height = self._field(image, "height")
         encoding = self._field(image, "encoding") or "rgb8"
@@ -582,6 +1456,93 @@ class CustomLwrclNodeInstance:
         if not width or not height or rgb is None:
             return ""
         return "data:image/bmp;base64," + base64.b64encode(self._bmp_bytes(width, height, rgb)).decode("ascii")
+
+    def _image_view_payload(self, image: Any, status: str) -> dict[str, Any]:
+        if isinstance(image, dict) and isinstance(image.get("dataUrl"), str):
+            return {"kind": "image", "dataUrl": image["dataUrl"], "status": status}
+        frame_ref = self._image_frame_ref_payload(image)
+        if frame_ref:
+            return {"kind": "image", "frameRef": frame_ref, "status": status}
+        return {"kind": "image", "dataUrl": self._image_data_url(image), "status": status}
+
+    def _should_update_image_view(self) -> bool:
+        hz = 30.0
+        now = time.time()
+        next_at = float(self.state.get("image_view_next_update_at") or 0.0)
+        if now < next_at:
+            return False
+        self.state["image_view_next_update_at"] = self._next_periodic_time(next_at, 1.0 / hz, now)
+        return True
+
+    def _image_raw_payload(self, image: Any) -> dict[str, Any] | None:
+        width = int(self._field(image, "width") or 0)
+        height = int(self._field(image, "height") or 0)
+        if not width or not height:
+            return None
+        encoding = str(self._field(image, "encoding") or "rgb8").lower()
+        data = self._field(image, "data")
+        if data is None:
+            return None
+        if isinstance(data, str) and self._field(image, "dataEncoding") == "base64" and encoding in {"rgb8", "bgr8", "mono8", "8uc1"}:
+            return {"width": width, "height": height, "encoding": encoding, "data": data}
+        rgb = self._image_rgb_bytes(image, width, height)
+        if rgb is None:
+            return None
+        return {"width": width, "height": height, "encoding": "rgb8", "data": base64.b64encode(rgb).decode("ascii")}
+
+    def _image_frame_ref_payload(self, image: Any) -> dict[str, Any] | None:
+        format_text = str(self._field(image, "format") or "")
+        compressed_format = format_text.lower()
+        compressed_data = self._field(image, "data") if compressed_format else None
+        if compressed_format.startswith(("jpeg", "jpg")) and compressed_data is not None:
+            try:
+                data = bytes(compressed_data)
+            except Exception:
+                data = bytes(max(0, min(255, int(value))) for value in compressed_data)
+            seq = int(self.state.get("image_view_frame_seq") or 0) + 1
+            width = int(self._field(image, "width") or self._compressed_image_format_int(format_text, "width") or 1)
+            height = int(self._field(image, "height") or self._compressed_image_format_int(format_text, "height") or 1)
+            self.state["image_view_frame_seq"] = seq
+            self.state["image_view_frame"] = {
+                "seq": seq,
+                "width": width,
+                "height": height,
+                "encoding": "jpeg",
+                "data": data,
+                "updatedAt": time.time(),
+            }
+            return {"nodeId": self.config.id, "seq": seq, "width": width, "height": height, "encoding": "jpeg"}
+        width = int(self._field(image, "width") or 0)
+        height = int(self._field(image, "height") or 0)
+        if not width or not height:
+            return None
+        encoding = str(self._field(image, "encoding") or "rgb8").lower()
+        rgb = self._image_rgb_bytes(image, width, height)
+        if rgb is None:
+            return None
+        seq = int(self.state.get("image_view_frame_seq") or 0) + 1
+        self.state["image_view_frame_seq"] = seq
+        self.state["image_view_frame"] = {
+            "seq": seq,
+            "width": width,
+            "height": height,
+            "encoding": "rgb8",
+            "data": rgb,
+            "updatedAt": time.time(),
+        }
+        return {"nodeId": self.config.id, "seq": seq, "width": width, "height": height, "encoding": "rgb8"}
+
+    def _compressed_image_format_int(self, format_text: str, key: str) -> int | None:
+        marker = f"{key}="
+        for part in format_text.replace(",", ";").split(";"):
+            part = part.strip()
+            if not part.startswith(marker):
+                continue
+            try:
+                return int(float(part[len(marker):].strip()))
+            except Exception:
+                return None
+        return None
 
     def _image_rgb_bytes(self, image: Any, width: int, height: int) -> bytes | None:
         encoding = str(self._field(image, "encoding") or "rgb8").lower()
@@ -621,14 +1582,20 @@ class CustomLwrclNodeInstance:
 
     def _bmp_bytes(self, width: int, height: int, rgb: bytes) -> bytes:
         row_stride = ((width * 3 + 3) // 4) * 4
-        pixel_bytes = bytearray()
-        for y in range(height - 1, -1, -1):
-            row = rgb[y * width * 3:(y + 1) * width * 3]
-            bgr = bytearray()
-            for i in range(0, len(row), 3):
-                bgr.extend(row[i:i + 3][::-1])
-            bgr.extend(b"\x00" * (row_stride - len(bgr)))
-            pixel_bytes.extend(bgr)
+        row_size = width * 3
+        padding = b"\x00" * (row_stride - row_size)
+        # Convert RGB -> BGR using C-level bytearray slice assignment (no Python loop)
+        bgr_flat = bytearray(len(rgb))
+        bgr_flat[0::3] = rgb[2::3]  # B <- R
+        bgr_flat[1::3] = rgb[1::3]  # G <- G
+        bgr_flat[2::3] = rgb[0::3]  # R <- B
+        # Reverse rows (BMP is stored bottom-to-top) and add row padding
+        mv = memoryview(bgr_flat)
+        rows = [
+            bytes(mv[(height - 1 - y) * row_size:(height - y) * row_size]) + padding
+            for y in range(height)
+        ]
+        pixel_bytes = b"".join(rows)
         file_size = 14 + 40 + len(pixel_bytes)
         return b"".join([
             b"BM",
@@ -646,7 +1613,7 @@ class CustomLwrclNodeInstance:
             (2835).to_bytes(4, "little", signed=True),
             (0).to_bytes(4, "little"),
             (0).to_bytes(4, "little"),
-            bytes(pixel_bytes),
+            pixel_bytes,
         ])
 
     def _save_image(self, image: Any) -> str:
@@ -710,20 +1677,24 @@ class CustomLwrclNodeInstance:
     def _setup_tool_transport(self) -> None:
         for output in self.config.outputs:
             topics = self._port_topics(output)
+            if self.config.tool_type in {"function_generator", "image_file_input", "video_file_input"} and topics:
+                continue
             type_cls = import_type_class(output.data_type)
             _, kind, _ = split_type(output.data_type)
             for topic in topics:
                 if kind == "msg":
-                    self.publishers.setdefault(output.id, []).append(self.lwrcl_node.create_publisher(type_cls, topic, 10))
+                    self.publishers.setdefault(output.id, []).append(self.lwrcl_node.create_publisher(type_cls, topic, topic_qos(output.data_type)))
                 else:
                     self.clients.setdefault(output.id, []).append(self.lwrcl_node.create_client(type_cls, topic))
         for input_port in self.config.inputs:
             topics = self._port_topics(input_port)
+            if self.config.tool_type in {"image_view", "topic_hz_monitor", "graph_view", "image_file_save"} and topics:
+                continue
             type_cls = import_type_class(input_port.data_type)
             _, kind, _ = split_type(input_port.data_type)
             for topic in topics:
                 if kind == "msg":
-                    sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port.id), 10)
+                    sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port.id), topic_qos(input_port.data_type))
                     self.subscriptions.append(sub)
                 else:
                     srv = self.lwrcl_node.create_service(type_cls, topic, self._make_service_callback(input_port.id))
@@ -736,7 +1707,7 @@ class CustomLwrclNodeInstance:
             if kind != "msg":
                 continue
             for topic in self._port_topics(output):
-                sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_output_subscription_callback(output.id), 10)
+                sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_output_subscription_callback(output.id), topic_qos(output.data_type))
                 self.subscriptions.append(sub)
 
     def _port_topics(self, port: PortConfig) -> tuple[str, ...]:
@@ -894,10 +1865,26 @@ class CustomLwrclNodeInstance:
         }
 
     def _store_input(self, input_id: str, value: Any) -> None:
-        self.last_inputs[input_id] = value
-        queue = self.input_queues.setdefault(input_id, [])
-        queue.append(value)
-        del queue[:-100]
+        # May be called from the background spin thread; protected by _input_lock.
+        with self._input_lock:
+            if self.config.tool_type == "topic_hz_monitor":
+                self.input_versions[input_id] = int(self.input_versions.get(input_id, 0)) + 1
+                times = self.input_arrival_times.setdefault(input_id, [])
+                times.append(time.time())
+                del times[:-10000]
+                return
+            self.last_inputs[input_id] = value
+            self.input_versions[input_id] = int(self.input_versions.get(input_id, 0)) + 1
+            queue = self.input_queues.setdefault(input_id, [])
+            queue.append(value)
+            if normalize_type(self._input_type(input_id)) == "sensor_msgs/msg/Image":
+                del queue[:-2]
+            else:
+                del queue[:-100]
+            # Record exact arrival time for Hz monitoring
+            times = self.input_arrival_times.setdefault(input_id, [])
+            times.append(time.time())
+            del times[:-2000]
 
     def _reset_state_on_image_shape_change(self, inputs: dict[str, Any]) -> None:
         for input_port in self.config.inputs:
@@ -942,6 +1929,10 @@ class CustomLwrclNodeInstance:
         if hasattr(value, "_fields_and_field_types"):
             return value
         msg = msg_cls()
+        self._populate_message(msg, value)
+        return msg
+
+    def _populate_message(self, msg: Any, value: Any) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
                 if hasattr(msg, key):
@@ -950,7 +1941,6 @@ class CustomLwrclNodeInstance:
                     self._set_field(msg, key, item)
         elif hasattr(msg, "data"):
             self._set_field(msg, "data", value)
-        return msg
 
     def _coerce_service_request(self, data_type: str, value: Any) -> Any:
         srv_cls = import_type_class(data_type)
@@ -987,6 +1977,7 @@ class GraphRuntime:
     def __init__(self) -> None:
         self.runtime = LwrclpyRuntime()
         self.instances: dict[str, CustomLwrclNodeInstance] = {}
+        self._runtime_param_overrides: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
 
     @property
@@ -1003,9 +1994,67 @@ class GraphRuntime:
         with self._lock:
             stopped: dict[str, str] = {}
             for node_id, node in list(self.instances.items()):
-                if node.stop_worker(force=force):
+                if node.stop_worker(force=force, timeout=0.5):
                     stopped[node_id] = "killed" if force else "terminated"
+            self._runtime_param_overrides.clear()
             return {"stopped": stopped, "force": force}
+
+    def update_node_params(self, updates: list[dict[str, Any]]) -> int:
+        with self._lock:
+            updated = 0
+            for item in updates:
+                node_id = str(item.get("nodeId") or "")
+                params = item.get("params")
+                if not node_id or not isinstance(params, dict):
+                    continue
+                current = self._runtime_param_overrides.setdefault(node_id, {})
+                current.update(params)
+                instance = self.instances.get(node_id)
+                if instance is not None:
+                    instance.config.params.update(params)
+                updated += 1
+            return updated
+
+    def get_node_frame(self, node_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            instance = self.instances.get(str(node_id))
+            if instance is None:
+                return None
+            frame = instance.state.get("image_view_frame")
+            return frame if isinstance(frame, dict) else None
+
+    def prepare(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            return self._prepare_locked(payload)
+
+    def _prepare_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.close()
+        configs = [self._parse_node(node) for node in payload.get("nodes", [])]
+        links = [link for link in payload.get("links", []) if self._valid_link(link, configs)]
+        self._apply_link_topics(configs, links)
+        self._apply_builtin_param_topics(configs)
+        response_nodes: dict[str, Any] = {}
+        for config in configs:
+            instance = self._instance_for(config)
+            ok = self._ensure_node_environment(config, instance)
+            response_nodes[config.id] = {
+                "meta": {"environment": instance.env_status, "logs": instance.logs[-20:]},
+                "values": {},
+                "view": instance.view,
+            }
+            if not ok:
+                return {
+                    "ready": False,
+                    "nodes": response_nodes,
+                    "lwrclpy": {"available": self.runtime.available, "error": self.runtime.error or instance.env_status},
+                    "setup": {"complete": False},
+                }
+        return {
+            "ready": True,
+            "nodes": response_nodes,
+            "lwrclpy": {"available": self.runtime.available, "error": self.runtime.error},
+            "setup": {"complete": True},
+        }
 
     def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -1016,11 +2065,11 @@ class GraphRuntime:
         links = [link for link in payload.get("links", []) if self._valid_link(link, configs)]
         self._apply_link_topics(configs, links)
         self._apply_builtin_param_topics(configs)
-        needs_lwrclpy = bool(links) or any(not node.tool_type for node in configs) or any(
-            any(port.topics for port in [*node.inputs, *node.outputs])
-            for node in configs
-            if node.tool_type
-        )
+        # DDS is owned by isolated node worker processes. The Web server must
+        # not create its own lwrclpy participant just because graph links exist;
+        # doing so competes with the workers and can make the UI transport
+        # interfere with DDS delivery.
+        needs_lwrclpy = False
         if needs_lwrclpy and not self.runtime.ensure_initialized():
             return {
                 "nodes": {},
@@ -1032,9 +2081,11 @@ class GraphRuntime:
             if node_id not in active_ids:
                 self.instances.pop(node_id).close()
 
+        self._configure_shared_dds_taps(configs)
         response_nodes: dict[str, Any] = {}
         for config in configs:
             instance = self._instance_for(config)
+            self._apply_runtime_param_overrides(instance)
             setup_ok = self._ensure_node_environment(config, instance)
             response_nodes[config.id] = {"meta": {"environment": instance.env_status, "logs": instance.logs[-20:]}, "values": {}, "view": instance.view}
             if not setup_ok:
@@ -1062,6 +2113,7 @@ class GraphRuntime:
             self.runtime.spin_some(1)
         for config in self._sort(configs, links):
             instance = self._instance_for(config)
+            self._apply_runtime_param_overrides(instance)
             meta = instance.tick({})
             if needs_lwrclpy:
                 self.runtime.spin_some(1)
@@ -1074,6 +2126,36 @@ class GraphRuntime:
             "setup": {"complete": True},
         }
 
+    def _configure_shared_dds_taps(self, configs: list[CustomLwrclNodeConfig]) -> None:
+        image_taps: dict[tuple[str, str], str] = {}
+        hz_taps: list[tuple[CustomLwrclNodeConfig, tuple[str, str]]] = []
+        for config in configs:
+            input_port = next((port for port in config.inputs if port.topics), None)
+            if input_port is None:
+                continue
+            data_type = normalize_type(input_port.data_type)
+            if data_type != "sensor_msgs/msg/Image":
+                continue
+            key = (input_port.topics[0], data_type)
+            if config.tool_type == "image_view":
+                image_taps.setdefault(key, config.id)
+            elif config.tool_type == "topic_hz_monitor":
+                hz_taps.append((config, key))
+        shared_ids = set()
+        for config, key in hz_taps:
+            source_id = image_taps.get(key)
+            if not source_id or source_id == config.id:
+                continue
+            instance = self._instance_for(config)
+            instance.state["shared_tap_status_path"] = str(Path.cwd() / ".node_workers" / f"{source_id}.tap.status.json")
+            shared_ids.add(config.id)
+        for config in configs:
+            if config.id in shared_ids:
+                continue
+            instance = self.instances.get(config.id)
+            if instance is not None:
+                instance.state.pop("shared_tap_status_path", None)
+
     def _instance_for(self, config: CustomLwrclNodeConfig) -> CustomLwrclNodeInstance:
         instance = self.instances.get(config.id)
         if instance is None:
@@ -1081,32 +2163,43 @@ class GraphRuntime:
             self.instances[config.id] = instance
         else:
             instance.update_config(config)
+        self._apply_runtime_param_overrides(instance)
         return instance
 
+    def _apply_runtime_param_overrides(self, instance: CustomLwrclNodeInstance) -> None:
+        params = self._runtime_param_overrides.get(instance.config.id)
+        if params:
+            instance.config.params.update(params)
+
     def _ensure_node_environment(self, config: CustomLwrclNodeConfig, instance: CustomLwrclNodeInstance) -> bool:
-        if config.tool_type:
-            instance.env_status = "built-in node"
-            return True
         uv = self._uv_command()
         if not uv:
             instance.env_status = "uv command not found"
             instance.log(instance.env_status)
             return False
         env_root = Path.cwd() / ".node_envs" / config.id
-        req_text = config.requirements.strip() + "\n"
+        req_text = self._requirements_text_for(config)
         req_hash = hashlib.sha256(req_text.encode("utf-8")).hexdigest()
         desired_env_signature = (str(env_root), req_hash)
         hash_file = env_root / ".requirements.sha256"
+        python_marker = env_root / ".python-runtime"
+        lwrclpy_marker = env_root / ".lwrclpy-installed"
         req_file = env_root / "requirements.txt"
         python_bin = env_root / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
+        expected_python = self._python_runtime_signature()
         try:
-            if instance.env_signature == desired_env_signature and python_bin.exists():
-                instance.env_status = "ready"
-                return True
+            current_python = python_marker.read_text(encoding="utf-8") if python_marker.exists() else ""
+            if python_bin.exists() and current_python != expected_python:
+                instance.stop_worker(force=True)
+                shutil.rmtree(env_root, ignore_errors=True)
+                instance.env_signature = None
+                instance.env_python_bin = None
+                instance.env_path = None
             env_root.mkdir(parents=True, exist_ok=True)
             if not python_bin.exists():
                 instance.env_status = "creating venv"
-                subprocess.run([uv, "venv", str(env_root)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
+                subprocess.run([uv, "venv", "--python", sys.executable, str(env_root)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
+                python_marker.write_text(expected_python, encoding="utf-8")
             req_file.write_text(req_text, encoding="utf-8")
             current_hash = hash_file.read_text(encoding="utf-8") if hash_file.exists() else ""
             if current_hash != req_hash:
@@ -1117,10 +2210,11 @@ class GraphRuntime:
             instance.env_path = env_root
             instance.env_python_bin = python_bin
             instance.env_site_packages = self._site_packages_for(env_root)
-            if not self._ensure_lwrclpy_in_env(python_bin, instance):
+            if not lwrclpy_marker.exists() and not self._ensure_lwrclpy_in_env(python_bin, instance):
                 return False
+            lwrclpy_marker.write_text(str(time.time()), encoding="utf-8")
             instance.env_signature = desired_env_signature
-            instance.env_status = "ready"
+            instance.env_status = "ready (built-in venv)" if config.tool_type else "ready"
             return True
         except subprocess.CalledProcessError as exc:
             detail = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()[-1:]
@@ -1131,6 +2225,18 @@ class GraphRuntime:
             instance.env_status = f"setup failed: {exc}"
             instance.log(instance.env_status)
             return False
+
+    def _python_runtime_signature(self) -> str:
+        return f"{sys.executable}\n{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n"
+
+    def _requirements_text_for(self, config: CustomLwrclNodeConfig) -> str:
+        if not config.tool_type:
+            return config.requirements.strip() + "\n"
+        req_file = Path.cwd() / "requirements.txt"
+        try:
+            return req_file.read_text(encoding="utf-8").strip() + "\n"
+        except Exception:
+            return "imageio-ffmpeg\n"
 
     def _site_packages_for(self, env_root: Path) -> Path | None:
         if sys.platform.startswith("win"):
@@ -1171,13 +2277,14 @@ class GraphRuntime:
         config_path = worker_dir / f"{config.id}.json"
         log_path = worker_dir / f"{config.id}.log"
         pid_path = worker_dir / f"{config.id}.pid"
-        config_path.write_text(json.dumps(self._worker_config(config), ensure_ascii=False, default=str), encoding="utf-8")
+        write_json_atomic(config_path, self._worker_config(config))
         worker_script = Path(__file__).resolve().parent / "node_worker.py"
         try:
             log_file = log_path.open("a", encoding="utf-8")
             instance.worker_process = subprocess.Popen(
                 [str(python_bin), str(worker_script), str(config_path)],
                 cwd=Path.cwd(),
+                env=instance._worker_env(),
                 stdout=log_file,
                 stderr=log_file,
                 text=True,
@@ -1317,6 +2424,11 @@ class GraphRuntime:
             src_port = next((port for port in (src.outputs if src else []) if port.id == str(link.get("fromPort"))), None)
             dst_port = next((port for port in (dst.inputs if dst else []) if port.id == str(link.get("toPort"))), None)
             if src and dst and src_port and dst_port:
+                if (
+                    dst.tool_type == "image_view"
+                    and normalize_type(src_port.data_type) in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}
+                ):
+                    dst_port.data_type = src_port.data_type
                 if not src_port.data_type:
                     src_port.data_type = dst_port.data_type
                 if not dst_port.data_type:
