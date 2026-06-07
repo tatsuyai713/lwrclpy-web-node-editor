@@ -26,6 +26,8 @@ VIDEO_WORKER_SCRIPT = Path(__file__).resolve().parent / "video_dds_worker.py"
 DDS_TAP_WORKER_SCRIPT = Path(__file__).resolve().parent / "dds_tap_worker.py"
 BUILTIN_SOURCE_WORKER_SCRIPT = Path(__file__).resolve().parent / "builtin_source_worker.py"
 WORKER_DIR = PROJECT_DIR / ".node_workers"
+APP_SETTINGS_DIR = PROJECT_DIR / ".app_settings"
+CUSTOM_NODE_DIR = APP_SETTINGS_DIR / "custom_nodes"
 GUI_DISPLAY_HZ = 30.0
 
 
@@ -96,6 +98,92 @@ def _probe_video_file(path: Path) -> dict[str, object]:
     if fps <= 0 or fps >= 10000:
         fps = 30.0
     return {"width": width, "height": height, "fps": fps, "frameCount": frame_count}
+
+
+def _safe_custom_node_id(value: object) -> str:
+    text = str(value or "").strip().replace(" ", "_")
+    safe = "".join(ch for ch in text if ch.isalnum() or ch in {"_", "-", "."}).strip("._-")
+    return safe[:80] or f"custom_node_{int(time.time() * 1000)}"
+
+
+def _custom_node_path(node_id: object) -> Path:
+    CUSTOM_NODE_DIR.mkdir(parents=True, exist_ok=True)
+    return CUSTOM_NODE_DIR / f"{_safe_custom_node_id(node_id)}.json"
+
+
+def _normalize_custom_node_payload(payload: dict) -> dict:
+    node = payload.get("node")
+    if not isinstance(node, dict):
+        raise ValueError("custom node payload requires a node object")
+    if node.get("toolType"):
+        raise ValueError("only custom lwrclpy nodes can be saved as custom nodes")
+    name = str(payload.get("name") or node.get("name") or "custom_node").strip() or "custom_node"
+    node_id = _safe_custom_node_id(payload.get("id") or name)
+    stored_node = dict(node)
+    for key in ("id", "x", "y"):
+        stored_node.pop(key, None)
+    return {
+        "format": "lwrclpy-web-node-editor-custom-node",
+        "version": 1,
+        "id": node_id,
+        "name": name,
+        "description": str(payload.get("description") or "").strip(),
+        "node": stored_node,
+        "updatedAt": time.time(),
+    }
+
+
+def _read_custom_nodes() -> list[dict]:
+    CUSTOM_NODE_DIR.mkdir(parents=True, exist_ok=True)
+    items: list[dict] = []
+    for path in sorted(CUSTOM_NODE_DIR.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict) and isinstance(data.get("node"), dict):
+            data.setdefault("id", path.stem)
+            items.append(data)
+    return items
+
+
+def _write_custom_node(payload: dict) -> dict:
+    item = _normalize_custom_node_payload(payload)
+    path = _custom_node_path(item["id"])
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    tmp_path.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+    return item
+
+
+def _delete_custom_node(payload: dict) -> dict:
+    node_id = payload.get("id")
+    if not node_id:
+        raise ValueError("id is required")
+    path = _custom_node_path(node_id)
+    deleted = path.exists()
+    path.unlink(missing_ok=True)
+    return {"ok": True, "deleted": deleted, "id": _safe_custom_node_id(node_id)}
+
+
+def _import_custom_nodes(payload: dict) -> dict:
+    raw_items = payload.get("items")
+    if raw_items is None:
+        if isinstance(payload.get("node"), dict):
+            raw_items = [payload]
+        elif isinstance(payload.get("customNodes"), list):
+            raw_items = payload.get("customNodes")
+        elif isinstance(payload.get("nodes"), list):
+            raw_items = [{"node": node, "name": node.get("name")} for node in payload.get("nodes") if isinstance(node, dict) and not node.get("toolType")]
+        else:
+            raw_items = []
+    if not isinstance(raw_items, list):
+        raise ValueError("items must be a list")
+    imported = []
+    for raw in raw_items:
+        if isinstance(raw, dict):
+            imported.append(_write_custom_node(raw))
+    return {"ok": True, "imported": imported}
 
 
 def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
@@ -459,6 +547,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/message-types":
             self._send_json({"types": LWRCLPY_TYPE_TREE})
             return
+        if path == "/api/custom-nodes":
+            self._send_json({"customNodes": _read_custom_nodes()})
+            return
         if path == "/api/health":
             self._send_json({"ok": True, "lwrclpy": self.runtime.ros.status()})
             return
@@ -479,13 +570,32 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json({"error": str(exc)}, status=500)
             return
-        if path not in {"/api/run", "/api/ready", "/api/start", "/api/update-run-payload", "/api/update-node-params", "/api/stop", "/api/force-stop"}:
+        if path not in {
+            "/api/run",
+            "/api/ready",
+            "/api/start",
+            "/api/update-run-payload",
+            "/api/update-node-params",
+            "/api/stop",
+            "/api/force-stop",
+            "/api/custom-nodes/save",
+            "/api/custom-nodes/delete",
+            "/api/custom-nodes/import",
+        }:
             self.send_error(404)
             return
         try:
             length = int(self.headers.get("content-length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
-            if path == "/api/run":
+            if path == "/api/custom-nodes/save":
+                result = {"ok": True, "customNode": _write_custom_node(payload), "customNodes": _read_custom_nodes()}
+            elif path == "/api/custom-nodes/delete":
+                result = _delete_custom_node(payload)
+                result["customNodes"] = _read_custom_nodes()
+            elif path == "/api/custom-nodes/import":
+                result = _import_custom_nodes(payload)
+                result["customNodes"] = _read_custom_nodes()
+            elif path == "/api/run":
                 signature = self._payload_signature(payload)
                 if self.__class__._ready_signature != signature:
                     self._send_json({

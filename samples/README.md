@@ -20,6 +20,7 @@ Image samples contain an embedded image. Video samples contain an embedded base 
 
 - `signals/06_function_generator_signal_view.json`: built-in Function Generator publishes a sine wave over `/sample6/function_signal` to Graph Viewer and a Topic Output boundary.
 - `image_video/02_video_motion_topic_graph.json`: embedded video-frame input, custom motion detection, image display, graph display, and Topic Output.
+- `deep_learning/13_mac_yolo_mps_detection_segmentation.json`: Video File Input into two Mac GPU YOLO custom nodes: object detection overlay and segmentation overlay.
 - `signals/07_function_generator_wave_suite.json`: four built-in Function Generator nodes for sine, step, chirp, and white-noise signals.
 
 ## Image And Video Processing
@@ -45,6 +46,10 @@ Image samples contain an embedded image. Video samples contain an embedded base 
 
 - `custom_runtime/10_multi_timer_counter_graph.json`: one custom node with two Timer callbacks. The fast timer publishes `/sample10/fast_count`, and the slow timer publishes `/sample10/slow_count`.
 - `custom_runtime/11_manual_subscriber_timer_sampler.json`: Function Generator publishes a square wave. A custom node has Subscriber callback disabled, reads the latest input from a Timer callback, and publishes raw and filtered signals.
+
+## Deep Learning
+
+- `deep_learning/13_mac_yolo_mps_detection_segmentation.json`: Video File Input publishes raw `sensor_msgs/msg/Image`, fans out to `mac_yolo_object_detection_overlay` and `mac_yolo_segmentation_overlay`, then displays both annotated images in Image View. The nodes use Ultralytics `yolov8n.pt` and `yolov8n-seg.pt`; on Apple Silicon they request PyTorch `mps` and fall back to CPU when MPS is unavailable. Select a local video in the Video File Input node before running. Inference is timer-driven and uses only the latest frame to avoid YOLO backlog.
 
 ## Regenerate
 

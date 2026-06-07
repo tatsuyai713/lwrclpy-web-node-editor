@@ -134,7 +134,8 @@ class LwrclpyWorkerNode:
     def _make_subscription_callback(self, input_port: dict[str, Any]):
         def callback(msg):
             value = self._message_to_value(msg)
-            self._store_input(input_port["id"], value)
+            queue_limit = self._input_queue_limit(input_port)
+            self._store_input(input_port["id"], value, queue_limit=queue_limit)
             if input_port.get("receiveMode", "callback") != "callback":
                 return
             outputs: dict[str, Any] = {}
@@ -264,11 +265,17 @@ class LwrclpyWorkerNode:
     def _locals(self, extra: dict[str, Any]) -> dict[str, Any]:
         return {"node": self.node, "params": self.node_config.get("params", {}), "state": self.state, "publish": self.publish, "log": self.log, **extra}
 
-    def _store_input(self, input_id: str, value: Any) -> None:
+    def _input_queue_limit(self, input_port: dict[str, Any]) -> int:
+        data_type = str(input_port.get("dataType") or "").replace(".", "/")
+        if input_port.get("receiveMode", "callback") != "callback" and data_type in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
+            return 1
+        return 100
+
+    def _store_input(self, input_id: str, value: Any, queue_limit: int = 100) -> None:
         self.last_inputs[input_id] = value
         queue = self.input_queues.setdefault(input_id, [])
         queue.append(value)
-        del queue[:-100]
+        del queue[:-max(1, queue_limit)]
 
     def _message_to_value(self, value: Any) -> Any:
         fields = getattr(value, "_fields_and_field_types", None)

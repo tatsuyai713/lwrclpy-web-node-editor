@@ -36,6 +36,8 @@ const state = {
   suppressHistory: false,
   projectFileHandle: null,
   projectFileName: 'lwrclpy_web_node_project.json',
+  customNodes: [],
+  activeView: 'editor',
   ready: false,
   readyInFlight: false,
   readySignature: '',
@@ -197,9 +199,12 @@ const INTERFACE_NODE_TEMPLATES = [
 async function init() {
   const data = await fetch('/api/message-types').then((res) => res.json());
   state.messageTypes = data.types || {};
+  await refreshCustomNodes();
   bindToolbar();
   bindCanvas();
   renderInterfaceNodeList();
+  renderCustomNodePalette();
+  renderCustomNodeManager();
   renderAll();
   resetHistory();
   setExecutionStatus('idle', 'Ready');
@@ -217,11 +222,21 @@ function bindToolbar() {
   $('save-project').onclick = () => saveProject(false);
   $('load-project').onchange = loadProject;
   $('export-ros2-package').onclick = exportRos2Package;
+  $('view-editor').onclick = () => setActiveView('editor');
+  $('view-custom-nodes').onclick = () => setActiveView('custom-nodes');
+  $('custom-node-import').onchange = importCustomNodeJson;
+  $('export-custom-nodes').onclick = exportCustomNodes;
+  $('refresh-custom-nodes').onclick = async () => {
+    await refreshCustomNodes();
+    renderCustomNodePalette();
+    renderCustomNodeManager();
+  };
   $('config-input-count').oninput = renderConfigPorts;
   $('config-output-count').oninput = renderConfigPorts;
   $('config-timer-count').oninput = renderConfigPorts;
   $('config-import-code').oninput = updateEnvironmentDraft;
   $('config-requirements').oninput = updateEnvironmentDraft;
+  $('export-node-config').onclick = exportNodeDialogDraft;
   $('node-form').addEventListener('submit', saveNodeDialog);
   $('code-form').addEventListener('submit', saveCodeDialog);
   $('signal-form').addEventListener('submit', saveSignalDialog);
@@ -237,6 +252,14 @@ function bindToolbar() {
       $(button.dataset.closeDialog).close();
     };
   });
+}
+
+function setActiveView(view) {
+  state.activeView = view;
+  $('editor-view').classList.toggle('hidden', view !== 'editor');
+  $('custom-node-view').classList.toggle('hidden', view !== 'custom-nodes');
+  $('view-editor').classList.toggle('active', view === 'editor');
+  $('view-custom-nodes').classList.toggle('active', view === 'custom-nodes');
 }
 
 function bindCanvas() {
@@ -267,13 +290,13 @@ function bindCanvas() {
     }
   });
   ws.addEventListener('drop', (ev) => {
-    const indexStr = ev.dataTransfer.getData('application/x-node-template');
-    if (!indexStr) return;
+    const templateRef = ev.dataTransfer.getData('application/x-node-template');
+    if (!templateRef) return;
     ev.preventDefault();
-    const template = INTERFACE_NODE_TEMPLATES[parseInt(indexStr, 10)];
+    const template = nodeTemplateFromRef(templateRef);
     if (!template) return;
     const pos = screenToWorld(ev.clientX, ev.clientY);
-    const node = createInterfaceNode(template, pos);
+    const node = createNodeFromTemplate(template, pos);
     state.nodes.push(node);
     state.selectedNode = node.id;
     state.selectedLink = null;
@@ -281,6 +304,17 @@ function bindCanvas() {
     renderAll();
     scheduleRun();
   });
+}
+
+function nodeTemplateFromRef(ref) {
+  if (/^\d+$/.test(ref)) return INTERFACE_NODE_TEMPLATES[parseInt(ref, 10)];
+  const [kind, id] = String(ref || '').split(':');
+  if (kind === 'builtin') return INTERFACE_NODE_TEMPLATES[Number(id)];
+  if (kind === 'custom') {
+    const item = state.customNodes.find((node) => node.id === id);
+    return item ? customNodeTemplate(item) : null;
+  }
+  return null;
 }
 
 function createDefaultNode(pos = centerWorld()) {
@@ -302,13 +336,18 @@ function createDefaultNode(pos = centerWorld()) {
 }
 
 function createInterfaceNode(template, pos = centerWorld()) {
+  return createNodeFromTemplate(template, pos);
+}
+
+function createNodeFromTemplate(template, pos = centerWorld()) {
   const node = structuredClone(template.node);
   node.id = `n${state.nextId++}`;
-  node.toolType = template.toolType;
+  if (template.toolType) node.toolType = template.toolType;
+  else delete node.toolType;
   node.x = Math.round(pos.x);
   node.y = Math.round(pos.y);
   node.params = node.params || {};
-  return node;
+  return normalizeImportedNode(node);
 }
 
 function renderInterfaceNodeList() {
@@ -320,11 +359,11 @@ function renderInterfaceNodeList() {
     button.textContent = template.label;
     button.draggable = true;
     button.addEventListener('dragstart', (ev) => {
-      ev.dataTransfer.setData('application/x-node-template', String(index));
+      ev.dataTransfer.setData('application/x-node-template', `builtin:${index}`);
       ev.dataTransfer.effectAllowed = 'copy';
     });
     button.onclick = () => {
-      const node = createInterfaceNode(template);
+      const node = createNodeFromTemplate(template);
       state.nodes.push(node);
       state.selectedNode = node.id;
       state.selectedLink = null;
@@ -335,12 +374,216 @@ function renderInterfaceNodeList() {
   });
 }
 
+function customNodeTemplate(item) {
+  return {
+    label: item.name || item.node?.name || item.id,
+    toolType: '',
+    node: item.node || {},
+  };
+}
+
+function renderCustomNodePalette() {
+  const list = $('custom-node-palette');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!state.customNodes.length) {
+    const empty = document.createElement('div');
+    empty.className = 'hint';
+    empty.textContent = 'No saved custom nodes.';
+    list.appendChild(empty);
+    return;
+  }
+  state.customNodes.forEach((item) => {
+    const button = document.createElement('button');
+    button.className = 'interface-node-item';
+    button.innerHTML = `<span>${escapeHtml(item.name || item.id)}</span><small>${escapeHtml(customNodeSummary(item.node || {}))}</small>`;
+    button.draggable = true;
+    button.addEventListener('dragstart', (ev) => {
+      ev.dataTransfer.setData('application/x-node-template', `custom:${item.id}`);
+      ev.dataTransfer.effectAllowed = 'copy';
+    });
+    button.onclick = () => {
+      const node = createNodeFromTemplate(customNodeTemplate(item));
+      state.nodes.push(node);
+      state.selectedNode = node.id;
+      state.selectedLink = null;
+      renderAll();
+      scheduleRun();
+    };
+    list.appendChild(button);
+  });
+}
+
+function customNodeSummary(node) {
+  const inputs = Array.isArray(node.inputs) ? node.inputs.length : 0;
+  const outputs = Array.isArray(node.outputs) ? node.outputs.length : 0;
+  const timers = normalizeTimers(node || {}).length;
+  return `${inputs} in / ${outputs} out${timers ? ` / ${timers} timer${timers === 1 ? '' : 's'}` : ''}`;
+}
+
+async function refreshCustomNodes() {
+  try {
+    const data = await fetch('/api/custom-nodes').then((res) => res.json());
+    state.customNodes = Array.isArray(data.customNodes) ? data.customNodes : [];
+  } catch (err) {
+    console.error(err);
+    state.customNodes = [];
+  }
+}
+
+async function postCustomNodeApi(path, payload) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error || `Request failed: ${response.status}`);
+  if (Array.isArray(data.customNodes)) state.customNodes = data.customNodes;
+  return data;
+}
+
+function customNodeStoragePayload(node, name = '') {
+  const stored = structuredClone(node);
+  delete stored.id;
+  delete stored.x;
+  delete stored.y;
+  delete stored.toolType;
+  return {
+    id: safeFileName(name || stored.name || 'custom_node'),
+    name: name || stored.name || 'custom_node',
+    description: '',
+    node: stored,
+  };
+}
+
+async function exportNodeDialogDraft() {
+  renderConfigPorts();
+  const draft = JSON.parse($('node-dialog').dataset.draft || JSON.stringify(createDefaultNode()));
+  if (draft.toolType) return;
+  const name = prompt('Custom node export name', draft.name || 'custom_node');
+  if (!name) return;
+  try {
+    await postCustomNodeApi('/api/custom-nodes/save', customNodeStoragePayload(draft, name.trim()));
+    renderCustomNodePalette();
+    renderCustomNodeManager();
+    setExecutionStatus('idle', `Exported custom node ${name.trim()}`);
+  } catch (err) {
+    setExecutionStatus('error', `Custom node export failed: ${err.message}`);
+  }
+}
+
+async function importCustomNodeJson(event) {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  try {
+    const payload = JSON.parse(await file.text());
+    const items = customNodeImportItems(payload);
+    if (!items.length) {
+      alert('No custom node definitions were found in this JSON.');
+      return;
+    }
+    await postCustomNodeApi('/api/custom-nodes/import', { items });
+    renderCustomNodePalette();
+    renderCustomNodeManager();
+    setExecutionStatus('idle', `Imported ${items.length} custom node${items.length === 1 ? '' : 's'}`);
+  } catch (err) {
+    setExecutionStatus('error', `Custom node import failed: ${err.message}`);
+  }
+}
+
+function customNodeImportItems(payload) {
+  if (Array.isArray(payload)) return payload.filter((item) => item && typeof item === 'object');
+  if (Array.isArray(payload.customNodes)) return payload.customNodes;
+  if (Array.isArray(payload.items)) return payload.items;
+  if (payload?.format === 'lwrclpy-web-node-editor-custom-node' && payload.node) return [payload];
+  if (payload?.node && !payload.node.toolType) return [payload];
+  if (Array.isArray(payload?.nodes)) {
+    return payload.nodes
+      .filter((node) => node && typeof node === 'object' && !node.toolType)
+      .map((node) => customNodeStoragePayload(normalizeImportedNode(node), node.name));
+  }
+  return [];
+}
+
+function exportCustomNodes() {
+  if (!state.customNodes.length) {
+    alert('No custom nodes to export.');
+    return;
+  }
+  downloadText('lwrclpy_custom_nodes.json', JSON.stringify({
+    format: 'lwrclpy-web-node-editor-custom-node-library',
+    version: 1,
+    customNodes: state.customNodes,
+  }, null, 2), 'application/json');
+}
+
+function renderCustomNodeManager() {
+  const list = $('custom-node-manager-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!state.customNodes.length) {
+    list.innerHTML = '<div class="hint">No custom nodes saved.</div>';
+    return;
+  }
+  state.customNodes.forEach((item) => {
+    const node = item.node || {};
+    const card = document.createElement('article');
+    card.className = 'custom-node-card';
+    const codePreview = [
+      node.importCode ? '# Import Code\n' + node.importCode : '',
+      node.loopCode ? '# Main Loop\n' + node.loopCode : '',
+      ...(node.inputs || []).filter((port) => port.callbackCode).map((port) => `# Callback: ${port.name}\n${port.callbackCode}`),
+      ...normalizeTimers(node).filter((timer) => timer.callbackCode).map((timer) => `# Timer: ${timer.name}\n${timer.callbackCode}`),
+    ].filter(Boolean).join('\n\n');
+    card.innerHTML = `
+      <header>
+        <div>
+          <h3>${escapeHtml(item.name || item.id)}</h3>
+          <small>${escapeHtml(customNodeSummary(node))}</small>
+          ${item.description ? `<span class="custom-node-meta">${escapeHtml(item.description)}</span>` : ''}
+        </div>
+      </header>
+      <pre>${escapeHtml(codePreview || '# No code configured')}</pre>
+      <div class="card-actions">
+        <button data-action="add">Add To Editor</button>
+        <button data-action="export">Export</button>
+        <button data-action="delete">Delete</button>
+      </div>`;
+    card.querySelector('[data-action="add"]').onclick = () => {
+      const created = createNodeFromTemplate(customNodeTemplate(item));
+      state.nodes.push(created);
+      state.selectedNode = created.id;
+      state.selectedLink = null;
+      setActiveView('editor');
+      renderAll();
+      scheduleRun();
+    };
+    card.querySelector('[data-action="export"]').onclick = () => {
+      downloadText(`${safeFileName(item.name || item.id)}.json`, JSON.stringify(item, null, 2), 'application/json');
+    };
+    card.querySelector('[data-action="delete"]').onclick = async () => {
+      if (!confirm(`Delete custom node "${item.name || item.id}"?`)) return;
+      try {
+        await postCustomNodeApi('/api/custom-nodes/delete', { id: item.id });
+        renderCustomNodePalette();
+        renderCustomNodeManager();
+      } catch (err) {
+        setExecutionStatus('error', `Custom node delete failed: ${err.message}`);
+      }
+    };
+    list.appendChild(card);
+  });
+}
+
 function openNodeDialog(node = null) {
   state.editingNode = node ? node.id : null;
   const draft = node ? structuredClone(node) : createDefaultNode();
   draft.timers = normalizeTimers(draft);
   $('node-dialog').dataset.draft = JSON.stringify(draft);
   $('node-dialog-title').textContent = node ? 'Edit lwrclpy Node' : 'Create lwrclpy Node';
+  $('export-node-config').style.display = draft.toolType ? 'none' : 'inline-flex';
   $('config-node-name').value = draft.name;
   $('config-input-count').value = draft.inputs.length;
   $('config-output-count').value = draft.outputs.length;

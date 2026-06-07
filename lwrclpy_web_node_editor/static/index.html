@@ -32,10 +32,15 @@
         <span>Export</span>
         <button id="export-ros2-package">Export ROS 2 Package</button>
       </section>
+      <section class="menu-group">
+        <span>View</span>
+        <button id="view-editor" class="active">Editor</button>
+        <button id="view-custom-nodes">Custom Nodes</button>
+      </section>
     </nav>
   </header>
 
-  <main>
+  <main id="editor-view">
     <aside>
       <h2>Nodes</h2>
       <div class="side-actions">
@@ -43,6 +48,8 @@
       </div>
       <h3>Built-in Nodes</h3>
       <div id="interface-node-list" class="interface-node-list"></div>
+      <h3>Custom Nodes</h3>
+      <div id="custom-node-palette" class="interface-node-list"></div>
       <h3>Workspace Nodes</h3>
       <div id="node-list"></div>
     </aside>
@@ -65,6 +72,21 @@
       <div id="inspector-content">Create or select a node.</div>
     </aside>
   </main>
+
+  <section id="custom-node-view" class="management-view hidden">
+    <div class="management-header">
+      <div>
+        <h2>Custom Nodes</h2>
+        <p class="hint">Saved custom lwrclpy node definitions are stored in the app settings folder and shown in the editor palette.</p>
+      </div>
+      <div class="management-actions">
+        <label class="file-button">Import JSON<input id="custom-node-import" type="file" accept="application/json"></label>
+        <button id="export-custom-nodes">Export All</button>
+        <button id="refresh-custom-nodes">Refresh</button>
+      </div>
+    </div>
+    <div id="custom-node-manager-list" class="custom-node-manager-list"></div>
+  </section>
 
   <dialog id="node-dialog">
     <form method="dialog" id="node-form">
@@ -117,6 +139,7 @@
       </div>
       <footer class="dialog-footer">
         <button type="button" data-close-dialog="node-dialog">Cancel</button>
+        <button id="export-node-config" type="button">Export Custom Node</button>
         <button id="save-node-config" type="submit">Save Node</button>
       </footer>
     </form>
