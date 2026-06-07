@@ -16,6 +16,7 @@ GUI_DISPLAY_HZ = 30.0
 PREVIEW_JPEG_QUALITY = 60
 PREVIEW_JPEG_SUBSAMPLING = 2
 PREVIEW_MAX_SIDE = 640
+RAW_PREVIEW_ENCODINGS = {"rgb8", "bgr8", "mono8", "8uc1"}
 EXTERNAL_FASTDDS_TRANSPORTS = "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=false"
 
 
@@ -138,7 +139,9 @@ class DdsTap:
         self.status_path = Path(config["statusPath"])
         self.frame_path = Path(config.get("framePath") or (str(self.status_path) + ".frame"))
         self.window_sec = max(0.5, float(config.get("windowSec") or 5.0))
-        self.display_hz = GUI_DISPLAY_HZ
+        self.display_hz = max(0.1, min(float(config.get("displayHz") or GUI_DISPLAY_HZ), 60.0))
+        self.preview_encoding = str(config.get("previewEncoding") or "raw").lower()
+        self.preview_max_side = max(0, int(config.get("previewMaxSide") or PREVIEW_MAX_SIDE))
         self.field_path = str(config.get("fieldPath") or "data")
         self.sample_limit = max(8, min(int(config.get("sampleLimit") or 10000), 100000))
         self.graph_window_sec = max(0.1, float(config.get("graphWindowSec") or 10.0))
@@ -325,8 +328,24 @@ class DdsTap:
         source_height = int(status.get("height") or 0)
         preview_width = source_width
         preview_height = source_height
-        if dds_encoding in {"rgb8", "bgr8", "mono8", "8uc1"}:
-            if source_width > 0 and source_height > 0:
+        if dds_encoding in RAW_PREVIEW_ENCODINGS:
+            if self.preview_encoding == "raw":
+                frame_encoding = dds_encoding
+                if source_width > 0 and source_height > 0 and self.preview_max_side > 0 and max(source_width, source_height) > self.preview_max_side:
+                    data, frame_encoding, preview_width, preview_height = _raw_preview_image_bytes(
+                        source_width,
+                        source_height,
+                        _rgb_preview_bytes(data, dds_encoding),
+                        self.preview_max_side,
+                    )
+            elif self.preview_encoding == "bmp" and source_width > 0 and source_height > 0:
+                data, frame_encoding, preview_width, preview_height = _bmp_preview_image_bytes(
+                    source_width,
+                    source_height,
+                    _rgb_preview_bytes(data, dds_encoding),
+                    self.preview_max_side,
+                )
+            elif source_width > 0 and source_height > 0:
                 data, frame_encoding, preview_width, preview_height = _preview_image_bytes(source_width, source_height, _rgb_preview_bytes(data, dds_encoding))
         dds_format = _dds_format_label(str(status.get("dataType") or self.data_type), dds_encoding)
         _write_bytes(self.frame_path, data)
@@ -541,6 +560,68 @@ def _preview_image_bytes(width: int, height: int, rgb: bytes) -> tuple[bytes, st
         return out.getvalue(), "jpeg", preview_width, preview_height
     except Exception:
         return _bmp_bytes(width, height, rgb), "bmp", width, height
+
+
+def _raw_preview_image_bytes(width: int, height: int, rgb: bytes, max_side: int) -> tuple[bytes, str, int, int]:
+    preview_width, preview_height = _scaled_preview_size(width, height, max_side)
+    if preview_width == width and preview_height == height:
+        return rgb, "rgb8", width, height
+    resized = _resize_rgb_bytes(width, height, rgb, preview_width, preview_height)
+    if resized is None:
+        return rgb, "rgb8", width, height
+    return resized, "rgb8", preview_width, preview_height
+
+
+def _bmp_preview_image_bytes(width: int, height: int, rgb: bytes, max_side: int) -> tuple[bytes, str, int, int]:
+    preview_width, preview_height = _scaled_preview_size(width, height, max_side)
+    if preview_width != width or preview_height != height:
+        resized = _resize_rgb_bytes(width, height, rgb, preview_width, preview_height)
+        if resized is not None:
+            rgb = resized
+        else:
+            preview_width, preview_height = width, height
+    return _bmp_bytes(preview_width, preview_height, rgb), "bmp", preview_width, preview_height
+
+
+def _resize_rgb_bytes(width: int, height: int, rgb: bytes, preview_width: int, preview_height: int) -> bytes | None:
+    try:
+        from PIL import Image
+
+        image = Image.frombytes("RGB", (width, height), rgb)
+        image = image.resize((preview_width, preview_height), Image.Resampling.BILINEAR)
+        return image.tobytes()
+    except Exception:
+        pass
+    try:
+        import cv2
+        import numpy as np
+
+        array = np.frombuffer(rgb, dtype=np.uint8).reshape((height, width, 3))
+        resized = cv2.resize(array, (preview_width, preview_height), interpolation=cv2.INTER_AREA)
+        return resized.tobytes()
+    except Exception:
+        pass
+    try:
+        source = memoryview(rgb)
+        output = bytearray(preview_width * preview_height * 3)
+        for y in range(preview_height):
+            src_y = min(height - 1, int(y * height / preview_height))
+            src_row = src_y * width * 3
+            dst_row = y * preview_width * 3
+            for x in range(preview_width):
+                src = src_row + min(width - 1, int(x * width / preview_width)) * 3
+                dst = dst_row + x * 3
+                output[dst:dst + 3] = source[src:src + 3]
+        return bytes(output)
+    except Exception:
+        return None
+
+
+def _scaled_preview_size(width: int, height: int, max_side: int) -> tuple[int, int]:
+    if max_side <= 0 or max(width, height) <= max_side:
+        return width, height
+    scale = max_side / max(width, height)
+    return max(1, int(round(width * scale))), max(1, int(round(height * scale)))
 
 
 def main() -> int:

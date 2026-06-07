@@ -287,9 +287,11 @@ class LwrclpyWorkerNode:
         if not fields:
             image_keys = ("height", "width", "encoding", "is_bigendian", "step", "data")
             if all(hasattr(value, key) for key in ("height", "width", "encoding", "data")):
-                return {key: self._plain_value(getattr(value, key, None)) for key in image_keys if hasattr(value, key)}
+                result = {key: self._plain_value(getattr(value, key, None)) for key in image_keys if hasattr(value, key)}
+                result["__lwrclpy_msg_ref"] = value
+                return result
             if hasattr(value, "data"):
-                return {"data": self._plain_value(getattr(value, "data"))}
+                return {"data": self._plain_value(getattr(value, "data")), "__lwrclpy_msg_ref": value}
             return value
         result: dict[str, Any] = {}
         for key in fields:
@@ -309,6 +311,10 @@ class LwrclpyWorkerNode:
                 pass
         if isinstance(value, (bytes, bytearray, memoryview)):
             return bytes(value)
+        if hasattr(value, "get_buffer"):
+            return value
+        if value.__class__.__name__.endswith("_vector"):
+            return value
         if hasattr(value, "tolist"):
             try:
                 return value.tolist()

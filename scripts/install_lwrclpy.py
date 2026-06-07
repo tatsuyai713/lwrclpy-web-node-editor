@@ -36,17 +36,30 @@ def main() -> int:
         return 1
     asset = prefer_platform(candidates)
     print(f"Installing {asset['name']} from latest")
-    install_target(asset["url"])
+    install_target(asset["url"], force_reinstall=True, no_cache=True)
     return 0
 
 
-def install_target(target: str) -> None:
+def install_target(target: str, force_reinstall: bool = False, no_cache: bool = False) -> None:
     uv = shutil.which("uv")
     if uv:
-        subprocess.check_call([uv, "pip", "install", "--upgrade", "--python", sys.executable, target])
+        command = [uv, "pip", "install", "--upgrade", "--python", sys.executable]
+        if force_reinstall:
+            command.append("--force-reinstall")
+        if no_cache:
+            command.append("--no-cache")
+        subprocess.check_call([*command, target])
     else:
-        subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", target])
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "--version"])
+        except subprocess.CalledProcessError:
+            subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
+        command = [sys.executable, "-m", "pip", "install", "--upgrade"]
+        if force_reinstall:
+            command.append("--force-reinstall")
+        if no_cache:
+            command.append("--no-cache-dir")
+        subprocess.check_call([*command, target])
 
 
 def fetch_latest_tag_assets() -> list[dict[str, str]]:

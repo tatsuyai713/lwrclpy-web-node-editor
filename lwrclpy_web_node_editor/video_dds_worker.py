@@ -111,13 +111,14 @@ def _write_status(path: Path, **values: Any) -> None:
 
 
 class PreviewFrameWriter:
-    def __init__(self, frame_path: Path, status_path: Path, width: int, height: int, source_encoding: str, preview_encoding: str = "jpeg") -> None:
+    def __init__(self, frame_path: Path, status_path: Path, width: int, height: int, source_encoding: str, preview_encoding: str = "jpeg", preview_max_side: int = 640) -> None:
         self.frame_path = frame_path
         self.status_path = status_path
         self.width = width
         self.height = height
         self.source_encoding = source_encoding
         self.preview_encoding = preview_encoding
+        self.preview_max_side = max(0, int(preview_max_side or 0))
         self._condition = threading.Condition()
         self._item: tuple[int, bytes, dict[str, Any]] | None = None
         self._latest_status: dict[str, Any] = {}
@@ -153,14 +154,16 @@ class PreviewFrameWriter:
                 continue
             seq, frame, status_values = item
             try:
-                data = self._preview_payload(frame)
+                data, frame_encoding, preview_width, preview_height = self._preview_payload(frame)
                 tmp_frame_path = self.frame_path.with_name(f"{self.frame_path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
                 tmp_frame_path.write_bytes(data)
                 tmp_frame_path.replace(self.frame_path)
                 frame_status = {
                     "frameSeq": seq,
                     "framePath": str(self.frame_path),
-                    "frameEncoding": self.preview_encoding if self.source_encoding != "jpeg" else "jpeg",
+                    "frameEncoding": frame_encoding,
+                    "previewWidth": preview_width,
+                    "previewHeight": preview_height,
                 }
                 with self._condition:
                     self._latest_status = frame_status
@@ -172,20 +175,70 @@ class PreviewFrameWriter:
             except Exception:
                 pass
 
-    def _preview_payload(self, frame: bytes) -> bytes:
+    def _preview_payload(self, frame: bytes) -> tuple[bytes, str, int, int]:
         if self.source_encoding == "jpeg":
-            return frame
+            return frame, "jpeg", self.width, self.height
+        if self.preview_encoding == "raw":
+            preview_width, preview_height = _scaled_size(self.width, self.height, self.preview_max_side)
+            if preview_width == self.width and preview_height == self.height:
+                return frame, "rgb8", self.width, self.height
+            resized = _resize_rgb_bytes(self.width, self.height, frame, preview_width, preview_height)
+            if resized is None:
+                return frame, "rgb8", self.width, self.height
+            return resized, "rgb8", preview_width, preview_height
         if self.preview_encoding == "jpeg":
             try:
                 from PIL import Image
 
                 image = Image.frombytes("RGB", (self.width, self.height), frame)
+                preview_width, preview_height = _scaled_size(self.width, self.height, self.preview_max_side)
+                if preview_width != self.width or preview_height != self.height:
+                    image = image.resize((preview_width, preview_height), Image.Resampling.BILINEAR)
                 out = io.BytesIO()
                 image.save(out, format="JPEG", quality=75, subsampling=1)
-                return out.getvalue()
+                return out.getvalue(), "jpeg", preview_width, preview_height
             except Exception:
                 pass
-        return _bmp_bytes(self.width, self.height, frame)
+        preview_width, preview_height = _scaled_size(self.width, self.height, self.preview_max_side)
+        if preview_width != self.width or preview_height != self.height:
+            resized = _resize_rgb_bytes(self.width, self.height, frame, preview_width, preview_height)
+            if resized is not None:
+                return _bmp_bytes(preview_width, preview_height, resized), "bmp", preview_width, preview_height
+        return _bmp_bytes(self.width, self.height, frame), "bmp", self.width, self.height
+
+
+def _resize_rgb_bytes(width: int, height: int, rgb: bytes, preview_width: int, preview_height: int) -> bytes | None:
+    try:
+        from PIL import Image
+
+        image = Image.frombytes("RGB", (width, height), rgb)
+        image = image.resize((preview_width, preview_height), Image.Resampling.BILINEAR)
+        return image.tobytes()
+    except Exception:
+        pass
+    try:
+        import cv2
+        import numpy as np
+
+        array = np.frombuffer(rgb, dtype=np.uint8).reshape((height, width, 3))
+        resized = cv2.resize(array, (preview_width, preview_height), interpolation=cv2.INTER_AREA)
+        return resized.tobytes()
+    except Exception:
+        pass
+    try:
+        source = memoryview(rgb)
+        output = bytearray(preview_width * preview_height * 3)
+        for y in range(preview_height):
+            src_y = min(height - 1, int(y * height / preview_height))
+            src_row = src_y * width * 3
+            dst_row = y * preview_width * 3
+            for x in range(preview_width):
+                src = src_row + min(width - 1, int(x * width / preview_width)) * 3
+                dst = dst_row + x * 3
+                output[dst:dst + 3] = source[src:src + 3]
+        return bytes(output)
+    except Exception:
+        return None
 
 
 def _bmp_bytes(width: int, height: int, rgb: bytes) -> bytes:
@@ -316,8 +369,9 @@ def main() -> int:
         frame_skip = 0
     preview_hz = GUI_DISPLAY_HZ
     preview_encoding = str(config.get("previewEncoding") or "jpeg").lower()
-    if preview_encoding not in {"jpeg", "bmp"}:
+    if preview_encoding not in {"jpeg", "bmp", "raw"}:
         preview_encoding = "jpeg"
+    preview_max_side = max(0, int(config.get("previewMaxSide") or 640))
     status_path = Path(config.get("statusPath") or (str(config_path) + ".status"))
     frame_path = Path(config.get("framePath") or (str(config_path) + ".frame"))
 
@@ -355,7 +409,7 @@ def main() -> int:
     next_preview_at = 0.0
     next_status_at = 0.0
     frame_encoding = "jpeg" if output_encoding == "jpeg" else preview_encoding
-    preview_writer = PreviewFrameWriter(frame_path, status_path, width, height, output_encoding, frame_encoding) if preview_hz > 0 else None
+    preview_writer = PreviewFrameWriter(frame_path, status_path, width, height, output_encoding, frame_encoding, preview_max_side) if preview_hz > 0 else None
     _write_status(
         status_path,
         running=True,

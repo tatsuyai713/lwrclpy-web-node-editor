@@ -234,8 +234,6 @@ function bindToolbar() {
   $('config-input-count').oninput = renderConfigPorts;
   $('config-output-count').oninput = renderConfigPorts;
   $('config-timer-count').oninput = renderConfigPorts;
-  $('config-import-code').oninput = updateEnvironmentDraft;
-  $('config-requirements').oninput = updateEnvironmentDraft;
   $('export-node-config').onclick = exportNodeDialogDraft;
   $('node-form').addEventListener('submit', saveNodeDialog);
   $('code-form').addEventListener('submit', saveCodeDialog);
@@ -588,8 +586,6 @@ function openNodeDialog(node = null) {
   $('config-input-count').value = draft.inputs.length;
   $('config-output-count').value = draft.outputs.length;
   $('config-timer-count').value = draft.timers.length;
-  $('config-import-code').value = draft.importCode || DEFAULT_IMPORT_CODE;
-  $('config-requirements').value = draft.requirements || '';
   renderConfigPorts();
   $('node-dialog').showModal();
 }
@@ -604,19 +600,10 @@ function renderConfigPorts() {
   draft.timerEnabled = draft.timers.length > 0;
   draft.timerPeriodSec = draft.timers[0]?.periodSec || 1.0;
   draft.timerCode = draft.timers[0]?.callbackCode || DEFAULT_TIMER_CODE;
-  draft.importCode = $('config-import-code').value || '';
-  draft.requirements = $('config-requirements').value || '';
   dialog.dataset.draft = JSON.stringify(draft);
   renderPortConfigList('input-configs', draft.inputs, 'Input');
   renderPortConfigList('output-configs', draft.outputs, 'Output');
   renderTimerConfigList(draft.timers);
-}
-
-function updateEnvironmentDraft() {
-  const draft = JSON.parse($('node-dialog').dataset.draft || JSON.stringify(createDefaultNode()));
-  draft.importCode = $('config-import-code').value || '';
-  draft.requirements = $('config-requirements').value || '';
-  $('node-dialog').dataset.draft = JSON.stringify(draft);
 }
 
 function normalizeTimers(node) {
@@ -2277,6 +2264,21 @@ function shouldDrawResponseFrame(canvas, nodeId, responseSeq) {
 }
 
 async function blobToBitmapLike(blob) {
+  if (typeof createImageBitmap === 'function') {
+    let timeout = null;
+    try {
+      const timeoutPromise = new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('Frame image decode timed out')), FRAME_DECODE_TIMEOUT_MS);
+      });
+      return await Promise.race([createImageBitmap(blob), timeoutPromise]);
+    } catch (err) {
+      if (!/timed out/.test(String(err?.message || ''))) {
+        console.warn('createImageBitmap failed, falling back to Image decode', err);
+      }
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
   const url = URL.createObjectURL(blob);
   const img = new Image();
   let timeout = null;
@@ -2361,6 +2363,7 @@ async function drawFrameRefToCanvas(canvas, frameRef) {
     if (!shouldDrawResponseFrame(canvas, frameRef.nodeId, drawnSeq)) return;
     const width = Math.max(1, Number(response.headers.get('x-frame-width') || frameRef.width));
     const height = Math.max(1, Number(response.headers.get('x-frame-height') || frameRef.height));
+    const encoding = String(response.headers.get('x-frame-encoding') || frameRef.encoding || 'rgb8').toLowerCase();
     if (!width || !height) return;
     const required = width * height * 4;
     if (!canvas._rgbaBuffer || canvas._rgbaBuffer.length !== required) {
@@ -2369,13 +2372,25 @@ async function drawFrameRefToCanvas(canvas, frameRef) {
     }
     const rgba = canvas._rgbaBuffer;
     const pixelCount = width * height;
-    for (let i = 0; i < pixelCount; i += 1) {
-      const src = i * 3;
-      const dst = i * 4;
-      rgba[dst] = bytes[src] || 0;
-      rgba[dst + 1] = bytes[src + 1] || 0;
-      rgba[dst + 2] = bytes[src + 2] || 0;
-      rgba[dst + 3] = 255;
+    if (encoding === 'mono8' || encoding === '8uc1') {
+      for (let i = 0; i < pixelCount; i += 1) {
+        const v = bytes[i] || 0;
+        const dst = i * 4;
+        rgba[dst] = v;
+        rgba[dst + 1] = v;
+        rgba[dst + 2] = v;
+        rgba[dst + 3] = 255;
+      }
+    } else {
+      const bgr = encoding === 'bgr8';
+      for (let i = 0; i < pixelCount; i += 1) {
+        const src = i * 3;
+        const dst = i * 4;
+        rgba[dst] = bytes[src + (bgr ? 2 : 0)] || 0;
+        rgba[dst + 1] = bytes[src + 1] || 0;
+        rgba[dst + 2] = bytes[src + (bgr ? 0 : 2)] || 0;
+        rgba[dst + 3] = 255;
+      }
     }
     if (canvas.width !== width || canvas.height !== height) {
       canvas.width = width;
@@ -3000,6 +3015,40 @@ function forceStopRun() {
   stopWorkers(true);
 }
 
+async function resetGraphRuntimeState({ stopServer = false } = {}) {
+  if (state.autoTimer) {
+    clearTimeout(state.autoTimer);
+    state.autoTimer = null;
+  }
+  if (state.videoTimer) {
+    clearInterval(state.videoTimer);
+    state.videoTimer = null;
+  }
+  if (state.runStopTimer) {
+    clearTimeout(state.runStopTimer);
+    state.runStopTimer = null;
+  }
+  stopAllFramePullLoops();
+  stopAllVideoInputs();
+  state.nodeViews = {};
+  state.videoInputs = {};
+  state.embeddedVideoInputs = {};
+  state.videoDirtyNodes.clear();
+  state.videoPayloadDirty = false;
+  state.runPayloadUpdateInFlight = false;
+  state.tickCount = 0;
+  state.selectedNode = null;
+  state.selectedLink = null;
+  state.editingNode = null;
+  state.editingCode = null;
+  state.ready = false;
+  state.readySignature = '';
+  state.readyInFlight = false;
+  $('run-model')?.classList.remove('active');
+  $('ready-model')?.classList.remove('active');
+  if (stopServer) await stopWorkers(true);
+}
+
 function runForDuration() {
   const seconds = Math.max(0.1, Number($('run-duration').value || 5));
   if (state.runStopTimer) {
@@ -3009,9 +3058,9 @@ function runForDuration() {
   startServerRun(seconds);
 }
 
-function clearGraph() {
+async function clearGraph() {
   invalidateReady();
-  stopAllVideoInputs();
+  await resetGraphRuntimeState({ stopServer: true });
   state.nodes = [];
   state.links = [];
   state.selectedNode = null;
@@ -3163,7 +3212,7 @@ async function loadProject(event) {
   const file = event.target.files[0];
   event.target.value = '';
   if (!file) return;
-  stopAllVideoInputs();
+  await resetGraphRuntimeState({ stopServer: true });
   const imported = JSON.parse(await file.text());
   state.suppressHistory = true;
   state.nodes = (imported.nodes || []).map(normalizeImportedNode);

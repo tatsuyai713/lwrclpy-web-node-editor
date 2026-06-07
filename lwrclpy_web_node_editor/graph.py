@@ -26,15 +26,26 @@ def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
         package = module_info.name
         if not (package.endswith("_msgs") or package.endswith("_srvs")):
             continue
+        spec = importlib.util.find_spec(package)
+        search_locations = list(spec.submodule_search_locations or []) if spec else []
+        if not search_locations:
+            continue
+        package_dir = Path(search_locations[0])
         for kind in ("msg", "srv"):
-            try:
-                module = importlib.import_module(f"{package}.{kind}")
-            except Exception:
+            kind_dir = package_dir / kind
+            if not kind_dir.is_dir():
                 continue
-            names = sorted(
-                name for name in dir(module)
-                if name[:1].isupper() and not name.endswith(("_Request", "_Response"))
-            )
+            if kind == "msg":
+                names = sorted(
+                    path.stem for path in kind_dir.glob("*.py")
+                    if path.stem[:1].isupper() and not path.stem.endswith("_Wrapper")
+                )
+            else:
+                names = sorted({
+                    path.stem.removesuffix("_Request").removesuffix("_Response")
+                    for path in kind_dir.glob("*.py")
+                    if path.stem[:1].isupper() and path.stem.endswith(("_Request", "_Response"))
+                })
             if names:
                 result.setdefault(package, {})[kind] = names
     return dict(sorted(result.items()))
@@ -42,6 +53,7 @@ def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
 
 LWRCLPY_TYPE_TREE = discover_lwrclpy_types()
 GUI_DISPLAY_HZ = 30.0
+LWRCLPY_INSTALL_MARKER = "github-latest-wheel"
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -264,7 +276,7 @@ class CustomLwrclNodeInstance:
         self._builtin_stop = threading.Event()
         self.env_signature = None
         self.signature = None
-        self._setup_transport()
+        self.signature = self._signature(config)
 
     def update_config(self, config: CustomLwrclNodeConfig) -> None:
         if self._signature(config) != self.signature:
@@ -272,7 +284,7 @@ class CustomLwrclNodeInstance:
             self.config = config
             self._exec_globals = None
             self._import_signature = ""
-            self._setup_transport()
+            self.signature = self._signature(config)
         else:
             self.config = config
 
@@ -746,6 +758,7 @@ class CustomLwrclNodeInstance:
             float(self.config.params.get("xAxisSeconds") or 10.0),
             int(self.config.params.get("sampleLimit") or 10000),
             bool(self.config.params.get("_externalDdsCompatible")),
+            "preview:bmp:max640" if self.config.tool_type == "image_view" else "preview:jpeg",
         )
 
     def _dds_tap_worker_config(self, status_path: Path, frame_path: Path) -> dict[str, Any]:
@@ -767,6 +780,8 @@ class CustomLwrclNodeInstance:
             "statusPath": str(status_path),
             "framePath": str(frame_path),
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
+            "previewEncoding": "bmp" if self.config.tool_type == "image_view" else "jpeg",
+            "previewMaxSide": 640,
         }
 
     def _dds_tap_mode(self) -> str:
@@ -879,7 +894,7 @@ class CustomLwrclNodeInstance:
             int(self.config.params.get("maxSide") or 0),
             self._video_frame_skip(),
             bool(self.config.params.get("_externalDdsCompatible")),
-            "preview:jpeg",
+            "preview:bmp:max640",
             tuple((p.id, p.data_type, p.topics) for p in self.config.outputs),
         )
 
@@ -902,7 +917,8 @@ class CustomLwrclNodeInstance:
             "enableDdsPublish": True,
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
             "previewHz": GUI_DISPLAY_HZ,
-            "previewEncoding": "jpeg",
+            "previewEncoding": "bmp",
+            "previewMaxSide": 640,
             "outputEncoding": "jpeg" if normalize_type(output.data_type) == "sensor_msgs/msg/CompressedImage" else "raw",
         }
 
@@ -935,19 +951,31 @@ class CustomLwrclNodeInstance:
         seq = int(data.get("frameSeq") or 0) if isinstance(data, dict) else 0
         width = int(data.get("width") or 0) if isinstance(data, dict) else 0
         height = int(data.get("height") or 0) if isinstance(data, dict) else 0
+        preview_width = int(data.get("previewWidth") or width) if isinstance(data, dict) else 0
+        preview_height = int(data.get("previewHeight") or height) if isinstance(data, dict) else 0
         encoding = str(data.get("frameEncoding") or data.get("encoding") or "jpeg").lower() if isinstance(data, dict) else "jpeg"
         if seq > 0 and frame_path.is_file():
             self.state["image_view_frame"] = {
                 "seq": seq,
-                "width": width,
-                "height": height,
-                "encoding": encoding if encoding in {"jpeg", "jpg", "bmp", "png", "webp"} else "jpeg",
+                "width": preview_width,
+                "height": preview_height,
+                "sourceWidth": width,
+                "sourceHeight": height,
+                "encoding": encoding,
                 "path": str(frame_path),
                 "updatedAt": time.time(),
             }
             self.view = {
                 "kind": "image",
-                "frameRef": {"nodeId": self.config.id, "seq": seq, "width": width, "height": height, "encoding": self.state["image_view_frame"]["encoding"]},
+                "frameRef": {
+                    "nodeId": self.config.id,
+                    "seq": seq,
+                    "width": preview_width,
+                    "height": preview_height,
+                    "sourceWidth": width,
+                    "sourceHeight": height,
+                    "encoding": self.state["image_view_frame"]["encoding"],
+                },
                 "status": status,
             }
             return
@@ -1127,7 +1155,7 @@ class CustomLwrclNodeInstance:
             "height": preview_height,
             "sourceWidth": width,
             "sourceHeight": height,
-            "encoding": frame_encoding if frame_encoding in {"jpeg", "jpg", "bmp", "png", "webp"} else "rgb8",
+            "encoding": frame_encoding,
             "path": str(frame_path),
             "updatedAt": time.time(),
         }
@@ -1268,6 +1296,8 @@ class CustomLwrclNodeInstance:
         frame_path = Path(str(status.get("framePath") or ""))
         width = int(status.get("width") or 0)
         height = int(status.get("height") or 0)
+        preview_width = int(status.get("previewWidth") or width)
+        preview_height = int(status.get("previewHeight") or height)
         frame_encoding = str(status.get("frameEncoding") or status.get("encoding") or "jpeg").lower()
         if width <= 0 or height <= 0 or not frame_path.exists():
             return None
@@ -1286,9 +1316,11 @@ class CustomLwrclNodeInstance:
             self.state["video_file_current_time"] = status_seq / max(0.01, float(self.config.params.get("publishHz") or 30.0))
         self.state["image_view_frame"] = {
             "seq": seq,
-            "width": width,
-            "height": height,
-            "encoding": frame_encoding if frame_encoding in {"jpeg", "jpg", "bmp", "png", "webp"} else "jpeg",
+            "width": preview_width,
+            "height": preview_height,
+            "sourceWidth": width,
+            "sourceHeight": height,
+            "encoding": frame_encoding,
             "path": str(frame_path),
             "updatedAt": time.time(),
         }
@@ -1296,8 +1328,10 @@ class CustomLwrclNodeInstance:
             "frameRef": {
                 "nodeId": self.config.id,
                 "seq": seq,
-                "width": width,
-                "height": height,
+                "width": preview_width,
+                "height": preview_height,
+                "sourceWidth": width,
+                "sourceHeight": height,
                 "encoding": self.state["image_view_frame"]["encoding"],
             }
         }
@@ -2248,9 +2282,10 @@ class GraphRuntime:
             instance.env_path = env_root
             instance.env_python_bin = python_bin
             instance.env_site_packages = self._site_packages_for(env_root)
-            if not lwrclpy_marker.exists() and not self._ensure_lwrclpy_in_env(python_bin, instance):
+            current_lwrclpy_marker = lwrclpy_marker.read_text(encoding="utf-8").strip() if lwrclpy_marker.exists() else ""
+            if current_lwrclpy_marker != LWRCLPY_INSTALL_MARKER and not self._ensure_lwrclpy_in_env(python_bin, instance):
                 return False
-            lwrclpy_marker.write_text(str(time.time()), encoding="utf-8")
+            lwrclpy_marker.write_text(LWRCLPY_INSTALL_MARKER, encoding="utf-8")
             instance.env_signature = desired_env_signature
             instance.env_status = "ready (built-in venv)" if config.tool_type else "ready"
             return True
@@ -2490,8 +2525,24 @@ class GraphRuntime:
             for port in node.outputs:
                 port.topic = ""
                 port.topics = tuple(sorted(output_topics.get((node.id, port.id), set())))
+        if external_topics:
+            topics_by_node = {
+                node.id: {topic for port in [*node.inputs, *node.outputs] for topic in port.topics}
+                for node in nodes
+            }
+            changed = True
+            while changed:
+                changed = False
+                for node_topics in topics_by_node.values():
+                    if not node_topics.intersection(external_topics):
+                        continue
+                    before = len(external_topics)
+                    external_topics.update(node_topics)
+                    if len(external_topics) != before:
+                        changed = True
+        for node in nodes:
             node_topics = {topic for port in [*node.inputs, *node.outputs] for topic in port.topics}
-            if external_topics and node_topics.intersection(external_topics):
+            if node_topics.intersection(external_topics):
                 node.params["_externalDdsCompatible"] = True
 
     def _apply_builtin_param_topics(self, nodes: list[CustomLwrclNodeConfig]) -> None:

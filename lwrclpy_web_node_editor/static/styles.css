@@ -541,14 +541,10 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .dialog-footer { border-top: 1px solid #30363d; border-bottom: none; justify-content: flex-end; gap: 8px; }
 .dialog-body { padding: 12px; overflow: auto; max-height: calc(100vh - 180px); }
 .icon-button { width: 30px; padding: 0; }
-.count-grid, .port-configs, .timer-config, .environment-config {
+.count-grid, .port-configs, .timer-config {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-}
-.environment-config textarea {
-  min-height: 120px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 .checkbox-field {
   display: flex;
