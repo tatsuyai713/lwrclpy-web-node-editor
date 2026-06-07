@@ -1,5 +1,9 @@
 const UI_DISPLAY_FPS = 30;
 const UI_DISPLAY_FRAME_MS = 1000 / UI_DISPLAY_FPS;
+const VIDEO_RAW_IMAGE_TYPE = 'sensor_msgs/msg/Image';
+const VIDEO_COMPRESSED_IMAGE_TYPE = 'sensor_msgs/msg/CompressedImage';
+const FRAME_FETCH_TIMEOUT_MS = 1200;
+const FRAME_DECODE_TIMEOUT_MS = 1200;
 
 const state = {
   messageTypes: {},
@@ -108,8 +112,8 @@ const INTERFACE_NODE_TEMPLATES = [
     node: {
       name: 'video_file_input',
       inputs: [],
-      outputs: [{ id: 'out1', name: 'frame', dataType: 'sensor_msgs/msg/Image' }],
-      params: { loop: false, publishHz: 30, detectedFps: 0, maxSide: 0 },
+      outputs: [{ id: 'out1', name: 'frame', dataType: VIDEO_RAW_IMAGE_TYPE }],
+      params: { loop: false, publishHz: 30, detectedFps: 0, maxSide: 0, frameSkip: 0 },
       loopCode: '',
     },
   },
@@ -911,7 +915,39 @@ function inspectorHint(node) {
 
 function effectiveVideoHz(node) {
   const p = node.params || {};
-  return Math.max(0.01, Number(p.detectedFps || p.nativeFps || p.sourceFps || p.publishHz || 30));
+  const baseHz = Math.max(0.01, Number(p.detectedFps || p.nativeFps || p.sourceFps || p.publishHz || 30));
+  return Math.max(0.01, baseHz / (videoFrameSkip(node) + 1));
+}
+
+function videoFrameSkip(node) {
+  return Math.max(0, Math.floor(Number(node?.params?.frameSkip || 0)));
+}
+
+function videoOutputType(node) {
+  const outputType = node?.outputs?.[0]?.dataType || node?.params?.outputType || VIDEO_RAW_IMAGE_TYPE;
+  return outputType === VIDEO_COMPRESSED_IMAGE_TYPE ? VIDEO_COMPRESSED_IMAGE_TYPE : VIDEO_RAW_IMAGE_TYPE;
+}
+
+function isVideoImageType(dataType) {
+  return [VIDEO_RAW_IMAGE_TYPE, VIDEO_COMPRESSED_IMAGE_TYPE].includes(String(dataType || ''));
+}
+
+function acceptsVideoImageType(node) {
+  return ['image_view', 'image_file_save', 'topic_hz_monitor'].includes(node?.toolType);
+}
+
+function applyVideoOutputType(node, outputType) {
+  const normalized = outputType === VIDEO_COMPRESSED_IMAGE_TYPE ? VIDEO_COMPRESSED_IMAGE_TYPE : VIDEO_RAW_IMAGE_TYPE;
+  if (!node.outputs?.length) return;
+  node.outputs[0].dataType = normalized;
+  node.params = { ...(node.params || {}), outputType: normalized };
+  state.links.forEach((link) => {
+    if (link.fromNode !== node.id || link.fromPort !== node.outputs[0].id) return;
+    const dst = nodeFor(link.toNode);
+    if (!acceptsVideoImageType(dst)) return;
+    const input = dst.inputs?.find((port) => port.id === link.toPort);
+    if (input && isVideoImageType(input.dataType)) input.dataType = normalized;
+  });
 }
 
 function timerActionButtons(node) {
@@ -933,11 +969,15 @@ function toolActionHtml(node) {
     const loopChecked = node.params?.loop ? 'checked' : '';
     const videoPath = node.params?.videoPath || '';
     const detectedFps = Number(node.params?.detectedFps || 0);
+    const frameSkip = videoFrameSkip(node);
+    const outputType = videoOutputType(node);
     const fpsLabel = detectedFps > 0 ? detectedFps.toFixed(2) + ' fps' : 'auto (30 fps)';
     return `<div class="node-actions tool-actions">
       <label class="tool-field tool-field-wide"><span>Path</span><input data-tool-video-path type="text" value="${escapeAttr(videoPath)}" placeholder="No video selected" readonly tabindex="-1"></label>
       <button data-action="select-video-file">Select Video</button>
       <label class="tool-field"><span>FPS</span><span class="tool-value-display">${escapeHtml(fpsLabel)}</span></label>
+      <label class="tool-field"><span>Output</span><select data-tool-video-output-type><option value="${VIDEO_RAW_IMAGE_TYPE}" ${outputType === VIDEO_RAW_IMAGE_TYPE ? 'selected' : ''}>Raw Image</option><option value="${VIDEO_COMPRESSED_IMAGE_TYPE}" ${outputType === VIDEO_COMPRESSED_IMAGE_TYPE ? 'selected' : ''}>Compressed JPEG</option></select></label>
+      <label class="tool-field"><span>Skip</span><input data-tool-video-frame-skip type="number" min="0" step="1" value="${escapeAttr(frameSkip)}"></label>
       <label class="tool-check"><input data-tool-video-loop type="checkbox" ${loopChecked}> Loop</label>
     </div>`;
   }
@@ -1025,6 +1065,8 @@ function bindToolActions(el, node) {
       sourceWidth: Number(metadata.width || 0) || undefined,
       sourceHeight: Number(metadata.height || 0) || undefined,
       maxSide: 0,
+      frameSkip: videoFrameSkip(node),
+      outputType: videoOutputType(node),
       embeddedVideo: false,
     };
     state.videoPayloadDirty = true;
@@ -1052,6 +1094,34 @@ function bindToolActions(el, node) {
         controller.loop = ev.target.checked;
         controller.video.loop = false;
       }
+      if (node.params?.serverDecode && node.params?.videoPath) {
+        state.videoPayloadDirty = true;
+        state.videoDirtyNodes.add(node.id);
+        pushRunPayloadUpdate();
+      }
+      renderAll();
+    };
+  }
+  const videoOutputTypeInput = el.querySelector('[data-tool-video-output-type]');
+  if (videoOutputTypeInput) {
+    videoOutputTypeInput.onchange = (ev) => {
+      applyVideoOutputType(node, ev.target.value);
+      if (node.params?.serverDecode && node.params?.videoPath) {
+        state.videoPayloadDirty = true;
+        state.videoDirtyNodes.add(node.id);
+        pushRunPayloadUpdate();
+      }
+      renderAll();
+      scheduleRun();
+    };
+  }
+  const videoFrameSkipInput = el.querySelector('[data-tool-video-frame-skip]');
+  if (videoFrameSkipInput) {
+    videoFrameSkipInput.onchange = (ev) => {
+      const frameSkip = Math.max(0, Math.floor(Number(ev.target.value || 0)));
+      node.params = { ...(node.params || {}), frameSkip };
+      const controller = state.videoInputs[node.id];
+      if (controller) controller.nextCaptureAt = 0;
       if (node.params?.serverDecode && node.params?.videoPath) {
         state.videoPayloadDirty = true;
         state.videoDirtyNodes.add(node.id);
@@ -1456,6 +1526,8 @@ function nodeForRunPayload(node) {
   if (params.serverDecode && params.videoPath) {
     delete params.frameMessage;
     params.maxSide = 0;
+    params.frameSkip = videoFrameSkip(node);
+    params.outputType = videoOutputType(node);
   }
   return { ...node, params };
 }
@@ -1610,6 +1682,8 @@ function videoRuntimeParams(node) {
       loop: Boolean(p.loop),
       publishHz: effectiveVideoHz(node),
       maxSide: 0,
+      frameSkip: videoFrameSkip(node),
+      outputType: videoOutputType(node),
     };
   }
   return {
@@ -1617,6 +1691,8 @@ function videoRuntimeParams(node) {
     frameMessage: p.frameMessage,
     loop: Boolean(p.loop),
     publishHz: effectiveVideoHz(node),
+    frameSkip: videoFrameSkip(node),
+    outputType: videoOutputType(node),
     duration: Number(p.duration || 0),
     currentTime: Number(p.currentTime || 0),
     ended: Boolean(p.ended),
@@ -1660,13 +1736,17 @@ function runHasStartingNodes(nodes) {
   return Object.values(nodes || {}).some((payload) => {
     const env = String(payload?.meta?.environment || '').toLowerCase();
     const status = String(payload?.view?.status || '').toLowerCase();
-    if (/starting|waiting|dds discovery|worker startup/.test(env)) return true;
-    if (/starting|waiting|dds discovery|worker startup/.test(status)) return true;
+    if (isStartupStatusText(env)) return true;
+    if (isStartupStatusText(status)) return true;
     const view = payload?.view;
     if (view?.kind === 'image' && !(view.dataUrl || view.raw || view.frameRef) && /worker/.test(status)) return true;
     if (view?.kind === 'plot' && Array.isArray(view.series) && view.series.length === 0 && /worker/.test(status)) return true;
     return false;
   });
+}
+
+function isStartupStatusText(text) {
+  return /starting|dds discovery|worker startup|waiting for node startup|waiting for worker|waiting for dds/.test(text);
 }
 
 async function stopWorkers(force = false) {
@@ -1910,11 +1990,17 @@ async function pullLatestFrameToCanvas(canvas) {
   const startedAt = performance.now();
   if (!canvas._frameDrawInProgress) {
     canvas._frameDrawInProgress = true;
+    canvas._frameDrawStartedAt = startedAt;
     try {
       await drawFrameRefToCanvas(canvas, frameRef);
     } finally {
       canvas._frameDrawInProgress = false;
+      canvas._frameDrawStartedAt = 0;
     }
+  } else if (performance.now() - Number(canvas._frameDrawStartedAt || 0) > FRAME_FETCH_TIMEOUT_MS) {
+    cancelCanvasFrameLoad(canvas);
+    canvas._frameDrawInProgress = false;
+    canvas._frameDrawStartedAt = 0;
   }
   if (!canvas._framePullActive || !canvas.isConnected) return;
   const elapsed = performance.now() - startedAt;
@@ -1948,19 +2034,24 @@ function shouldDrawResponseFrame(canvas, nodeId, responseSeq) {
 }
 
 async function blobToBitmapLike(blob) {
-  if (typeof createImageBitmap === 'function') {
-    return createImageBitmap(blob);
-  }
   const url = URL.createObjectURL(blob);
+  const img = new Image();
+  let timeout = null;
   try {
-    const img = new Image();
     await new Promise((resolve, reject) => {
       img.onload = resolve;
-      img.onerror = reject;
+      img.onerror = () => reject(new Error('Frame image decode failed'));
+      timeout = setTimeout(() => {
+        img.onload = null;
+        img.onerror = null;
+        img.removeAttribute('src');
+        reject(new Error('Frame image decode timed out'));
+      }, FRAME_DECODE_TIMEOUT_MS);
       img.src = url;
     });
     return img;
   } finally {
+    if (timeout) clearTimeout(timeout);
     URL.revokeObjectURL(url);
   }
 }
@@ -1996,6 +2087,7 @@ async function drawFrameRefToCanvas(canvas, frameRef) {
   cancelCanvasFrameLoad(canvas);
   const controller = new AbortController();
   frameFetchControllers.set(canvas, controller);
+  const timeout = setTimeout(() => controller.abort(), FRAME_FETCH_TIMEOUT_MS);
   if (['jpeg', 'jpg', 'bmp', 'png', 'webp'].includes(String(frameRef.encoding || '').toLowerCase())) {
     canvas.dataset.pendingFrame = signature;
     try {
@@ -2003,6 +2095,7 @@ async function drawFrameRefToCanvas(canvas, frameRef) {
     } catch (err) {
       if (err?.name !== 'AbortError') console.warn('Frame draw failed', err);
     } finally {
+      clearTimeout(timeout);
       if (canvas.dataset.pendingFrame === signature) delete canvas.dataset.pendingFrame;
       if (frameFetchControllers.get(canvas) === controller) frameFetchControllers.delete(canvas);
     }
@@ -2050,6 +2143,7 @@ async function drawFrameRefToCanvas(canvas, frameRef) {
   } catch (err) {
     if (err?.name !== 'AbortError') console.warn('Frame draw failed', err);
   } finally {
+    clearTimeout(timeout);
     if (canvas.dataset.pendingFrame === signature) delete canvas.dataset.pendingFrame;
     if (frameFetchControllers.get(canvas) === controller) frameFetchControllers.delete(canvas);
   }
@@ -2303,6 +2397,7 @@ function captureVideoFrame(node, controller, options = {}) {
     frameMessage: frame.message,
     loop: controller.loop,
     publishHz: effectiveVideoHz(node),
+    frameSkip: videoFrameSkip(node),
     duration: Number.isFinite(video.duration) ? video.duration : 0,
     currentTime: video.currentTime || 0,
     ended: controller.ended,
@@ -2397,7 +2492,7 @@ function updateEmbeddedVideoInputsForRun() {
         controller.ended = true;
       }
     }
-    const frameIndex = Math.floor(elapsed * fps);
+    const frameIndex = Math.floor(elapsed * fps) * (videoFrameSkip(node) + 1);
     const frame = syntheticVideoFrame(controller.baseFrame, frameIndex);
     if (!frame) return;
     node.params = {
@@ -2409,6 +2504,7 @@ function updateEmbeddedVideoInputsForRun() {
       embeddedVideo: true,
       embeddedFps: fps,
       publishHz: Math.max(0.01, Number(params.publishHz || fps)),
+      frameSkip: videoFrameSkip(node),
       duration,
       currentTime: elapsed,
       ended: controller.ended,
@@ -3947,7 +4043,7 @@ function normalizeImportedNode(node) {
     if (node.toolType === 'graph_view' && !port.dataType) return 'std_msgs/msg/Float32';
     return port.dataType ?? fallback;
   };
-  return {
+  const normalized = {
     id: node.id || `n${state.nextId++}`,
     name: node.name || 'imported_lwrclpy_node',
     x: Number(node.x || 0),
@@ -3974,6 +4070,13 @@ function normalizeImportedNode(node) {
     toolType: node.toolType || '',
     params: node.params || {},
   };
+  if (normalized.toolType === 'video_file_input') {
+    const outputType = normalized.params.outputType || normalized.outputs?.[0]?.dataType;
+    const videoType = outputType === VIDEO_COMPRESSED_IMAGE_TYPE ? VIDEO_COMPRESSED_IMAGE_TYPE : VIDEO_RAW_IMAGE_TYPE;
+    if (normalized.outputs?.[0]) normalized.outputs[0].dataType = videoType;
+    normalized.params = { ...(normalized.params || {}), outputType: videoType };
+  }
+  return normalized;
 }
 
 function uniqueNodeId(preferred) {
@@ -4098,6 +4201,7 @@ function canConnect(fromNodeId, fromPortId, toNodeId, toPortId) {
   if (fromInterface && toInterface) return false;
   if (fromInterface || toInterface) return true;
   if (!from.dataType || !to.dataType) return true;
+  if (isVideoImageType(from.dataType) && isVideoImageType(to.dataType) && acceptsVideoImageType(toNode)) return true;
   return from.dataType === to.dataType;
 }
 

@@ -12,6 +12,14 @@ from typing import Any
 
 RUNNING = True
 GUI_DISPLAY_HZ = 30.0
+EXTERNAL_FASTDDS_TRANSPORTS = "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=false"
+
+
+def _configure_fastdds_transport(config: dict[str, Any]) -> None:
+    if config.get("externalDdsCompatible"):
+        os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = EXTERNAL_FASTDDS_TRANSPORTS
+    else:
+        os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
 
 
 def _stop(_signum, _frame) -> None:
@@ -33,12 +41,12 @@ def _topic_qos(data_type: str) -> Any:
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=4,
-            reliability=qos.ReliabilityPolicy.RELIABLE,
+            depth=5,
+            reliability=qos.ReliabilityPolicy.BEST_EFFORT,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
-        return 1
+        return 5
 
 
 def _set_field(msg: Any, key: str, value: Any) -> None:
@@ -290,6 +298,7 @@ def main() -> int:
 
     config_path = Path(args.config)
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    _configure_fastdds_transport(config)
     video_path = Path(config["videoPath"])
     topic = str(config["topic"])
     type_name = str(config.get("dataType") or "sensor_msgs/msg/Image")
@@ -301,6 +310,10 @@ def main() -> int:
         output_encoding = "raw"
     loop = bool(config.get("loop", True))
     max_side = int(config.get("maxSide") or 0)
+    try:
+        frame_skip = max(0, int(float(config.get("frameSkip") or 0)))
+    except Exception:
+        frame_skip = 0
     preview_hz = GUI_DISPLAY_HZ
     preview_encoding = str(config.get("previewEncoding") or "jpeg").lower()
     if preview_encoding not in {"jpeg", "bmp"}:
@@ -315,7 +328,7 @@ def main() -> int:
         src_w, src_h, src_fps = _probe(video_path)
         width, height = _scaled_size(src_w, src_h, max_side)
         if use_source_fps and src_fps > 0:
-            publish_hz = max(0.01, src_fps)
+            publish_hz = max(0.01, src_fps / (frame_skip + 1))
     except Exception as exc:
         _write_status(status_path, running=False, error=f"video probe failed: {exc}")
         return 2
@@ -351,6 +364,7 @@ def main() -> int:
         height=height,
         encoding=output_encoding,
         sourceFps=src_fps,
+        frameSkip=frame_skip,
         published=0,
         matchedSubscriptions=_matched_subscriptions(publisher),
     )
@@ -399,6 +413,7 @@ def main() -> int:
                                 "height": height,
                                 "encoding": output_encoding,
                                 "sourceFps": src_fps,
+                                "frameSkip": frame_skip,
                                 "published": count,
                                 "actualHz": actual_hz,
                                 "matchedSubscriptions": _matched_subscriptions(publisher)
@@ -416,12 +431,16 @@ def main() -> int:
                             height=height,
                             encoding=output_encoding,
                             sourceFps=src_fps,
+                            frameSkip=frame_skip,
                             published=count,
                             actualHz=actual_hz,
                             matchedSubscriptions=_matched_subscriptions(publisher),
                             **(preview_writer.status_snapshot() if preview_writer is not None else {}),
                         )
                         next_status_at = now + (1.0 / GUI_DISPLAY_HZ)
+                    for _ in range(frame_skip):
+                        if not capture.grab():
+                            break
             finally:
                 capture.release()
             if not loop:
@@ -440,6 +459,7 @@ def main() -> int:
             height=height,
             encoding=output_encoding,
             sourceFps=src_fps,
+            frameSkip=frame_skip,
             published=count,
             **(preview_writer.status_snapshot() if preview_writer is not None else {}),
         )

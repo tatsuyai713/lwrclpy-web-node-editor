@@ -113,15 +113,15 @@ def topic_qos(data_type: str, depth: int = 1) -> Any:
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
             depth=depth,
-            reliability=qos.ReliabilityPolicy.RELIABLE,
+            reliability=qos.ReliabilityPolicy.BEST_EFFORT,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
-        return 1
+        return depth
 
 
 def publisher_qos(data_type: str) -> Any:
-    return topic_qos(data_type, depth=4)
+    return topic_qos(data_type, depth=5)
 
 
 def subscriber_qos(data_type: str) -> Any:
@@ -689,6 +689,7 @@ class CustomLwrclNodeInstance:
             "dataType": output.data_type,
             "params": self.config.params,
             "statusPath": str(status_path),
+            "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
         }
 
     def _ensure_dds_tap_worker(self) -> None:
@@ -744,6 +745,7 @@ class CustomLwrclNodeInstance:
             float(self.config.params.get("windowSec") or 5.0),
             float(self.config.params.get("xAxisSeconds") or 10.0),
             int(self.config.params.get("sampleLimit") or 10000),
+            bool(self.config.params.get("_externalDdsCompatible")),
         )
 
     def _dds_tap_worker_config(self, status_path: Path, frame_path: Path) -> dict[str, Any]:
@@ -764,6 +766,7 @@ class CustomLwrclNodeInstance:
             "outputDir": str(Path.cwd() / "saved_images"),
             "statusPath": str(status_path),
             "framePath": str(frame_path),
+            "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
         }
 
     def _dds_tap_mode(self) -> str:
@@ -836,10 +839,23 @@ class CustomLwrclNodeInstance:
             self.log(self.env_status)
 
     def _worker_python(self) -> Path:
-        return self.env_python_bin if self.env_python_bin is not None else Path(sys.executable)
+        if self.env_python_bin is not None:
+            return self.env_python_bin
+        launcher = os.environ.get("__PYVENV_LAUNCHER__")
+        if launcher:
+            launcher_path = Path(launcher)
+            if launcher_path.exists():
+                return launcher_path
+        venv = os.environ.get("VIRTUAL_ENV")
+        if venv:
+            candidate = Path(venv) / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
+            if candidate.exists():
+                return candidate
+        return Path(sys.executable)
 
     def _worker_env(self) -> dict[str, str]:
         env = dict(os.environ)
+        env.pop("__PYVENV_LAUNCHER__", None)
         return env
 
     def _video_worker_completed(self) -> bool:
@@ -861,6 +877,8 @@ class CustomLwrclNodeInstance:
             float(self.config.params.get("publishHz") or 30.0),
             bool(self.config.params.get("loop", True)),
             int(self.config.params.get("maxSide") or 0),
+            self._video_frame_skip(),
+            bool(self.config.params.get("_externalDdsCompatible")),
             "preview:jpeg",
             tuple((p.id, p.data_type, p.topics) for p in self.config.outputs),
         )
@@ -878,9 +896,11 @@ class CustomLwrclNodeInstance:
             "useSourceFps": True,
             "loop": bool(self.config.params.get("loop", True)),
             "maxSide": int(self.config.params.get("maxSide") or 0),
+            "frameSkip": self._video_frame_skip(),
             "statusPath": str(status_path),
             "framePath": str(frame_path),
             "enableDdsPublish": True,
+            "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
             "previewHz": GUI_DISPLAY_HZ,
             "previewEncoding": "jpeg",
             "outputEncoding": "jpeg" if normalize_type(output.data_type) == "sensor_msgs/msg/CompressedImage" else "raw",
@@ -1304,16 +1324,31 @@ class CustomLwrclNodeInstance:
         return f"{name} {suffix} / {hz:g} Hz"
 
     def _effective_video_publish_hz(self) -> float:
+        divisor = self._video_frame_skip() + 1
         status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.video.status.json"
         if status_path.exists():
             try:
                 status = json.loads(status_path.read_text(encoding="utf-8"))
                 source_fps = float(status.get("sourceFps") or 0.0)
                 if source_fps > 0:
-                    return max(0.01, source_fps)
+                    return max(0.01, source_fps / divisor)
             except Exception:
                 pass
-        return max(0.01, float(self.config.params.get("publishHz") or self.config.params.get("embeddedFps") or 30.0))
+        base_hz = float(
+            self.config.params.get("detectedFps")
+            or self.config.params.get("nativeFps")
+            or self.config.params.get("sourceFps")
+            or self.config.params.get("embeddedFps")
+            or self.config.params.get("publishHz")
+            or 30.0
+        )
+        return max(0.01, base_hz / divisor)
+
+    def _video_frame_skip(self) -> int:
+        try:
+            return max(0, int(float(self.config.params.get("frameSkip") or 0)))
+        except Exception:
+            return 0
 
     def _synthetic_video_frame(self, base_frame: dict[str, Any]) -> dict[str, Any]:
         base = self._normalize_image_message(base_frame)
@@ -1336,7 +1371,7 @@ class CustomLwrclNodeInstance:
             else:
                 elapsed = duration
         self.state["video_file_current_time"] = elapsed
-        frame_index = int(elapsed * fps)
+        frame_index = int(elapsed * fps) * (self._video_frame_skip() + 1)
         shift = frame_index % max(1, width)
         band = (frame_index * 3) % max(1, width + height)
         output = bytearray(width * height * 3)
@@ -2201,7 +2236,7 @@ class GraphRuntime:
             env_root.mkdir(parents=True, exist_ok=True)
             if not python_bin.exists():
                 instance.env_status = "creating venv"
-                subprocess.run([uv, "venv", "--python", sys.executable, str(env_root)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
+                subprocess.run([uv, "venv", "--clear", "--python", sys.executable, str(env_root)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
                 python_marker.write_text(expected_python, encoding="utf-8")
             req_file.write_text(req_text, encoding="utf-8")
             current_hash = hash_file.read_text(encoding="utf-8") if hash_file.exists() else ""
@@ -2336,6 +2371,7 @@ class GraphRuntime:
                 "inputs": {port.id: list(port.topics) for port in config.inputs if port.topics},
                 "outputs": {port.id: list(port.topics) for port in config.outputs if port.topics},
             },
+            "externalDdsCompatible": bool(config.params.get("_externalDdsCompatible")),
         }
 
     def _timer_dict(self, timer: TimerConfig) -> dict[str, Any]:
@@ -2413,6 +2449,8 @@ class GraphRuntime:
 
     def _apply_link_topics(self, nodes: list[CustomLwrclNodeConfig], links: list[dict[str, Any]]) -> None:
         by_id = {node.id: node for node in nodes}
+        for node in nodes:
+            node.params.pop("_externalDdsCompatible", None)
         source_topics: dict[tuple[str, str], str] = {}
         for link in links:
             key = (str(link.get("fromNode")), str(link.get("fromPort")))
@@ -2421,6 +2459,7 @@ class GraphRuntime:
             link["name"] = source_topics[key]
         input_topics: dict[tuple[str, str], set[str]] = {}
         output_topics: dict[tuple[str, str], set[str]] = {}
+        external_topics: set[str] = set()
         for link in links:
             src = by_id.get(str(link.get("fromNode")))
             dst = by_id.get(str(link.get("toNode")))
@@ -2428,8 +2467,9 @@ class GraphRuntime:
             dst_port = next((port for port in (dst.inputs if dst else []) if port.id == str(link.get("toPort"))), None)
             if src and dst and src_port and dst_port:
                 if (
-                    dst.tool_type == "image_view"
+                    dst.tool_type in {"image_view", "image_file_save", "topic_hz_monitor"}
                     and normalize_type(src_port.data_type) in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}
+                    and normalize_type(dst_port.data_type) in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}
                 ):
                     dst_port.data_type = src_port.data_type
                 if not src_port.data_type:
@@ -2441,6 +2481,8 @@ class GraphRuntime:
                 continue
             output_topics.setdefault((str(link.get("fromNode")), str(link.get("fromPort"))), set()).add(topic)
             input_topics.setdefault((str(link.get("toNode")), str(link.get("toPort"))), set()).add(topic)
+            if (src and src.tool_type == "topic_input") or (dst and dst.tool_type == "topic_output"):
+                external_topics.add(topic)
         for node in nodes:
             for port in node.inputs:
                 port.topic = ""
@@ -2448,6 +2490,9 @@ class GraphRuntime:
             for port in node.outputs:
                 port.topic = ""
                 port.topics = tuple(sorted(output_topics.get((node.id, port.id), set())))
+            node_topics = {topic for port in [*node.inputs, *node.outputs] for topic in port.topics}
+            if external_topics and node_topics.intersection(external_topics):
+                node.params["_externalDdsCompatible"] = True
 
     def _apply_builtin_param_topics(self, nodes: list[CustomLwrclNodeConfig]) -> None:
         for node in nodes:
@@ -2520,4 +2565,10 @@ class GraphRuntime:
             return bool(dst_port.data_type)
         if dst_interface:
             return bool(src_port.data_type)
+        if (
+            dst.tool_type in {"image_view", "image_file_save", "topic_hz_monitor"}
+            and normalize_type(src_port.data_type) in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}
+            and normalize_type(dst_port.data_type) in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}
+        ):
+            return True
         return src_port.data_type == dst_port.data_type

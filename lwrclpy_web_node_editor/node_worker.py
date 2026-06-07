@@ -10,6 +10,14 @@ from typing import Any
 
 
 os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
+EXTERNAL_FASTDDS_TRANSPORTS = "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=false"
+
+
+def configure_fastdds_transport(config: dict[str, Any]) -> None:
+    if config.get("externalDdsCompatible"):
+        os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = EXTERNAL_FASTDDS_TRANSPORTS
+    else:
+        os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
 
 def import_type_class(type_name: str):
     package, kind, name = type_name.split("/")
@@ -29,15 +37,15 @@ def topic_qos(data_type: str, depth: int = 1) -> Any:
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
             depth=depth,
-            reliability=qos.ReliabilityPolicy.RELIABLE,
+            reliability=qos.ReliabilityPolicy.BEST_EFFORT,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
-        return 1
+        return depth
 
 
 def publisher_qos(data_type: str) -> Any:
-    return topic_qos(data_type, depth=4)
+    return topic_qos(data_type, depth=1)
 
 
 def subscriber_qos(data_type: str) -> Any:
@@ -358,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         print("usage: node_worker.py CONFIG_JSON", file=sys.stderr)
         return 2
     config = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
+    configure_fastdds_transport(config)
     worker = LwrclpyWorkerNode(config)
     try:
         while worker.rclpy.ok():

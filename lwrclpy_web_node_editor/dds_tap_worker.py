@@ -16,6 +16,14 @@ GUI_DISPLAY_HZ = 30.0
 PREVIEW_JPEG_QUALITY = 60
 PREVIEW_JPEG_SUBSAMPLING = 2
 PREVIEW_MAX_SIDE = 640
+EXTERNAL_FASTDDS_TRANSPORTS = "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=false"
+
+
+def _configure_fastdds_transport(config: dict[str, Any]) -> None:
+    if config.get("externalDdsCompatible"):
+        os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = EXTERNAL_FASTDDS_TRANSPORTS
+    else:
+        os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
 
 
 def _stop(_signum, _frame) -> None:
@@ -45,12 +53,12 @@ def _topic_qos(data_type: str) -> Any:
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=qos.ReliabilityPolicy.RELIABLE,
+            depth=5,
+            reliability=qos.ReliabilityPolicy.BEST_EFFORT,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
-        return 1
+        return 5
 
 
 def _dds_format_label(data_type: str, encoding: str) -> str:
@@ -106,6 +114,22 @@ def _bytes_payload(value: Any) -> Any:
         return bytes(value)
 
 
+def _bytes_field(msg: Any, key: str) -> Any:
+    helper = getattr(msg, f"_lwrclpy_{key}_memoryview", None)
+    if callable(helper):
+        try:
+            return memoryview(helper())
+        except Exception:
+            pass
+    helper = getattr(msg, f"_lwrclpy_{key}_bytes", None)
+    if callable(helper):
+        try:
+            return helper()
+        except Exception:
+            pass
+    return _field(msg, key)
+
+
 class DdsTap:
     def __init__(self, config: dict[str, Any]) -> None:
         self.mode = str(config.get("mode") or "hz")
@@ -134,6 +158,11 @@ class DdsTap:
         self._frame_writer_stop = False
         self.subscription: Any = None
         self.transport = "callback"
+
+    def poll_batch_size(self) -> int:
+        if self.data_type.replace(".", "/") in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
+            return 4
+        return 64
 
     def callback(self, msg: Any) -> None:
         now = time.perf_counter()
@@ -206,7 +235,7 @@ class DdsTap:
             "frameSeq": seq,
             "framePath": str(self.frame_path),
             "matchedPublishers": self._matched_publishers(),
-            "polling": False,
+            "polling": self.transport == "polling",
             "transport": self.transport,
         }
         with self._lock:
@@ -339,7 +368,7 @@ class DdsTap:
             "hz": hz,
             "windowSec": self.window_sec,
             "matchedPublishers": self._matched_publishers(),
-            "polling": False,
+            "polling": self.transport == "polling",
             "transport": self.transport,
         })
         _write_json(self.status_path, status)
@@ -375,14 +404,14 @@ class DdsTap:
                 "savedPath": str(path),
                 "frameSeq": seq,
                 "matchedPublishers": self._matched_publishers(),
-                "polling": False,
+                "polling": self.transport == "polling",
                 "transport": self.transport,
             },
         )
 
     def _frame_payload(self, msg: Any) -> tuple[bytes, dict[str, Any]] | None:
         if self.data_type.replace(".", "/") == "sensor_msgs/msg/CompressedImage":
-            data = _field(msg, "data")
+            data = _bytes_field(msg, "data")
             if data is None:
                 return None
             return _bytes_payload(data), {
@@ -396,7 +425,7 @@ class DdsTap:
         width = int(_field(msg, "width") or 0)
         height = int(_field(msg, "height") or 0)
         encoding = str(_field(msg, "encoding") or "rgb8").lower()
-        data = _field(msg, "data")
+        data = _bytes_field(msg, "data")
         if width <= 0 or height <= 0 or data is None:
             return None
         return _bytes_payload(data), {
@@ -523,6 +552,7 @@ def main() -> int:
 
     config_path = Path(args.config)
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    _configure_fastdds_transport(config)
     tap = DdsTap(config)
     _write_json(tap.status_path, {"running": True, "mode": tap.mode, "topic": tap.topic, "dataType": tap.data_type, "hz": 0.0, "count": 0})
 
@@ -531,23 +561,25 @@ def main() -> int:
     if not rclpy.ok():
         rclpy.init(args=None)
     node = rclpy.create_node(f"ipn_dds_tap_{config.get('nodeId', 'tap')}".replace("-", "_")[:80])
-    subscription = node.create_subscription(_import_type_class(tap.data_type), tap.topic, tap.callback, _topic_qos(tap.data_type))
+    callback = None if tap.transport == "polling" else tap.callback
+    subscription = node.create_subscription(_import_type_class(tap.data_type), tap.topic, callback, _topic_qos(tap.data_type))
     tap.subscription = subscription
     if subscription is None:
         _write_json(tap.status_path, {"running": False, "error": "failed to create DDS subscription", "mode": tap.mode, "topic": tap.topic, "dataType": tap.data_type})
         return 2
     executor = None
     executor_thread = None
-    try:
-        from rclpy.executors import MultiThreadedExecutor
+    if tap.transport != "polling":
+        try:
+            from rclpy.executors import MultiThreadedExecutor
 
-        executor = MultiThreadedExecutor(num_threads=1)
-        executor.add_node(node)
-        executor_thread = threading.Thread(target=_spin_executor, args=(executor,), name="dds-tap-executor", daemon=True)
-        executor_thread.start()
-    except Exception:
-        executor = None
-        executor_thread = None
+            executor = MultiThreadedExecutor(num_threads=1)
+            executor.add_node(node)
+            executor_thread = threading.Thread(target=_spin_executor, args=(executor,), name="dds-tap-executor", daemon=True)
+            executor_thread.start()
+        except Exception:
+            executor = None
+            executor_thread = None
     _write_json(
         tap.status_path,
         {
@@ -558,7 +590,7 @@ def main() -> int:
             "hz": 0.0,
             "count": 0,
             "subscribed": True,
-            "polling": False,
+            "polling": tap.transport == "polling",
             "transport": tap.transport,
         },
     )
@@ -566,8 +598,8 @@ def main() -> int:
     status_thread.start()
     try:
         while RUNNING:
-            if executor is None:
-                tap.poll(256)
+            if tap.transport == "polling" or executor is None:
+                tap.poll(tap.poll_batch_size())
             time.sleep(0.001)
     finally:
         tap.stop_frame_writer()

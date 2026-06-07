@@ -402,6 +402,18 @@ class Handler(BaseHTTPRequestHandler):
     _last_image_view_raw_signatures: dict[str, str] = {}
     _ready_signature = ""
 
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+
     @classmethod
     def _payload_signature(cls, payload: dict) -> str:
         nodes = []
@@ -413,6 +425,22 @@ class Handler(BaseHTTPRequestHandler):
                 "toolType": str(node.get("toolType") or ""),
                 "requirements": str(node.get("requirements") or ""),
                 "importCode": str(node.get("importCode") or ""),
+                "inputs": [
+                    {
+                        "id": str(port.get("id") or ""),
+                        "dataType": str(port.get("dataType") or ""),
+                    }
+                    for port in node.get("inputs", [])
+                    if isinstance(port, dict)
+                ],
+                "outputs": [
+                    {
+                        "id": str(port.get("id") or ""),
+                        "dataType": str(port.get("dataType") or ""),
+                    }
+                    for port in node.get("outputs", [])
+                    if isinstance(port, dict)
+                ],
             })
         encoded = json.dumps({"nodes": nodes}, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()

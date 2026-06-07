@@ -12,6 +12,14 @@ from pathlib import Path
 from typing import Any
 
 RUNNING = True
+EXTERNAL_FASTDDS_TRANSPORTS = "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=false"
+
+
+def _configure_fastdds_transport(config: dict[str, Any]) -> None:
+    if config.get("externalDdsCompatible"):
+        os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = EXTERNAL_FASTDDS_TRANSPORTS
+    else:
+        os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
 
 
 def _stop(_signum, _frame) -> None:
@@ -33,12 +41,12 @@ def _topic_qos(data_type: str) -> Any:
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=4,
-            reliability=qos.ReliabilityPolicy.RELIABLE,
+            depth=5,
+            reliability=qos.ReliabilityPolicy.BEST_EFFORT,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
-        return 1
+        return 5
 
 
 def _set_field(msg: Any, key: str, value: Any) -> None:
@@ -274,6 +282,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    _configure_fastdds_transport(config)
     import rclpy
 
     if not rclpy.ok():
