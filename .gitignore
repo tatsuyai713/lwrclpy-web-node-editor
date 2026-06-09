@@ -1,10 +1,12 @@
 .venv/
 .venv*/
+venv*/
 .pycache/
 __pycache__/
 *.pyc
 .test_image.jpg
 .node_workers/
 .node_envs/
+.appimage-tools/
 dist/
 build/

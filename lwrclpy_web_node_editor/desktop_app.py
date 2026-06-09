@@ -136,10 +136,13 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    try:
-        import webview
-    except Exception:
-        webview = None
+    desktop_backend = os.environ.get("LWRCLPY_DESKTOP_BACKEND", "").strip().lower()
+    webview = None
+    if desktop_backend != "pyside6":
+        try:
+            import webview
+        except Exception:
+            webview = None
 
     if webview is not None:
         def on_closed() -> None:
@@ -154,10 +157,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         window.events.closed += on_closed
         try:
-            webview.start(debug=False, http_server=False)
-        finally:
+            webview.start(debug=False, http_server=False, gui=os.environ.get("LWRCLPY_WEBVIEW_GUI") or None)
+        except Exception as exc:
+            print(f"pywebview failed, falling back to PySide6: {exc}", file=sys.stderr)
+        else:
             _shutdown_runtime(server_proc, app_url)
-        return 0
+            return 0
 
     try:
         from PySide6.QtCore import QUrl
