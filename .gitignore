@@ -10,3 +10,4 @@ __pycache__/
 .appimage-tools/
 dist/
 build/
+.spec
