@@ -17,18 +17,78 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from .graph import GraphRuntime, LWRCLPY_TYPE_TREE
+from .runtime_exec import framework_worker_tokens, standalone_app_home
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PROJECT_DIR = Path.cwd()
-WORKER_SCRIPT = Path(__file__).resolve().parent / "node_worker.py"
-VIDEO_WORKER_SCRIPT = Path(__file__).resolve().parent / "video_dds_worker.py"
-DDS_TAP_WORKER_SCRIPT = Path(__file__).resolve().parent / "dds_tap_worker.py"
-BUILTIN_SOURCE_WORKER_SCRIPT = Path(__file__).resolve().parent / "builtin_source_worker.py"
 WORKER_DIR = PROJECT_DIR / ".node_workers"
 APP_SETTINGS_DIR = PROJECT_DIR / ".app_settings"
 CUSTOM_NODE_DIR = APP_SETTINGS_DIR / "custom_nodes"
 GUI_DISPLAY_HZ = 30.0
+
+
+def _server_lock_path() -> Path:
+    if getattr(sys, "frozen", False):
+        root = standalone_app_home()
+    else:
+        root = APP_SETTINGS_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "server.lock"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _acquire_server_lock(host: str, port: int) -> tuple[Path, bool]:
+    lock_path = _server_lock_path()
+    for _ in range(2):
+        try:
+            fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "pid": os.getpid(),
+                    "host": host,
+                    "port": int(port),
+                    "startedAt": time.time(),
+                }, handle)
+            return lock_path, True
+        except FileExistsError:
+            try:
+                payload = json.loads(lock_path.read_text(encoding="utf-8"))
+                pid = int(payload.get("pid") or 0)
+            except Exception:
+                pid = 0
+            if pid and _pid_alive(pid):
+                return lock_path, False
+            try:
+                lock_path.unlink(missing_ok=True)
+            except Exception:
+                return lock_path, False
+    return lock_path, False
+
+
+def _release_server_lock(lock_path: Path | None) -> None:
+    if lock_path is None:
+        return
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        pid = int(payload.get("pid") or 0)
+    except Exception:
+        pid = 0
+    if pid and pid != os.getpid():
+        return
+    try:
+        lock_path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _json_default(value):
@@ -260,17 +320,8 @@ def _command_line_worker_pids() -> set[int]:
 
 
 def _is_framework_worker_command(command: str) -> bool:
-    worker_script = str(WORKER_SCRIPT)
-    video_worker_script = str(VIDEO_WORKER_SCRIPT)
-    dds_tap_worker_script = str(DDS_TAP_WORKER_SCRIPT)
-    builtin_source_worker_script = str(BUILTIN_SOURCE_WORKER_SCRIPT)
     worker_dir = str(WORKER_DIR)
-    return (
-        worker_script in command
-        or video_worker_script in command
-        or dds_tap_worker_script in command
-        or builtin_source_worker_script in command
-    ) and worker_dir in command
+    return any(token in command for token in framework_worker_tokens()) and worker_dir in command
 
 
 def _cleanup_pid_files() -> None:
@@ -459,12 +510,7 @@ class ContinuousGraphRunner:
                     self._latest = {"error": str(exc), "nodes": {}, "setup": {"complete": False}}
                 stop_runtime = True
                 break
-            # All built-in and custom nodes run in isolated worker processes.
-            # The server loop only starts workers and samples their status for
-            # the Web UI, so spinning it at the model run frequency can starve
-            # the HTTP server without improving DDS timing.
-            status_hz = GUI_DISPLAY_HZ
-            next_at += 1.0 / status_hz
+            next_at += 1.0 / max(1.0, hz)
             sleep_for = next_at - time.time()
             if sleep_for > 0:
                 self._stop_event.wait(sleep_for)
@@ -636,12 +682,19 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/update-node-params":
                 result = self.runner.update_node_params(payload)
             elif path == "/api/force-stop":
-                self.runner.stop()
-                result = self.runtime.stop(force=True)
+                runner_status = self.runner.stop()
+                result = self.runtime.stop(force=True, lock_timeout=0.2)
+                result["runner"] = runner_status.get("run", {}) if isinstance(runner_status, dict) else {}
                 result["orphanProcesses"] = cleanup_framework_processes(force=True)
             else:
-                self.runner.stop()
-                result = self.runtime.stop(force=bool(payload.get("force", True)))
+                runner_status = self.runner.stop()
+                requested_force = bool(payload.get("force", True))
+                run_state = runner_status.get("run", {}) if isinstance(runner_status, dict) else {}
+                should_force = requested_force or str(run_state.get("error") or "") == "runner stop timed out"
+                result = self.runtime.stop(force=should_force, lock_timeout=0.2 if should_force else 1.0)
+                result["runner"] = run_state
+                if should_force and not requested_force:
+                    result["escalatedForce"] = True
             self._send_json(result)
         except (BrokenPipeError, ConnectionResetError):
             return
@@ -828,7 +881,16 @@ def main(argv: list[str] | None = None):
     killed_count = len(startup_cleanup.get("killed", []))
     if killed_count:
         print(f"Cleaned up {killed_count} stale lwrclpy Web Node Editor worker process(es).")
+    lock_path, lock_acquired = _acquire_server_lock(args.host, args.port)
+    if not lock_acquired:
+        print(
+            f"Another lwrclpy Web Node Editor server is already running (lock: {lock_path}). "
+            f"Stop it first before starting a new instance.",
+            file=sys.stderr,
+        )
+        return 1
     atexit.register(_cleanup_at_exit)
+    atexit.register(_release_server_lock, lock_path)
     try:
         server = ReusableThreadingHTTPServer((args.host, args.port), Handler)
     except OSError as exc:
@@ -856,6 +918,7 @@ def main(argv: list[str] | None = None):
         Handler.runtime.close()
         cleanup_framework_processes(force=True)
         server.server_close()
+        _release_server_lock(lock_path)
     return 0
 
 

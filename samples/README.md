@@ -4,7 +4,7 @@ This directory contains loadable `lwrclpy Web Node Editor` project JSON files.
 
 ## How to run
 
-1. Start the editor from the `lwrclpy_web_node_editor` directory:
+1. Start the editor from the repository root directory:
 
    ```bash
    .venv/bin/python main.py --host 127.0.0.1 --port 8765
@@ -13,6 +13,8 @@ This directory contains loadable `lwrclpy Web Node Editor` project JSON files.
 2. Open `http://127.0.0.1:8765`.
 3. Click `Load` and select one of the JSON files under the genre folders in this directory.
 4. Click `Run` or `Run For`.
+
+`Run Hz` default is 30 Hz in the current UI.
 
 Image samples contain an embedded image. Video samples contain an embedded base frame that is animated during `Run` and published at each Video File Input node's `Publish Hz`. Custom-node samples create one worker process and one `.node_envs/<node-id>` virtual environment per custom node.
 

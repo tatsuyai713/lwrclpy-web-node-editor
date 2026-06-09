@@ -1,274 +1,339 @@
-# DDS Backend and Frontend Architecture
+# lwrclpy Web Node Editor Architecture
 
-このドキュメントは、`lwrclpy Web Node Editor` の現在のDDS通信バックエンドとWebフロントエンドの構成を説明します。対象実装は主に次のファイルです。
+This document describes the current architecture implemented in this repository.
+It reflects the code paths in:
 
-- `lwrclpy_web_node_editor/static/app.js`
+- `main.py`
 - `lwrclpy_web_node_editor/server.py`
+- `lwrclpy_web_node_editor/desktop_app.py`
 - `lwrclpy_web_node_editor/graph.py`
-- `lwrclpy_web_node_editor/video_dds_worker.py`
+- `lwrclpy_web_node_editor/runtime_exec.py`
+- `lwrclpy_web_node_editor/static/app.js`
+- worker modules (`node_worker.py`, `video_dds_worker.py`, `dds_tap_worker.py`, `builtin_source_worker.py`)
 
-## 全体像
+## 1. Runtime Modes
 
-WebUIはノードグラフの編集、Run/Stop操作、表示更新を担当します。実際のノード実行、DDS publish/subscribe、動画デコードはバックエンド側で動作します。
+The entrypoint is `main.py` and supports these modes:
+
+1. Web server mode (development or standalone server): `python main.py --host 127.0.0.1 --port 8765` or standalone binary with `--server`. This mode does not use Qt/PySide6.
+1. Desktop mode (embedded Web UI via Qt WebEngine): `python main.py --desktop` (standalone binary default with no args). This mode requires PySide6 (Qt WebEngine).
+1. Worker dispatch mode (internal): `--worker-node`, `--worker-video`, `--worker-dds-tap`, `--worker-builtin-source`.
+
+## 2. High-Level Topology
 
 ```mermaid
 flowchart LR
-  Browser[Browser WebUI<br>static/app.js]
-  Server[HTTP Server<br>server.py]
-  Runner[ContinuousGraphRunner<br>server-side run loop]
-  Graph[GraphRuntime<br>graph.py]
-  Runtime[LwrclpyRuntime<br>rclpy executor spin thread]
-  Builtin[Built-in worker processes<br>source/tap/video]
-  Custom[Custom node worker processes<br>.node_envs per node]
-  VideoWorker[Video decode worker process<br>video_dds_worker.py + OpenCV]
-  DDS[(lwrclpy DDS topics)]
+  UI[Browser or Qt WebEngine UI]
+  API[server.py HTTP API]
+  Runner[ContinuousGraphRunner thread]
+  Graph[GraphRuntime]
+  DDS[(lwrclpy DDS)]
+  CNode[Custom Node Workers]
+  VWorker[video_dds_worker.py]
+  Tap[dds_tap_worker.py]
+  Src[builtin_source_worker.py]
 
-  Browser -->|POST /api/start<br>POST /api/stop<br>POST /api/force-stop| Server
-  Browser -->|GET /api/run-status| Server
-  Browser -->|GET /api/node-frame| Server
-  Server --> Runner
+  UI -->|/api/*| API
+  API --> Runner
   Runner --> Graph
-  Graph --> Runtime
-  Graph --> Builtin
-  Graph --> Custom
-  Builtin --> DDS
-  Custom --> DDS
-  DDS --> Builtin
-  DDS --> Custom
-  Builtin --> VideoWorker
-  VideoWorker -->|latest frame IPC<br>.node_workers/*.rgb or jpeg| Builtin
+  Graph --> CNode
+  Graph --> VWorker
+  Graph --> Tap
+  Graph --> Src
+  CNode <--> DDS
+  VWorker --> DDS
+  Tap <-- DDS
+  Src --> DDS
 ```
 
-重要な点は、グラフ内のデータフローはWebUI上の直接データ受け渡しではなく、バックエンドのlwrclpy topicを経由する設計になっていることです。WebUIは状態確認と表示を行うだけで、DDSの通信周期を直接駆動しません。
+Important design point:
 
-## プロセスとスレッド
+- UI is control plane and visualization.
+- DDS message processing is performed in worker processes, not in the browser.
 
-現在の実行単位は次の通りです。
+## 3. Frontend / Backend Separation (Important)
 
-| 対象 | 実行単位 | 主な役割 |
+This system is intentionally split into two planes:
+
+1. Frontend plane (UI): Browser tab (server mode) or Qt WebEngine (desktop mode). Handles editing, graph wiring, run control, and visualization. Does not execute DDS callbacks and does not perform DDS pub/sub.
+1. Backend plane (runtime): `server.py` + `graph.py` + worker processes. Owns lwrclpy runtime lifecycle, process lifecycle, and DDS pub/sub.
+
+```mermaid
+flowchart TB
+  subgraph Frontend
+    UI[Browser or Qt WebEngine]
+  end
+
+  subgraph Backend
+    API[HTTP API server.py]
+    Runner[ContinuousGraphRunner]
+    Runtime[GraphRuntime]
+    W1[Custom node worker(s)]
+    W2[Video worker]
+    W3[DDS tap worker]
+    W4[Builtin source worker]
+  end
+
+  subgraph DDSDomain
+    DDS[(DDS topics via lwrclpy)]
+  end
+
+  UI -->|HTTP localhost| API
+  API --> Runner
+  Runner --> Runtime
+  Runtime --> W1
+  Runtime --> W2
+  Runtime --> W3
+  Runtime --> W4
+  W1 <--> DDS
+  W2 --> DDS
+  W3 <-- DDS
+  W4 --> DDS
+```
+
+Consequence of this separation:
+
+- If UI rendering is heavy, backend processing can continue.
+- Run/stop authority stays server-side.
+- Message delivery semantics are governed by DDS/runtime, not browser timers.
+
+Note:
+
+- If you run only `--server` and open from an external browser, Qt is not part of the runtime path.
+
+## 4. Process Composition
+
+### 4.1 Server mode process set
+
+When started as `main.py --server` (or standalone `--server`):
+
+1. Main server process:
+   - HTTP API
+   - `ContinuousGraphRunner` thread
+   - runtime orchestration
+2. Zero or more worker child processes:
+   - one per custom node
+   - optional video worker
+   - optional builtin source worker
+   - optional DDS tap worker
+
+### 4.2 Desktop mode process set
+
+Desktop mode adds one UI process and one server subprocess.
+
+```mermaid
+flowchart LR
+  UIProc[Desktop UI process\nQt + WebEngine]
+  SrvProc[Server subprocess\nmain.py --server]
+  Wrk[Worker child processes]
+  DDS[(DDS domain)]
+
+  UIProc -->|HTTP localhost| SrvProc
+  SrvProc --> Wrk
+  Wrk <--> DDS
+```
+
+Desktop shutdown path:
+
+1. UI requests `/api/force-stop`.
+2. UI terminates server subprocess.
+3. Server/runtime cleanup kills remaining framework workers.
+
+### 4.3 Process inventory
+
+| Process | Responsibility | Typical lifetime |
 | --- | --- | --- |
-| Web server | 1プロセス | HTTP API、静的ファイル配信、Run制御 |
-| `ContinuousGraphRunner` | server内thread | Run中のグラフtickをサーバー側で継続実行 |
-| built-in source worker | producerノード別プロセス | Function Generator、Image File InputのDDS publish |
-| DDS tap worker | sink/viewerノード別プロセス | Image View、Topic Hz Monitor、Graph View、Image File SaveのDDS receive |
-| custom node | node別プロセス | ユーザー作成ノード。`.node_envs/<node-id>` のvenvを使う |
-| Video decode worker | Video Input別プロセス | OpenCVでローカル動画をデコードし、DDS publishとpreview frame IPCを行う |
+| Browser tab / Qt WebEngine | Graph editing, user actions, rendering | Until user closes UI |
+| Server process (`server.py`) | API, run loop control, runtime orchestration | Until app shutdown |
+| Custom node worker (`node_worker.py`) | User callback execution, timer callbacks, DDS pub/sub | During run / node usage |
+| Video worker (`video_dds_worker.py`) | Decode video frames and publish DDS images | While video source is active |
+| DDS tap worker (`dds_tap_worker.py`) | Subscribe target DDS topics for viewers/monitoring | While taps are configured |
+| Builtin source worker (`builtin_source_worker.py`) | Built-in source topic publication | While source nodes are active |
 
-カスタムノードはノードごとに別venv、別プロセスで動きます。built-inノードもTopic Input/Outputのような境界ノードを除き、DDS publish/receiveをserverプロセス内で行いません。Function GeneratorとImage File Inputは `builtin_source_worker.py`、Image View/Topic Hz Monitor/Graph View/Image File Saveは `dds_tap_worker.py`、Video Inputは `video_dds_worker.py` の独立プロセスで動きます。
+## 5. Inter-Process Communication Model
 
-## Run制御
+### 5.1 Communication channels
 
-Runボタンを押すと、WebUIは `/api/start` に現在のグラフを送ります。以後、Runループはブラウザではなくサーバー側で動作します。
+| From | To | Channel | Payload |
+| --- | --- | --- | --- |
+| Frontend | Server | HTTP (localhost) | Graph JSON, run/stop commands, parameter updates |
+| Server | Workers | Subprocess launch + config files + env | Worker startup config, runtime options |
+| Workers | Workers | DDS pub/sub via lwrclpy | ROS-like topic messages |
+| Workers | Frontend (indirect) | Status/frame artifacts + server APIs | Node status, preview frames |
+| Server | Frontend | HTTP JSON responses | Run state, node summaries, errors |
 
-```mermaid
-sequenceDiagram
-  participant UI as Browser UI
-  participant API as server.py
-  participant Runner as ContinuousGraphRunner
-  participant Graph as GraphRuntime
-  participant DDS as lwrclpy DDS
+### 5.2 Control path vs data path
 
-  UI->>API: POST /api/start graph + runHz
-  API->>Runner: start(payload)
-  Runner->>Runner: start server-side thread
-  loop Run tick
-    Runner->>Graph: run(payload)
-    Graph->>DDS: publish / subscribe via lwrclpy nodes
-  end
-  UI->>API: GET /api/run-status
-  API-->>UI: compact node status, no large image body
-```
+Control path is HTTP-driven and synchronous from UI perspective.
 
-Stopは `/api/stop` です。Force Stopは `/api/force-stop` で、管理中のworker processに加えて、このフレームワークが作成した残留worker processも探索してkillします。
+- Examples: `POST /api/ready`, `POST /api/start`, `POST /api/stop`, `POST /api/force-stop`, `GET /api/run-status`
 
-## DDS通信モデル
+Data path is DDS-driven and asynchronous between worker processes.
 
-リンク接続はtopic名に変換されます。1つの出力ポートから複数の入力へ接続した場合、その出力ポートのtopic名は1つに同期されます。
+- Node output topics fan out to subscribers through DDS.
+- UI never becomes a DDS relay node.
 
-```mermaid
-flowchart LR
-  A[Node A out1] -->|/generated_topic| DDS[(DDS topic)]
-  DDS --> B[Node B in1]
-  DDS --> C[Node C in1]
-```
+### 5.3 Runtime artifacts used for IPC support
 
-`Topic Input` と `Topic Output` はグラフ境界を表すノードです。これら自体がデータ処理を行うのではなく、接続された処理ノードまたは表示ノードが実際のSub/Pubを持ちます。
+- `.node_workers/`:
+  - worker configs
+  - worker logs
+  - frame/status side artifacts consumed by server endpoints
+- `.node_envs/`:
+  - per-node Python environments for custom workers
+- `.app_settings/server.lock` (non-frozen) or `<standalone_app_home>/server.lock` (frozen):
+  - single-instance guard metadata
 
-### rclpy互換API方針
+## 6. Desktop Mode Architecture
 
-このプロジェクトのWebプレビュー実行系とエクスポートコードは、rclpy互換APIに寄せます。
+Desktop mode now uses process isolation:
 
-- publishは `msg = MessageType(); ...; publisher.publish(msg)` の通常経路だけを使います。
-- subscribeは `create_subscription(..., callback, qos)` のcallback経路だけを使います。
-- Webプレビュー、custom node worker、Video DDS workerでは、`loan_message()`、`loaned_take()`、DataSharing制御APIなどのlwrclpy固有ゼロコピーAPIは使いません。
-- ROS 2パッケージ/単体Pythonとしてエクスポートするコードも、標準ROS 2 `rclpy` APIだけを使います。
+1. `desktop_app.py` starts a dedicated server subprocess (`main.py --server ...`) on a free localhost port.
+2. Qt WebEngine loads that local URL.
+3. On desktop app shutdown, it requests `/api/force-stop`, then terminates the server subprocess.
 
-`sensor_msgs/msg/Image` は表示・変換・ブラウザ転送のどこかで必ずコピーが発生するため、ゼロコピー対応は前提にしません。性能改善は、DDS受信処理と表示処理の分離、表示fpsの制限、Hz Monitorで画像本体を保持しないことに集中します。
+This separation avoids coupling WebEngine UI stalls with server execution.
 
-### Subscriber callbackとHz Monitor
+## 7. Single-Instance Server Guard
 
-DDS subscriber callbackでデータを受信すると、DDS tap workerプロセス内で最新状態だけを更新します。Hz Monitorでは画像本体やメッセージ本体を保持せず、受信時刻のリングバッファだけを使います。Image Viewでは最新フレームだけを表示変換workerへ渡し、古いフレームは捨てます。
+Server duplicate startup is rejected via a lock file.
 
-`Topic Hz Monitor` はWebUIの描画fpsではなく、DDS tap workerプロセス内のsubscriber callback到着時刻からHzを計算します。server.pyはworkerが書いたstatus JSONを読むだけで、DDS受信callbackを実行しません。
+- Non-frozen (python main.py):
+  - lock path: `.app_settings/server.lock` under current project directory
+- Frozen standalone:
+  - lock path: `<standalone_app_home>/server.lock`
 
-```mermaid
-sequenceDiagram
-  participant DDS as DDS topic
-  participant Tap as dds_tap_worker.py
-  participant Status as .node_workers/*.tap.status.json
-  participant Hz as Topic Hz Monitor UI node
-  participant UI as Browser
+Startup behavior:
 
-  DDS->>Tap: message arrives
-  Tap->>Tap: record arrival timestamp only
-  Tap->>Status: write receive Hz
-  Hz->>Status: read latest Hz
-  UI->>Hz: GET /api/run-status
-  Hz-->>UI: text status, e.g. 23.99 Hz
-```
+1. Try exclusive create (`O_EXCL`) lock file with PID/host/port metadata.
+2. If lock exists and PID is alive, startup is rejected.
+3. If lock exists but PID is stale, lock is removed and retried.
 
-## Video Inputの設計
+Shutdown behavior:
 
-Video Inputは、ブラウザから毎フレーム画像をHTTP送信する方式ではありません。また、動画ファイルをブラウザからサーバへアップロードする方式も使いません。WebUIの `Select Video` はサーバ側でファイル選択ダイアログを開き、選択されたローカルファイルパスをVideo Input設定に保存します。Path欄は表示専用で、直接入力はできません。
+- Lock is released on normal shutdown and registered via `atexit` as fallback.
 
-```mermaid
-sequenceDiagram
-  participant UI as Browser
-  participant API as server.py
-  participant VNode as Video Input controller
-  participant Worker as video_dds_worker.py
-  participant DDS as lwrclpy DDS
+## 8. Run Lifecycle
 
-  UI->>API: POST /api/select-video-file
-  API-->>UI: selected local videoPath
-  UI->>API: POST /api/start graph(local videoPath)
-  API->>VNode: start Video Input node
-  VNode->>Worker: spawn OpenCV decode worker
-  Worker->>Worker: probe source fps and decode frames with VideoCapture
-  loop publish period
-    Worker->>DDS: publish Image or CompressedImage
-  end
-  par preview/status
-    Worker->>VNode: asynchronously write latest preview frame/status under .node_workers/
-    VNode->>API: expose latest preview frame at 30fps
-  end
-```
+### 8.1 Ready
 
-### Imageが標準、CompressedImageは性能オプション
+`POST /api/ready`:
 
-動画の標準出力型は `sensor_msgs/msg/Image` です。ユーザーが特に指定しない限り、Video Inputは非圧縮の通常ImageをDDS publishします。
+1. Stops runner and runtime.
+2. Cleans stale framework workers.
+3. Recreates `.node_envs` and `.node_workers`.
+4. Prepares per-node environments and validates setup.
+5. Stores payload signature for subsequent Run authorization.
 
-ユーザーがVideo Inputの出力ポート型を `sensor_msgs/msg/CompressedImage` に変更した場合だけ、workerがJPEGフレームを生成し、`sensor_msgs/msg/CompressedImage` としてDDS publishします。
+### 8.2 Start
 
-raw `sensor_msgs/msg/Image` は扱いやすく標準的です。一方で、Python経由で高解像度・高fpsのraw画像をpublish/subする場合は、メッセージコピーとserializeのコストが大きくなります。性能が必要な動画用途では、ユーザーが明示的にCompressedImageを選択できます。
+`POST /api/start`:
 
-画像/動画topicのQoSは、rclpy互換APIの範囲で `BEST_EFFORT + KEEP_LAST(1)` を使います。Image ViewやHz Monitorは表示・監視用途であり、古いフレームを溜めて処理する必要がありません。ここをdefault reliable/depth 10にすると、Image Viewのような遅いreaderがpublisherにbackpressureをかけ、DDS publish周期やHz Monitorの表示値まで低下します。
+1. Validates payload signature (Ready required).
+2. Starts `ContinuousGraphRunner` background thread.
+3. Runner repeatedly executes `GraphRuntime.run(payload)`.
 
-### 動画fpsとLoop
+### 8.3 Status
 
-Video Inputは動画ファイルのsource fpsを使ってpublishします。OpenCV probeで取得した `sourceFps` がworker statusに入り、server側publish周期にも使われます。フレーム読み込み、DDS publish、preview生成にかかった処理時間も含めて、絶対時刻ベースで次のpublish時刻を決めます。
+`GET /api/run-status`:
 
-`loop=false` の場合、workerは動画終端で `ended=true` をstatusに書きます。Video Input側は `ended=true` を検出するとworkerを再起動せず、最後のフレームを再publishしません。
+- Returns compact node status and run metadata.
+- Plot series are decimated for payload control.
+- Image payloads are represented as frame references when possible.
 
-## Image Viewの表示経路
+### 8.4 Stop / Force Stop
 
-Image ViewはDDSで受信した画像を表示します。ただし、画像本体を `/api/run-status` のJSONへ毎回入れると、JSON生成、base64、HTTP、ブラウザdecodeが重くなり、DDS callbackにも悪影響が出ます。
+`POST /api/stop`:
 
-そのため現在は、run-statusには画像本体ではなく `frameRef` だけを入れます。Image Viewは `frameRef` のseqを見て、必要な最新preview frameだけを `/api/node-frame` で取得してcanvasへ描画します。MJPEG `<img>` streamはブラウザ内部バッファを制御しにくいため使いません。
+- Calls `runner.stop()`.
+- Attempts runtime stop with bounded lock timeout.
+- If runner reported `runner stop timed out`, server escalates to force-stop path.
 
-```mermaid
-flowchart LR
-  DDS[(DDS topic)] --> TapWorker[DDS tap worker process]
-  TapWorker -->|receive callback timestamps| HzStatus[Hz/status JSON]
-  TapWorker -->|latest-only preview conversion thread| FrameFile[latest preview frame file]
-  TapWorker -->|status + frameRef only| RunStatus[/api/run-status/]
-  Browser[Browser UI] -->|poll status| RunStatus
-  Browser -->|GET /api/node-frame by nodeId/seq| FrameFile
-  Browser --> Display[Canvas at 30fps]
-```
+`POST /api/force-stop`:
 
-`/api/run-status` は軽量な状態確認APIです。画像本体の転送はrun-statusから分離されます。DDS callbackは受信時刻と最新msg参照だけを更新し、表示用JPEG生成はDDS受信callbackとは別スレッドで最新フレームだけを処理するため、古いフレームがキューに溜まり続けない設計です。
+- Force stops runtime workers.
+- Cleans orphan framework processes.
 
-## Frontendの役割
+Client-side (`app.js`) stop behavior:
 
-`static/app.js` の主な役割は次の通りです。
+- Stop requests use `AbortController` timeout.
+- If stop is pending/timed out, UI automatically escalates to force stop.
 
-- ノードグラフの編集
-- プロジェクトの保存/読み込み
-- Run/Stop/Force StopのAPI呼び出し
-- `/api/run-status` のポーリング
-- Image Viewのlatest-frame canvas表示
-- Video Inputのworkerプレビュー
+## 9. Worker Model
 
-Video Inputのプレビューは、Video workerがデコードした最新フレームを `.node_workers/` に軽量previewとして書き、ブラウザが軽量な画像表示経路で表示します。DDS publishとプレビュー生成は同じworker内の同じデコードフレームから分岐しますが、プレビュー書き込みは別スレッドで最新フレームのみ保持するため、表示遅延がDDS publishをブロックしない設計です。
+### 9.1 Custom nodes
 
-## Backend API
+- Each custom node runs in its own process with its own venv:
+  - `.node_envs/<node-id>/...`
+- Worker config and logs are in `.node_workers/`.
 
-主なAPIは次の通りです。
+### 9.2 Built-in source worker
 
-| API | 用途 |
-| --- | --- |
-| `POST /api/start` | server-side Runを開始 |
-| `POST /api/stop` | Run停止、通常worker停止 |
-| `POST /api/force-stop` | Run停止、worker強制kill、残留プロセス掃除 |
-| `GET /api/run-status` | 軽量なノード状態取得 |
-| `GET /api/node-frame?nodeId=<id>` | Image View/Video preview用の最新preview frame取得 |
-| `POST /api/update-node-params` | Run中の動画path、loopなどのruntime parameter更新 |
+- Handles built-in source tools (for example, Function Generator/Image source paths) where applicable.
 
-## データ形式
+### 9.3 Video worker
 
-### Video Input default
+- `video_dds_worker.py` decodes local video via OpenCV.
+- Publishes DDS messages at source-driven timing.
+- Writes latest preview/status into `.node_workers` files.
 
-標準の動画DDS出力:
+### 9.4 DDS tap worker
 
-```text
-sensor_msgs/msg/Image
-width: uint32
-height: uint32
-encoding: "rgb8"
-step: width * 3
-data: RGB bytes
-```
+- `dds_tap_worker.py` subscribes to DDS topics for viewer/monitor tools.
+- Produces status updates and latest-frame artifacts for UI retrieval.
 
-### Compressed image option
+## 10. Worker Launch Resolution
 
-ユーザーがCompressedImageを選択した場合:
+`runtime_exec.py` abstracts launch commands:
 
-```text
-sensor_msgs/msg/CompressedImage
-format: "jpeg; width=<w>; height=<h>"
-data: JPEG bytes
-```
+- Non-frozen: launch worker Python scripts directly from package directory.
+- Frozen: prefer bundled worker scripts; if needed, dispatch through frozen executable worker flags.
 
-raw画像は扱いやすい一方で、Python経由のDDS publish/subではデータ量の影響を強く受けます。動画の連続フレームで性能が必要な場合はCompressedImageを選択できます。
+This keeps worker startup portable across development and standalone builds.
 
-## 性能上の分離
+## 11. Data Path vs Control Path
 
-現在の分離ポイントは次の通りです。
+### Control path
 
-- DDS subscriber callbackはlwrclpy executor spin threadで受信します。
-- built-in表示ノードは30fpsで表示用状態だけを更新します。
-- Image Viewの画像本体はrun-statusから分離され、`/api/node-frame` で最新preview frameだけを取得します。
-- 動画デコードはserver本体ではなく `video_dds_worker.py` の別プロセスで実行します。
-- カスタムノードはnode別venv、node別プロセスで実行します。
+- UI -> `/api/start`, `/api/stop`, `/api/force-stop`, `/api/run-status`, `/api/update-node-params`.
 
-重いraw画像をPythonで大量にpublish/subする場合は、プロセス分離していてもメッセージコピーとserializeの影響を受けます。必要に応じてCompressedImageを選択することで、この負荷を下げられます。
+### Data path
 
-## 障害時の見方
+- DDS traffic flows between worker processes.
+- UI fetches display artifacts (status/frame) and does not execute DDS logic.
 
-### Topic Hz Monitorが低い
+## 12. Image/Frame Display Pipeline
 
-まず確認する点:
+Image views are updated by frame references and per-node frame fetch API:
 
-- raw `sensor_msgs/msg/Image` で高解像度・高fpsを流していないか
-- 必要に応じてVideo Inputの出力型を `sensor_msgs/msg/CompressedImage` に変更しているか
-- Video Inputのsource fpsが想定通り取得されているか
-- `/api/run-status` が巨大化していないか
+1. Worker writes latest frame artifact + metadata.
+2. `run-status` includes `frameRef` metadata.
+3. UI requests `/api/node-frame?nodeId=...` for actual frame bytes.
+4. Canvas is updated in-place to avoid blank-frame flicker.
 
-### Video previewは止まるがDDSが止まらない
+## 13. Frozen Runtime Specifics
 
-プレビューとDDS出力は別実行主体です。loop設定はWebUIからserver側runtime paramsへ送られ、worker statusの `ended=true` によってDDS出力停止が判断されます。Run中にloopを変更した場合は `/api/update-node-params` でserverへ反映されます。
+When running as standalone binary:
 
-### 画像表示がカクつく
+1. App home is OS-specific (`standalone_app_home`).
+2. `lwrclpy_site` is prepended to `sys.path`.
+3. Latest `lwrclpy` wheel is auto-installed/updated at startup when possible.
+4. Worker imports get compatibility alias `builtins.__orig_import__` for embedded PySide/shiboken paths.
 
-Image ViewはDDS受信自体とは別に、preview JPEG生成とcanvas描画速度に依存します。Hz Monitorが正しい値ならDDS受信は成立しており、問題は表示側です。
+## 14. Build and Packaging Model
+
+Supported scripts:
+
+- Linux: `scripts/build_linux_standalone.sh`
+- macOS: `scripts/build_macos_standalone.sh`
+- Windows: `scripts/build_windows_standalone.ps1`
+
+All produce PyInstaller `onedir` bundles on their native OS.
+Cross-OS artifact generation is not supported in this repository workflow.
+
+## 15. Known Operational Guardrails
+
+1. Run `Ready` before `Run`; server enforces signature match.
+2. Only one server instance per working context due lock guard.
+3. If UI appears stuck at stopping, force-stop escalation path should recover without indefinite wait.
+4. Keep only one active server target (avoid running development and standalone servers simultaneously against the same workspace).

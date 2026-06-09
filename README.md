@@ -28,13 +28,114 @@ python3.13 -m venv .venv
 .venv/bin/python main.py --host 127.0.0.1 --port 8765
 ```
 
-起動すると次のように表示されます。
+## Linux向けスタンドアロンアプリ化
+
+LinuxではPyInstallerで `onedir` 形式のスタンドアロン実行ファイルを作成できます。
+
+1. 通常どおりvenvを準備し、依存を入れます。
+
+```bash
+python3.13 -m venv venv
+venv/bin/python -m pip install -r requirements.txt
+```
+
+1. ビルドスクリプトを実行します。
+
+```bash
+scripts/build_linux_standalone.sh
+```
+
+1. 生成物を起動します（外部ブラウザ不要、アプリ内にWebUIを表示）。
+
+```bash
+dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
+```
+
+従来どおりHTTPサーバーとして起動したい場合は次を使います。
+
+```bash
+dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor --server --host 127.0.0.1 --port 8765
+```
+
+デスクトップ起動時は内部サーバーを別プロセスでlocalhost起動し、アプリ内WebViewから接続します。
+
+```text
+lwrclpy Web Node Editor Desktop: http://127.0.0.1:<auto-port>
+```
+
+スタンドアロン実行時の作業ディレクトリは既定で次になります。
+
+```text
+~/.local/share/lwrclpy-web-node-editor
+```
+
+変更したい場合は起動前に次を設定してください。
+
+```bash
+export LWRCLPY_WEB_NODE_EDITOR_HOME=/path/to/workdir
+```
+
+サーバーモードで起動すると次のように表示されます。
 
 ```text
 lwrclpy Web Node Editor: http://127.0.0.1:8765
 ```
 
-ブラウザで `http://127.0.0.1:8765` を開いてください。
+サーバーモードではブラウザで `http://127.0.0.1:8765` を開いてください。
+
+同じ作業ディレクトリではサーバー単一起動ロックが有効です。すでに起動中のサーバーがある状態で再起動すると、次のようなエラーで拒否されます。
+
+```text
+Another lwrclpy Web Node Editor server is already running (lock: .../server.lock). Stop it first before starting a new instance.
+```
+
+## macOS向けスタンドアロンアプリ化
+
+macOSでは、macOS上で次のスクリプトを実行して `onedir` 形式を作成します。
+
+```bash
+python3.13 -m venv venv
+venv/bin/python -m pip install -r requirements.txt
+scripts/build_macos_standalone.sh
+```
+
+署名付きでビルドする場合は、`MAC_CODESIGN_IDENTITY` を指定して実行します。
+
+```bash
+export MAC_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+scripts/build_macos_standalone.sh
+```
+
+必要な場合は `MAC_CODESIGN_ENTITLEMENTS=/path/to/entitlements.plist` も指定できます。
+
+生成物の起動例:
+
+```bash
+dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
+dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor --server --host 127.0.0.1 --port 8765
+```
+
+## Windows向けスタンドアロンアプリ化
+
+Windowsでは、Windows上でPowerShellから次を実行します。
+
+```powershell
+py -3.13 -m venv venv
+venv\Scripts\python.exe -m pip install -r requirements.txt
+powershell -ExecutionPolicy Bypass -File scripts\build_windows_standalone.ps1
+```
+
+生成物の起動例:
+
+```powershell
+dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe
+dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe --server --host 127.0.0.1 --port 8765
+```
+
+補足:
+
+- Linux/macOS/WindowsはそれぞれのOS上で個別にビルドしてください。
+- 既定のPythonは `venv` 配下を参照します。別のPythonを使う場合は `PYTHON_BIN` を設定してください。
 
 すでに8765番ポートを使っているサーバーがある場合は、止めるか別ポートで起動します。
 
@@ -51,7 +152,7 @@ lwrclpy Web Node Editor: http://127.0.0.1:8765
 5. Video入力、処理後画像、motion scoreのグラフが動くことを確認します。
 6. 止めるときは `Stop` を押します。
 
-`Run Hz` で連続実行時のtick周波数を設定できます。デフォルトは1000Hzです。`Run` の連続実行ループはサーバー側で動くため、ブラウザタブがフォーカスを失ってもTopic出力は継続します。`Duration sec` に秒数を入力して `Run For` を使うと、指定秒数だけ実行して自動停止できます。
+`Run Hz` で連続実行時のtick周波数を設定できます。デフォルトは30Hzです。`Run` の連続実行ループはサーバー側で動くため、ブラウザタブがフォーカスを失ってもTopic出力は継続します。`Duration sec` に秒数を入力して `Run For` を使うと、指定秒数だけ実行して自動停止できます。
 
 ## ショートカット
 
@@ -64,7 +165,7 @@ lwrclpy Web Node Editor: http://127.0.0.1:8765
 
 ## サンプルプロジェクト
 
-`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
+`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/`, `deep_learning/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
 
 - `image_video/01_image_edge_topic_graph.json`: 画像入力、グレースケール化、エッジ抽出、画像表示、エッジ強度グラフ、topic出力。
 - `image_video/02_video_motion_topic_graph.json`: 動画フレーム入力、フレーム差分によるmotion mask、overlay表示、motion scoreグラフ、topic出力。
@@ -78,6 +179,7 @@ lwrclpy Web Node Editor: http://127.0.0.1:8765
 - `custom_runtime/10_multi_timer_counter_graph.json`: 1つのカスタムノードに複数Timerを持たせ、別々の周期で値をpublish。
 - `custom_runtime/11_manual_subscriber_timer_sampler.json`: Subscriber callbackをOFFにし、Timer callbackから `latest()` で入力を読む例。
 - `image_video/12_image_view_save_topic_output.json`: 埋め込み画像を表示、保存、topic出力境界へ接続。
+- `deep_learning/13_mac_yolo_mps_detection_segmentation.json`: Video File Inputを2つのYOLOノードへ分岐し、検出とセグメンテーションの結果を表示。
 
 詳しい分類は `samples/README.md` を参照してください。カスタムノードを含むサンプルは、実行時にノードごとのvenvとworker processを使います。
 
@@ -171,6 +273,24 @@ if frame and mask:
     publish("out1", frame)
 ```
 
+複数の出力ポート（複数Publisher相当）を持つ場合は、同じCallback内で `publish(...)` を出力ポートごとに呼びます。必要に応じて、同じ入力から加工結果を分岐して別topicへ同時に出力できます。
+
+```python
+# out_raw: 元データ, out_norm: 正規化値, out_alert: しきい値判定結果
+value = float(getattr(msg, "data", msg.get("data", 0.0)) if hasattr(msg, "data") or isinstance(msg, dict) else msg)
+max_v = float(params.get("max", 100.0))
+threshold = float(params.get("threshold", 0.8))
+
+norm = 0.0 if max_v <= 0 else max(0.0, min(1.0, value / max_v))
+is_alert = norm >= threshold
+
+publish("out_raw", value)
+publish("out_norm", norm)
+publish("out_alert", is_alert)
+```
+
+各 `output_id` はノード定義のOutputsで追加したIDと一致させてください。未定義の `output_id` へ `publish` しても配線されません。
+
 ## Timer CallbackとMain Loop
 
 Timer Callbackは、Run中に設定周期へ到達したときに実行されます。1ノードに複数のTimerを設定でき、Timerごとに `timer_id`, `timer_name`, `period` が渡されます。
@@ -235,7 +355,7 @@ if state.get("enabled", True):
 
 ノードの `requirements.txt` に依存を書くと、実行前に `uv` がそのノード用venvを作成し、必要なパッケージとlwrclpyをインストールします。lwrclpyはGitHub Releasesの `latest` タグから、現在のPython ABIとOS/CPUに合うwheelを自動選択してインストールします。Webプレビューでは、カスタムノードごとに `.node_envs/<node-id>` のPythonで別ワーカープロセスを起動し、ノード間や組み込みツールノードとの接続はlwrclpy topicで橋渡しします。
 
-`Stop` は実行中の全カスタムノードワーカーへ停止指示を送り、通常停止できない場合はタイムアウト後にkillします。`Force Stop` は最初から全カスタムノードワーカーを強制終了します。サーバー起動時と終了時にも、このフレームワークが起動した残存 `node_worker.py` プロセスを検出して強制終了します。
+`Stop` は実行中の全カスタムノードワーカーへ停止指示を送り、通常停止できない場合はサーバー側でforce-stopへエスカレーションします。UI側でもStop要求がタイムアウトした場合は自動で `Force Stop` を再送します。`Force Stop` は全カスタムノードワーカーを強制終了します。サーバー起動時と終了時にも、このフレームワークが起動した残存workerプロセスを検出して強制終了します。
 
 ## トラブルシュート
 
@@ -246,6 +366,10 @@ if state.get("enabled", True):
 ```bash
 .venv/bin/python main.py --host 127.0.0.1 --port 8766
 ```
+
+### サーバー重複起動エラーが出る
+
+`Another lwrclpy Web Node Editor server is already running` が表示される場合、同じ作業コンテキストに既存サーバーが起動中です。既存プロセスを停止してから再起動するか、別の作業ディレクトリで起動してください。
 
 ### 動画が動かない
 
@@ -265,7 +389,7 @@ if state.get("enabled", True):
 
 ## 関連ファイル
 
-- `main.py`: Webサーバーの起動入口。
+- `main.py`: サーバー/デスクトップ/workerの統合起動入口。
 - `lwrclpy_web_node_editor/server.py`: HTTP APIと静的ファイル配信。
 - `lwrclpy_web_node_editor/graph.py`: グラフ実行、画像変換、lwrclpy topic連携。
 - `lwrclpy_web_node_editor/static/app.js`: ブラウザUI。

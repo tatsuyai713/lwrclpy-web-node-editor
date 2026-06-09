@@ -1,5 +1,7 @@
 const UI_DISPLAY_FPS = 30;
 const UI_DISPLAY_FRAME_MS = 1000 / UI_DISPLAY_FPS;
+const UI_STATUS_FPS = 30;
+const UI_STATUS_POLL_MS = 1000 / UI_STATUS_FPS;
 const VIDEO_RAW_IMAGE_TYPE = 'sensor_msgs/msg/Image';
 const VIDEO_COMPRESSED_IMAGE_TYPE = 'sensor_msgs/msg/CompressedImage';
 const FRAME_FETCH_TIMEOUT_MS = 1200;
@@ -1548,16 +1550,21 @@ function startLinkDrag(ev, row) {
   document.body.classList.add('linking');
   renderLinks();
   const move = (e) => {
+    if (!state.dragLink) return;
     state.dragLink.pointer = { x: e.clientX, y: e.clientY };
     updateDropTargets();
     renderLinks();
   };
   const up = (e) => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    if (!state.dragLink) {
+      clearLinkDrag();
+      return;
+    }
     const target = document.elementFromPoint(e.clientX, e.clientY)?.closest('.port.input');
     if (target) finishLinkDrag(e, target);
     clearLinkDrag();
-    window.removeEventListener('pointermove', move);
-    window.removeEventListener('pointerup', up);
   };
   window.addEventListener('pointermove', move);
   window.addEventListener('pointerup', up);
@@ -1855,7 +1862,8 @@ async function pollRunStatus() {
     setExecutionStatus('error', `Status API error: ${err.message}`);
   } finally {
     state.runStatusInFlight = false;
-    if (state.autoTimer) state.autoTimer = setTimeout(pollRunStatus, UI_DISPLAY_FRAME_MS);
+    // Keep control-plane polling lighter than frame rendering to avoid UI stutter.
+    if (state.autoTimer) state.autoTimer = setTimeout(pollRunStatus, UI_STATUS_POLL_MS);
   }
 }
 
@@ -1980,19 +1988,33 @@ function isStartupStatusText(text) {
 }
 
 async function stopWorkers(force = false) {
+  const controller = new AbortController();
+  const timeoutMs = force ? 2500 : 2000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const endpoint = force ? '/api/force-stop' : '/api/stop';
     const data = await fetch(endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
+      signal: controller.signal,
       body: JSON.stringify({ force }),
     }).then((res) => res.json());
     const count = Object.keys(data.stopped || {}).length;
+    if (!force && data.pending) {
+      setExecutionStatus('stopping', 'Stop is taking too long, escalating to force stop');
+      return await stopWorkers(true);
+    }
     setExecutionStatus('stopped', `${force ? 'Force stopped' : 'Stopped'} ${count} worker process${count === 1 ? '' : 'es'}`);
     return data;
   } catch (err) {
+    if (err?.name === 'AbortError' && !force) {
+      setExecutionStatus('stopping', 'Stop timed out, escalating to force stop');
+      return await stopWorkers(true);
+    }
     setExecutionStatus('error', `Stop API error: ${err.message}`);
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

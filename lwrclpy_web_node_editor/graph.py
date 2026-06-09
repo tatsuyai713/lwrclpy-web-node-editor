@@ -6,6 +6,7 @@ import json
 import math
 import pkgutil
 import base64
+import builtins
 import hashlib
 import os
 import random
@@ -18,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from .runtime_exec import find_lwrclpy_installer, resolve_worker_command
 
 
 def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
@@ -36,10 +39,7 @@ def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
             if not kind_dir.is_dir():
                 continue
             if kind == "msg":
-                names = sorted(
-                    path.stem for path in kind_dir.glob("*.py")
-                    if path.stem[:1].isupper() and not path.stem.endswith("_Wrapper")
-                )
+                names = sorted(_discover_message_names(kind_dir))
             else:
                 names = sorted({
                     path.stem.removesuffix("_Request").removesuffix("_Response")
@@ -49,6 +49,22 @@ def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
             if names:
                 result.setdefault(package, {})[kind] = names
     return dict(sorted(result.items()))
+
+
+def _discover_message_names(kind_dir: Path) -> set[str]:
+    names: set[str] = {
+        path.stem for path in kind_dir.glob("*.py")
+        if path.stem[:1].isupper() and not path.stem.endswith("_Wrapper")
+    }
+    for path in kind_dir.glob("*.so"):
+        stem = path.stem
+        if stem.startswith("lib") and len(stem) > 3 and stem[3:4].isupper():
+            names.add(stem[3:])
+        elif stem.startswith("_") and stem.endswith("Wrapper"):
+            candidate = stem[1:-7]
+            if candidate[:1].isupper():
+                names.add(candidate)
+    return names
 
 
 LWRCLPY_TYPE_TREE = discover_lwrclpy_types()
@@ -498,7 +514,8 @@ class CustomLwrclNodeInstance:
         tool = self.config.tool_type
         if self._builtin_runs_in_background():
             self._ensure_builtin_workers_once()
-            self._execute_builtin_worker_status_once()
+            if self._should_update_background_view():
+                self._execute_builtin_worker_status_once()
             if not self.view:
                 self.view = {"kind": "text", "status": "running in background"}
             return True
@@ -657,11 +674,10 @@ class CustomLwrclNodeInstance:
         except Exception:
             pass
         write_json_atomic(config_path, self._builtin_source_worker_config(status_path))
-        worker_script = Path(__file__).resolve().parent / "builtin_source_worker.py"
         try:
             log_file = log_path.open("a", encoding="utf-8")
             self.worker_process = subprocess.Popen(
-                [str(self._worker_python()), str(worker_script), str(config_path)],
+                resolve_worker_command("builtin_source", config_path, self._worker_python()),
                 cwd=Path.cwd(),
                 env=self._worker_env(),
                 stdout=log_file,
@@ -724,11 +740,10 @@ class CustomLwrclNodeInstance:
         except Exception:
             pass
         write_json_atomic(config_path, self._dds_tap_worker_config(status_path, frame_path))
-        worker_script = Path(__file__).resolve().parent / "dds_tap_worker.py"
         try:
             log_file = log_path.open("a", encoding="utf-8")
             self.worker_process = subprocess.Popen(
-                [str(self._worker_python()), str(worker_script), str(config_path)],
+                resolve_worker_command("dds_tap", config_path, self._worker_python()),
                 cwd=Path.cwd(),
                 env=self._worker_env(),
                 stdout=log_file,
@@ -828,11 +843,10 @@ class CustomLwrclNodeInstance:
         except Exception:
             pass
         write_json_atomic(config_path, self._video_worker_config(status_path, frame_path))
-        worker_script = Path(__file__).resolve().parent / "video_dds_worker.py"
         try:
             log_file = log_path.open("a", encoding="utf-8")
             self.worker_process = subprocess.Popen(
-                [str(self._worker_python()), str(worker_script), str(config_path)],
+                resolve_worker_command("video", config_path, self._worker_python()),
                 cwd=Path.cwd(),
                 env=self._worker_env(),
                 stdout=log_file,
@@ -871,6 +885,12 @@ class CustomLwrclNodeInstance:
     def _worker_env(self) -> dict[str, str]:
         env = dict(os.environ)
         env.pop("__PYVENV_LAUNCHER__", None)
+        if self.env_site_packages:
+            env["LWRCLPY_EXTRA_SITE_PACKAGES"] = str(self.env_site_packages)
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = (
+                f"{self.env_site_packages}{os.pathsep}{existing}" if existing else str(self.env_site_packages)
+            )
         return env
 
     def _video_worker_completed(self) -> bool:
@@ -1920,28 +1940,11 @@ class CustomLwrclNodeInstance:
         signature = f"{self.env_site_packages}|{self.config.import_code}"
         if self._exec_globals is not None and self._import_signature == signature:
             return self._exec_globals
+        if not hasattr(builtins, "__orig_import__"):
+            builtins.__orig_import__ = builtins.__import__
         self._exec_globals = {
-            "__builtins__": {
-                "__import__": __import__,
-                "abs": abs,
-                "bool": bool,
-                "dict": dict,
-                "enumerate": enumerate,
-                "float": float,
-                "getattr": getattr,
-                "hasattr": hasattr,
-                "int": int,
-                "len": len,
-                "list": list,
-                "max": max,
-                "min": min,
-                "print": self.log,
-                "range": range,
-                "round": round,
-                "setattr": setattr,
-                "str": str,
-                "sum": sum,
-            },
+            "__builtins__": builtins,
+            "print": self.log,
         }
         code = self.config.import_code.strip()
         if code:
@@ -2093,14 +2096,20 @@ class GraphRuntime:
                 node.close()
             self.instances.clear()
 
-    def stop(self, force: bool = False) -> dict[str, Any]:
-        with self._lock:
+    def stop(self, force: bool = False, lock_timeout: float = 1.0) -> dict[str, Any]:
+        timeout = max(0.0, float(lock_timeout))
+        acquired = self._lock.acquire(timeout=timeout)
+        if not acquired:
+            return {"stopped": {}, "force": force, "pending": True, "reason": "runtime busy"}
+        try:
             stopped: dict[str, str] = {}
             for node_id, node in list(self.instances.items()):
                 if node.stop_worker(force=force, timeout=0.5):
                     stopped[node_id] = "killed" if force else "terminated"
             self._runtime_param_overrides.clear()
             return {"stopped": stopped, "force": force}
+        finally:
+            self._lock.release()
 
     def update_node_params(self, updates: list[dict[str, Any]]) -> int:
         with self._lock:
@@ -2244,11 +2253,6 @@ class GraphRuntime:
             instance.config.params.update(params)
 
     def _ensure_node_environment(self, config: CustomLwrclNodeConfig, instance: CustomLwrclNodeInstance) -> bool:
-        uv = self._uv_command()
-        if not uv:
-            instance.env_status = "uv command not found"
-            instance.log(instance.env_status)
-            return False
         env_root = Path.cwd() / ".node_envs" / config.id
         req_text = self._requirements_text_for(config)
         req_hash = hashlib.sha256(req_text.encode("utf-8")).hexdigest()
@@ -2258,10 +2262,25 @@ class GraphRuntime:
         lwrclpy_marker = env_root / ".lwrclpy-installed"
         req_file = env_root / "requirements.txt"
         python_bin = env_root / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
+        if (
+            instance.env_signature == desired_env_signature
+            and instance.env_path == env_root
+            and instance.env_python_bin == python_bin
+            and python_bin.exists()
+        ):
+            if instance.env_site_packages is None:
+                instance.env_site_packages = self._site_packages_for(env_root)
+            instance.env_status = "ready (built-in venv)" if config.tool_type else "ready"
+            return True
+        uv = self._uv_command()
+        if not uv:
+            instance.env_status = "uv command not found"
+            instance.log(instance.env_status)
+            return False
         expected_python = self._python_runtime_signature()
         try:
             current_python = python_marker.read_text(encoding="utf-8") if python_marker.exists() else ""
-            if python_bin.exists() and current_python != expected_python:
+            if python_bin.exists() and (current_python != expected_python or not self._venv_python_matches(env_root)):
                 instance.stop_worker(force=True)
                 shutil.rmtree(env_root, ignore_errors=True)
                 instance.env_signature = None
@@ -2270,8 +2289,9 @@ class GraphRuntime:
             env_root.mkdir(parents=True, exist_ok=True)
             if not python_bin.exists():
                 instance.env_status = "creating venv"
-                subprocess.run([uv, "venv", "--clear", "--python", sys.executable, str(env_root)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
-                python_marker.write_text(expected_python, encoding="utf-8")
+                real_python = self._real_python()
+                subprocess.run([uv, "venv", "--clear", "--python", real_python, str(env_root)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
+                python_marker.write_text(self._python_runtime_signature(real_python), encoding="utf-8")
             req_file.write_text(req_text, encoding="utf-8")
             current_hash = hash_file.read_text(encoding="utf-8") if hash_file.exists() else ""
             if current_hash != req_hash:
@@ -2299,8 +2319,85 @@ class GraphRuntime:
             instance.log(instance.env_status)
             return False
 
-    def _python_runtime_signature(self) -> str:
-        return f"{sys.executable}\n{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n"
+    def _real_python(self) -> str:
+        """Return a path to a genuine CPython interpreter.
+
+        When running as a PyInstaller frozen binary, sys.executable points to
+        the app bundle rather than a Python interpreter, which causes
+        ``uv venv --python <exe>`` to fail.  In that case we resolve the real
+        interpreter by version tag (e.g. ``python3.13``) from PATH or common
+        system locations.
+        """
+        if not getattr(sys, "frozen", False):
+            return sys.executable
+        tag = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        candidates: list[str] = []
+        found = shutil.which(tag)
+        if found:
+            candidates.append(found)
+        for candidate in [
+            f"/opt/homebrew/bin/{tag}",
+            f"/usr/bin/{tag}",
+            f"/usr/local/bin/{tag}",
+            f"/opt/homebrew/opt/python@{sys.version_info.major}.{sys.version_info.minor}/bin/{tag}",
+            f"/usr/local/opt/python@{sys.version_info.major}.{sys.version_info.minor}/bin/{tag}",
+        ]:
+            candidates.append(candidate)
+        for candidate in candidates:
+            if Path(candidate).exists() and self._python_executable_matches(candidate):
+                return candidate
+        raise RuntimeError(
+            f"Python {sys.version_info.major}.{sys.version_info.minor} is required to create node venvs. "
+            f"Install {tag} or set PATH so {tag} is found."
+        )
+
+    def _python_executable_matches(self, python_path: str | Path) -> bool:
+        try:
+            completed = subprocess.run(
+                [
+                    str(python_path),
+                    "-c",
+                    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return False
+        return completed.stdout.strip() == f"{sys.version_info.major}.{sys.version_info.minor}"
+
+    def _python_runtime_signature(self, python_path: str | Path | None = None) -> str:
+        real_python = str(python_path or self._real_python())
+        version = self._python_full_version(real_python)
+        return f"{real_python}\n{version}\n"
+
+    def _python_full_version(self, python_path: str | Path) -> str:
+        try:
+            completed = subprocess.run(
+                [
+                    str(python_path),
+                    "-c",
+                    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return completed.stdout.strip()
+        except Exception:
+            return f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+
+    def _venv_python_matches(self, env_root: Path) -> bool:
+        cfg = env_root / "pyvenv.cfg"
+        if not cfg.exists():
+            return False
+        try:
+            text = cfg.read_text(encoding="utf-8")
+        except Exception:
+            return False
+        expected = f"version_info = {sys.version_info.major}.{sys.version_info.minor}."
+        return expected in text
 
     def _requirements_text_for(self, config: CustomLwrclNodeConfig) -> str:
         if not config.tool_type:
@@ -2325,8 +2422,8 @@ class GraphRuntime:
         return None
 
     def _ensure_lwrclpy_in_env(self, python_bin: Path, instance: CustomLwrclNodeInstance) -> bool:
-        installer = Path(__file__).resolve().parents[1] / "scripts" / "install_lwrclpy.py"
-        if not installer.exists():
+        installer = find_lwrclpy_installer()
+        if installer is None:
             instance.env_status = "lwrclpy installer not found"
             instance.log(instance.env_status)
             return False
@@ -2351,11 +2448,10 @@ class GraphRuntime:
         log_path = worker_dir / f"{config.id}.log"
         pid_path = worker_dir / f"{config.id}.pid"
         write_json_atomic(config_path, self._worker_config(config))
-        worker_script = Path(__file__).resolve().parent / "node_worker.py"
         try:
             log_file = log_path.open("a", encoding="utf-8")
             instance.worker_process = subprocess.Popen(
-                [str(python_bin), str(worker_script), str(config_path)],
+                resolve_worker_command("node", config_path, python_bin),
                 cwd=Path.cwd(),
                 env=instance._worker_env(),
                 stdout=log_file,
@@ -2422,8 +2518,18 @@ class GraphRuntime:
         direct = shutil.which("uv")
         if direct:
             return direct
-        sibling = Path(sys.executable).parent / ("uv.exe" if sys.platform.startswith("win") else "uv")
-        return str(sibling) if sibling.exists() else None
+        uv_name = "uv.exe" if sys.platform.startswith("win") else "uv"
+        candidates = [
+            Path(sys.executable).parent / uv_name,           # next to executable (venv or frozen)
+            Path(sys.executable).parent / "_internal" / uv_name,  # PyInstaller 6 onedir layout
+        ]
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.insert(0, Path(meipass) / uv_name)    # highest priority in frozen mode
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return None
 
     def _parse_node(self, node: dict[str, Any]) -> CustomLwrclNodeConfig:
         tool_type = str(node.get("toolType", ""))

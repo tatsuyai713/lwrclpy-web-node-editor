@@ -6,3 +6,5 @@ __pycache__/
 .test_image.jpg
 .node_workers/
 .node_envs/
+dist/
+build/

@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import sys
+import builtins
 import time
 from pathlib import Path
 from typing import Any
@@ -229,29 +230,12 @@ class LwrclpyWorkerNode:
     def _globals(self) -> dict[str, Any]:
         if self._globals_cache is not None:
             return self._globals_cache
+        if not hasattr(builtins, "__orig_import__"):
+            builtins.__orig_import__ = builtins.__import__
         globals_dict = {
-            "__builtins__": {
-                "__import__": __import__,
-                "abs": abs,
-                "bool": bool,
-                "bytes": bytes,
-                "dict": dict,
-                "enumerate": enumerate,
-                "float": float,
-                "getattr": getattr,
-                "hasattr": hasattr,
-                "int": int,
-                "len": len,
-                "list": list,
-                "max": max,
-                "min": min,
-                "print": self.log,
-                "range": range,
-                "round": round,
-                "setattr": setattr,
-                "str": str,
-                "sum": sum,
-            }
+            "__builtins__": builtins,
+            # Keep print routed to node log while preserving full builtins/import behavior.
+            "print": self.log,
         }
         import_code = self.node_config.get("importCode", "").strip()
         if import_code:

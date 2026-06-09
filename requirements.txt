@@ -1,3 +1,4 @@
 uv
 pillow
 opencv-python-headless
+pywebview
