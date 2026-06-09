@@ -2,3 +2,6 @@ uv
 pillow
 opencv-python-headless
 pywebview
+mcap
+mcap-ros2-support
+PyYAML

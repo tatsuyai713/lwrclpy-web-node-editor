@@ -97,6 +97,53 @@ def _json_default(value):
     return str(value)
 
 
+def _dependency_site_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        root = standalone_app_home()
+    else:
+        root = APP_SETTINGS_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "python_site"
+
+
+def _ensure_mcap_dependencies() -> None:
+    site_dir = _dependency_site_dir()
+    if site_dir.is_dir():
+        site_text = str(site_dir)
+        if site_text not in sys.path:
+            sys.path.insert(0, site_text)
+    try:
+        import mcap  # noqa: F401
+        import yaml  # noqa: F401
+        return
+    except Exception:
+        pass
+    site_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--target",
+            str(site_dir),
+            "--prefer-binary",
+            "mcap",
+            "mcap-ros2-support",
+            "PyYAML",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    site_text = str(site_dir)
+    if site_text not in sys.path:
+        sys.path.insert(0, site_text)
+    import mcap  # noqa: F401
+    import yaml  # noqa: F401
+
+
 def _select_video_file() -> dict[str, object]:
     if sys.platform == "darwin":
         script = (
@@ -139,6 +186,194 @@ def _select_video_file() -> dict[str, object]:
     except Exception as exc:
         result["probeError"] = str(exc)
     return result
+
+
+def _select_mcap_file() -> dict[str, object]:
+    if sys.platform == "darwin":
+        script = (
+            'set f to choose file with prompt "Select MCAP file"\n'
+            "POSIX path of f"
+        )
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        if result.returncode != 0:
+            text = (result.stderr or result.stdout or "").strip()
+            if "User canceled" in text or result.returncode == 1:
+                return {"ok": True, "canceled": True}
+            raise RuntimeError(text or "MCAP file selection failed")
+        path = result.stdout.strip()
+    else:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            path = filedialog.askopenfilename(
+                title="Select MCAP file",
+                filetypes=[
+                    ("MCAP files", "*.mcap"),
+                    ("All files", "*.*"),
+                ],
+            )
+        finally:
+            root.destroy()
+        if not path:
+            return {"ok": True, "canceled": True}
+    selected = Path(path).expanduser()
+    if not selected.is_file():
+        raise RuntimeError(f"selected file does not exist: {selected}")
+    try:
+        return {"ok": True, **_probe_mcap_file(selected)}
+    except Exception as exc:
+        return {"ok": True, "path": str(selected), "fileName": selected.name, "channels": [], "channelCount": 0, "probeError": str(exc)}
+
+
+def _open_mcap_file(path: object) -> dict[str, object]:
+    selected = Path(str(path or "")).expanduser()
+    if not selected.is_file():
+        raise RuntimeError(f"selected file does not exist: {selected}")
+    if selected.suffix.lower() != ".mcap":
+        raise RuntimeError(f"selected file is not an .mcap file: {selected}")
+    try:
+        return {"ok": True, **_probe_mcap_file(selected)}
+    except Exception as exc:
+        return {"ok": True, "path": str(selected), "fileName": selected.name, "channels": [], "channelCount": 0, "probeError": str(exc)}
+
+
+def _normalize_mcap_message_type(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "/" in text:
+        return text.replace(".", "/")
+    return text.replace(".", "/")
+
+
+def _is_ros2_mcap_channel(channel: dict[str, object]) -> bool:
+    message_encoding = str(channel.get("messageEncoding") or "").lower()
+    data_type = _normalize_mcap_message_type(channel.get("type") or "")
+    return message_encoding == "cdr" and "/msg/" in data_type
+
+
+def _load_mcap_sidecar_metadata(path: Path) -> dict[str, object]:
+    _ensure_mcap_dependencies()
+    candidates = [
+        path.parent / "metadata.yaml",
+        path.parent / "metadata.yml",
+        path.parent / "metadata.json",
+        path.with_suffix(path.suffix + ".metadata.yaml"),
+        path.with_suffix(path.suffix + ".metadata.yml"),
+        path.with_suffix(path.suffix + ".metadata.json"),
+        path.with_suffix(".metadata.yaml"),
+        path.with_suffix(".metadata.yml"),
+        path.with_suffix(".metadata.json"),
+    ]
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            if candidate.suffix.lower() == ".json":
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            else:
+                import yaml
+
+                data = yaml.safe_load(candidate.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {"metadataPath": str(candidate), "metadataError": str(exc)}
+        return {"metadataPath": str(candidate), "metadata": data if isinstance(data, dict) else {}}
+    return {}
+
+
+def _metadata_topics(metadata: object) -> list[dict[str, object]]:
+    if not isinstance(metadata, dict):
+        return []
+    source = metadata.get("topics") or metadata.get("channels") or metadata.get("rosbag2_bagfile_information")
+    if isinstance(source, dict):
+        source = source.get("topics") or source.get("topics_with_message_count")
+    if not isinstance(source, list):
+        return []
+    topics: list[dict[str, object]] = []
+    for item in source:
+        if not isinstance(item, dict):
+            continue
+        topic_metadata = item.get("topic_metadata") if isinstance(item.get("topic_metadata"), dict) else item
+        name = topic_metadata.get("name") or topic_metadata.get("topic") or item.get("topic")
+        type_name = topic_metadata.get("type") or topic_metadata.get("message_type") or item.get("type")
+        if not name or not type_name:
+            continue
+        topics.append({
+            "topic": str(name),
+            "type": _normalize_mcap_message_type(type_name),
+            "messageCount": int(item.get("message_count") or item.get("messageCount") or 0),
+        })
+    return topics
+
+
+def _probe_mcap_file(path: Path) -> dict[str, object]:
+    _ensure_mcap_dependencies()
+    from mcap.reader import make_reader
+
+    channels: dict[str, dict[str, object]] = {}
+    start_time: int | None = None
+    end_time: int | None = None
+    with path.open("rb") as stream:
+        reader = make_reader(stream)
+        summary = reader.get_summary()
+        if summary is not None:
+            stats = summary.statistics
+            start_time = int(stats.message_start_time or 0) or None
+            end_time = int(stats.message_end_time or 0) or None
+            for channel_id, channel in summary.channels.items():
+                schema = summary.schemas.get(channel.schema_id)
+                channels[str(channel.topic)] = {
+                    "topic": str(channel.topic),
+                    "type": _normalize_mcap_message_type(schema.name if schema else ""),
+                    "messageEncoding": channel.message_encoding,
+                    "schemaEncoding": schema.encoding if schema else "",
+                    "messageCount": int(stats.channel_message_counts.get(channel_id, 0)),
+                }
+        else:
+            for schema, channel, message in reader.iter_messages(log_time_order=False):
+                topic = str(channel.topic)
+                schema_name = _normalize_mcap_message_type(schema.name if schema else "")
+                item = channels.setdefault(topic, {
+                    "topic": topic,
+                    "type": schema_name,
+                    "messageEncoding": channel.message_encoding,
+                    "schemaEncoding": schema.encoding if schema else "",
+                    "messageCount": 0,
+                })
+                if schema_name and not item.get("type"):
+                    item["type"] = schema_name
+                item["messageCount"] = int(item.get("messageCount") or 0) + 1
+                start_time = message.log_time if start_time is None else min(start_time, message.log_time)
+                end_time = message.log_time if end_time is None else max(end_time, message.log_time)
+    sidecar = _load_mcap_sidecar_metadata(path)
+    for meta_topic in _metadata_topics(sidecar.get("metadata")):
+        topic = str(meta_topic.get("topic") or "")
+        if not topic:
+            continue
+        item = channels.setdefault(topic, {"topic": topic, "messageCount": 0})
+        if meta_topic.get("type"):
+            item["type"] = meta_topic["type"]
+        if meta_topic.get("messageCount"):
+            item["messageCount"] = meta_topic["messageCount"]
+    duration_sec = ((end_time - start_time) / 1e9) if start_time is not None and end_time is not None else 0.0
+    sorted_channels = sorted(channels.values(), key=lambda item: str(item.get("topic") or ""))
+    for channel in sorted_channels:
+        channel["ros2Compatible"] = _is_ros2_mcap_channel(channel)
+    return {
+        "path": str(path),
+        "fileName": path.name,
+        "channels": sorted_channels,
+        "channelCount": len(sorted_channels),
+        "ros2ChannelCount": sum(1 for channel in sorted_channels if channel.get("ros2Compatible")),
+        "startTimeNs": start_time or 0,
+        "endTimeNs": end_time or 0,
+        "durationSec": duration_sec,
+        **sidecar,
+    }
 
 
 def _probe_video_file(path: Path) -> dict[str, object]:
@@ -616,6 +851,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json({"error": str(exc)}, status=500)
             return
+        if path == "/api/select-mcap-file":
+            try:
+                self._send_json(_select_mcap_file())
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=500)
+            return
         if path not in {
             "/api/run",
             "/api/ready",
@@ -627,6 +868,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/custom-nodes/save",
             "/api/custom-nodes/delete",
             "/api/custom-nodes/import",
+            "/api/open-mcap-file",
         }:
             self.send_error(404)
             return
@@ -641,6 +883,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/custom-nodes/import":
                 result = _import_custom_nodes(payload)
                 result["customNodes"] = _read_custom_nodes()
+            elif path == "/api/open-mcap-file":
+                result = _open_mcap_file(payload.get("path"))
             elif path == "/api/run":
                 signature = self._payload_signature(payload)
                 if self.__class__._ready_signature != signature:

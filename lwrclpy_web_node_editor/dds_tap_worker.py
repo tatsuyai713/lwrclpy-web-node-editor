@@ -8,6 +8,7 @@ import os
 import signal
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ def _spin_executor(executor: Any) -> None:
         try:
             executor.spin_once(timeout_sec=0.01)
         except Exception:
+            traceback.print_exc()
             time.sleep(0.01)
 
 
@@ -86,8 +88,18 @@ def _field(value: Any, key: str) -> Any:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
-    tmp_path.replace(path)
+    data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("status write returned 0 bytes")
+            view = view[written:]
+    finally:
+        os.close(fd)
+    os.replace(tmp_path, path)
 
 
 def _decimate_series(series: list[dict[str, float]], limit: int) -> list[dict[str, float]]:
@@ -150,6 +162,9 @@ class DdsTap:
         self._lock = threading.Lock()
         self._times: list[float] = []
         self._series: list[dict[str, float]] = []
+        self._graph_recent_points: list[dict[str, float]] = []
+        self._graph_reset_key = f"{os.getpid()}:{time.time_ns()}"
+        self._graph_transfer_limit = max(256, min(self.sample_limit, 2048))
         self._latest_msg: Any = None
         self._latest_seq = 0
         self._written_seq = 0
@@ -160,7 +175,15 @@ class DdsTap:
         self._frame_writer_thread: threading.Thread | None = None
         self._frame_writer_stop = False
         self.subscription: Any = None
-        self.transport = "callback"
+        self._matched_publishers_count = 0
+        configured_transport = str(config.get("transport") or "").lower()
+        if self.mode == "graph":
+            self.transport = "polling"
+        elif configured_transport in {"callback", "polling"}:
+            self.transport = configured_transport
+        else:
+            self.transport = "callback"
+        self._last_error = ""
 
     def poll_batch_size(self) -> int:
         if self.data_type.replace(".", "/") in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
@@ -168,18 +191,21 @@ class DdsTap:
         return 64
 
     def callback(self, msg: Any) -> None:
-        now = time.perf_counter()
-        with self._lock:
-            self._times.append(now)
-            del self._times[:-10000]
-            if self.mode in {"image", "save"}:
-                self._latest_msg = msg
-                self._latest_seq += 1
-            elif self.mode == "graph":
+        try:
+            now = time.time() if self.mode == "graph" else time.perf_counter()
+            if self.mode == "graph":
                 value = _extract_number(msg, self.field_path)
                 if value is not None:
-                    self._series.append({"t": now, "y": value})
-                    del self._series[:-self.sample_limit]
+                    self._record_graph_value(now, value)
+                return
+            with self._lock:
+                self._times.append(now)
+                del self._times[:-10000]
+                if self.mode in {"image", "save"}:
+                    self._latest_msg = msg
+                    self._latest_seq += 1
+        except Exception as exc:
+            self._record_error("callback", exc)
 
     def poll(self, max_count: int = 128) -> int:
         subscription = self.subscription
@@ -204,19 +230,27 @@ class DdsTap:
     def run_status_loop(self) -> None:
         next_at = 0.0
         next_frame_at = 0.0
-        status_period = (1.0 / self.display_hz) if self.mode in {"graph", "hz"} else 0.25
+        status_hz = self.display_hz
+        status_period = (1.0 / status_hz) if self.mode in {"graph", "hz"} else 0.25
         while RUNNING:
-            now = time.perf_counter()
-            if now >= next_at:
-                self._write_status(now)
-                next_at = now + status_period
-            if self.mode == "image" and now >= next_frame_at:
-                self._write_latest_frame()
-                next_frame_at = now + (1.0 / self.display_hz)
-            if self.mode == "save":
-                self._save_latest_image()
-            time.sleep(0.002)
-        self._write_status(time.perf_counter(), running=False)
+            try:
+                now = time.time() if self.mode == "graph" else time.perf_counter()
+                if now >= next_at:
+                    self._write_status(now)
+                    next_at = now + status_period
+                if self.mode == "image" and now >= next_frame_at:
+                    self._write_latest_frame()
+                    next_frame_at = now + (1.0 / self.display_hz)
+                if self.mode == "save":
+                    self._save_latest_image()
+                time.sleep(0.002)
+            except Exception as exc:
+                self._record_error("status_loop", exc)
+                time.sleep(0.05)
+        try:
+            self._write_status(time.time() if self.mode == "graph" else time.perf_counter(), running=False)
+        except Exception as exc:
+            self._record_error("status_stop", exc)
 
     def _write_status(self, now: float, running: bool = True) -> None:
         times, seq = self._current_times(now)
@@ -237,36 +271,60 @@ class DdsTap:
             "windowSec": self.window_sec,
             "frameSeq": seq,
             "framePath": str(self.frame_path),
-            "matchedPublishers": self._matched_publishers(),
+            "matchedPublishers": self._matched_publishers_cached(),
             "polling": self.transport == "polling",
             "transport": self.transport,
         }
+        if self._last_error:
+            payload["lastError"] = self._last_error
         with self._lock:
             frame_status = dict(self._latest_frame_status)
         if frame_status:
             payload.update(frame_status)
         if self.mode == "graph":
             with self._lock:
-                series = list(self._series)
-            if series:
-                cutoff = now - self.graph_window_sec
-                window_series = [point for point in series if point["t"] >= cutoff]
-                if not window_series:
-                    window_series = series[-1:]
-                display_series = _decimate_series(window_series, self.graph_display_limit)
-                started = display_series[0]["t"]
-                payload["series"] = [{"t": point["t"] - started, "y": point["y"]} for point in display_series]
-                payload["fieldPath"] = self.field_path
+                points = list(self._graph_recent_points)
+            payload["fieldPath"] = self.field_path
+            payload["resetKey"] = self._graph_reset_key
+            payload["points"] = points
+            if points:
+                payload["lastSampleAgeSec"] = max(0.0, time.time() - points[-1]["t"])
         _write_json(self.status_path, payload)
 
-    def _matched_publishers(self) -> int:
-        subscription = self.subscription
-        if subscription is None:
-            return 0
+    def _record_graph_value(self, timestamp: float, value: float) -> None:
+        with self._lock:
+            self._latest_seq += 1
+            self._times.append(timestamp)
+            del self._times[:-10000]
+            self._graph_recent_points.append({"seq": self._latest_seq, "t": timestamp, "y": value})
+            if len(self._graph_recent_points) > self._graph_transfer_limit:
+                self._graph_recent_points = self._graph_recent_points[-self._graph_transfer_limit:]
+
+    def _record_error(self, stage: str, exc: BaseException) -> None:
+        self._last_error = f"{stage}: {exc}"
+        traceback.print_exc()
         try:
-            return int(subscription.get_publisher_count())
+            _write_json(
+                self.status_path,
+                {
+                    "time": time.time(),
+                    "running": RUNNING,
+                    "mode": self.mode,
+                    "topic": self.topic,
+                    "dataType": self.data_type,
+                    "subscribed": self.subscription is not None,
+                    "error": self._last_error,
+                    "traceback": traceback.format_exc()[-4000:],
+                    "matchedPublishers": self._matched_publishers_cached(),
+                    "polling": self.transport == "polling",
+                    "transport": self.transport,
+                },
+            )
         except Exception:
-            return 0
+            traceback.print_exc()
+
+    def _matched_publishers_cached(self) -> int:
+        return int(self._matched_publishers_count)
 
     def _current_times(self, now: float) -> tuple[list[float], int]:
         cutoff = now - self.window_sec
@@ -386,7 +444,7 @@ class DdsTap:
             "count": count,
             "hz": hz,
             "windowSec": self.window_sec,
-            "matchedPublishers": self._matched_publishers(),
+            "matchedPublishers": self._matched_publishers_cached(),
             "polling": self.transport == "polling",
             "transport": self.transport,
         })
@@ -422,7 +480,7 @@ class DdsTap:
                 "mode": self.mode,
                 "savedPath": str(path),
                 "frameSeq": seq,
-                "matchedPublishers": self._matched_publishers(),
+                "matchedPublishers": self._matched_publishers_cached(),
                 "polling": self.transport == "polling",
                 "transport": self.transport,
             },

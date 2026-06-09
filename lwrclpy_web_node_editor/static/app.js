@@ -30,6 +30,7 @@ const state = {
   tickCount: 0,
   runState: 'idle',
   nodeViews: {},
+  graphBuffers: {},
   videoInputs: {},
   embeddedVideoInputs: {},
   undoStack: [],
@@ -116,8 +117,19 @@ const INTERFACE_NODE_TEMPLATES = [
     node: {
       name: 'video_file_input',
       inputs: [],
-      outputs: [{ id: 'out1', name: 'frame', dataType: VIDEO_RAW_IMAGE_TYPE }],
+      outputs: [{ id: 'out1', name: '/frame', dataType: VIDEO_RAW_IMAGE_TYPE }],
       params: { loop: false, publishHz: 30, detectedFps: 0, maxSide: 0, frameSkip: 0 },
+      loopCode: '',
+    },
+  },
+  {
+    label: 'MCAP File Input',
+    toolType: 'mcap_file_input',
+    node: {
+      name: 'mcap_file_input',
+      inputs: [],
+      outputs: [],
+      params: { loop: false, playbackRate: 1, mcapPath: '', mcapChannels: [], mcapOutputTopics: {} },
       loopCode: '',
     },
   },
@@ -1213,6 +1225,24 @@ function toolActionHtml(node) {
       <label class="tool-check"><input data-tool-video-loop type="checkbox" ${loopChecked}> Loop</label>
     </div>`;
   }
+  if (node.toolType === 'mcap_file_input') {
+    const p = node.params || {};
+    const mcapPath = p.mcapPath || '';
+    const loopChecked = p.loop ? 'checked' : '';
+    const playbackRate = Math.max(0.001, Number(p.playbackRate || 1));
+    const channels = Array.isArray(p.mcapChannels) ? p.mcapChannels : [];
+    const ros2Channels = channels.filter((channel) => isRos2McapChannel(channel));
+    const summary = p.mcapPath
+      ? `${channels.length} topics (${ros2Channels.length} ROS 2 topics) / ${formatDuration(Number(p.durationSec || 0))}${p.probeError ? ' / probe error' : ''}${p.metadataError ? ' / metadata error' : ''}`
+      : 'No MCAP selected';
+    return `<div class="node-actions tool-actions">
+      <label class="tool-field tool-field-wide"><span>Path</span><input data-tool-mcap-path type="text" value="${escapeAttr(mcapPath)}" placeholder="/path/to/file.mcap"></label>
+      <button data-action="select-mcap-file">Select MCAP</button>
+      <label class="tool-field"><span>Rate</span><input data-tool-mcap-rate type="number" min="0.001" step="0.1" value="${escapeAttr(playbackRate)}"></label>
+      <label class="tool-check"><input data-tool-mcap-loop type="checkbox" ${loopChecked}> Loop</label>
+      <div class="tool-summary">${escapeHtml(summary)}</div>
+    </div>`;
+  }
   if (node.toolType === 'function_generator') {
     return functionGeneratorHtml(node);
   }
@@ -1251,8 +1281,15 @@ function graphSummary(p) {
   return `${p.fieldPath || 'data'} / ${Number(p.xAxisSeconds || 10)}s / ${yAxis} / ${Math.max(1, Number(p.sampleLimit || 10000))} samples`;
 }
 
+function formatDuration(seconds) {
+  const value = Math.max(0, Number(seconds || 0));
+  if (value < 60) return `${value.toFixed(2)}s`;
+  const minutes = Math.floor(value / 60);
+  return `${minutes}m ${(value - minutes * 60).toFixed(1)}s`;
+}
+
 function viewNodeHtml(node) {
-  if (!['image_file_input', 'video_file_input', 'function_generator', 'image_view', 'image_file_save', 'graph_view', 'topic_hz_monitor'].includes(node.toolType)) return '';
+  if (!['image_file_input', 'video_file_input', 'mcap_file_input', 'function_generator', 'image_view', 'image_file_save', 'graph_view', 'topic_hz_monitor'].includes(node.toolType)) return '';
   const viewClass = node.toolType === 'video_file_input' ? ' node-view-video' : '';
   return `<div class="node-view${viewClass}" data-node-view="${escapeAttr(node.id)}">${renderViewContent(state.nodeViews[node.id])}</div>`;
 }
@@ -1360,6 +1397,46 @@ function bindToolActions(el, node) {
         pushRunPayloadUpdate();
       }
       renderAll();
+    };
+  }
+  const selectMcapFile = el.querySelector('[data-action="select-mcap-file"]');
+  if (selectMcapFile) selectMcapFile.onclick = async () => {
+    selectMcapFile.disabled = true;
+    try {
+      const selected = await selectMcapFileFromServer();
+      if (selected?.path) applyMcapSelection(node, selected);
+    } catch (err) {
+      setExecutionStatus('error', `MCAP selection failed: ${err.message}`);
+    } finally {
+      selectMcapFile.disabled = false;
+    }
+  };
+  const mcapPath = el.querySelector('[data-tool-mcap-path]');
+  if (mcapPath) {
+    mcapPath.onchange = async (ev) => {
+      const path = String(ev.target.value || '').trim();
+      if (!path) return;
+      try {
+        applyMcapSelection(node, await openMcapFileFromServer(path));
+      } catch (err) {
+        setExecutionStatus('error', `MCAP open failed: ${err.message}`);
+      }
+    };
+  }
+  const mcapRate = el.querySelector('[data-tool-mcap-rate]');
+  if (mcapRate) {
+    mcapRate.onchange = (ev) => {
+      node.params = { ...(node.params || {}), playbackRate: Math.max(0.001, Number(ev.target.value || 1)) };
+      renderAll();
+      scheduleRun();
+    };
+  }
+  const mcapLoop = el.querySelector('[data-tool-mcap-loop]');
+  if (mcapLoop) {
+    mcapLoop.onchange = (ev) => {
+      node.params = { ...(node.params || {}), loop: ev.target.checked };
+      renderAll();
+      scheduleRun();
     };
   }
   const signalSettings = el.querySelector('[data-action="signal-settings"]');
@@ -1580,7 +1657,7 @@ function finishLinkDrag(ev, inputRow) {
   const defaultTopic = sourceTopicName(state.dragLink.fromNode, state.dragLink.fromPort) || defaultLinkTopic(state.dragLink.fromNode, state.dragLink.fromPort, inputRow.dataset.node, inputRow.dataset.port);
   const topic = prompt('Topic name for this output topic', defaultTopic);
   if (topic === null) return;
-  const topicName = topic.trim() || defaultTopic;
+  const topicName = normalizeTopic(topic.trim() || defaultTopic);
   state.links = state.links.filter((link) => !(link.toNode === inputRow.dataset.node && link.toPort === inputRow.dataset.port));
   state.links.push({
     id: `l${Date.now()}${Math.random().toString(16).slice(2)}`,
@@ -1778,6 +1855,7 @@ async function startServerRun(durationSec = null) {
   state.runInFlight = true;
   state.tickCount = 0;
   state.lastRunAt = performance.now();
+  state.graphBuffers = {};
   prepareVideoInputsForRun();
   startVideoInputs();
   startEmbeddedVideoInputs();
@@ -1974,8 +2052,12 @@ function runHasStartingNodes(nodes) {
   return Object.values(nodes || {}).some((payload) => {
     const env = String(payload?.meta?.environment || '').toLowerCase();
     const status = String(payload?.view?.status || '').toLowerCase();
+    const envRunning = /\brunning\b/.test(env);
     if (isStartupStatusText(env)) return true;
-    if (isStartupStatusText(status)) return true;
+    if (isStartupStatusText(status)) {
+      if (envRunning && /source worker starting/.test(status)) return false;
+      return true;
+    }
     const view = payload?.view;
     if (view?.kind === 'image' && !(view.dataUrl || view.raw || view.frameRef) && /worker/.test(status)) return true;
     if (view?.kind === 'plot' && Array.isArray(view.series) && view.series.length === 0 && /worker/.test(status)) return true;
@@ -2088,15 +2170,18 @@ function updateNodeViews(nodes) {
     if (payload?.view) {
       const newView = normalizedNodeView(nodeId, payload.view);
       const existing = state.nodeViews[nodeId];
+      const existingSignature = nodeViewSignature(existing);
       // Don't replace a valid image view with an empty one (avoids flicker when frames are sparse)
       const existingHasImage = existing?.kind === 'image' && (existing?.dataUrl || existing?.raw?.data || existing?.frameRef);
       const newHasImage = newView?.kind === 'image' && (newView?.dataUrl || newView?.raw?.data || newView?.frameRef);
       if (existingHasImage && newView?.kind === 'image' && !newHasImage) {
         const nextView = { ...existing, status: newView.status || existing.status };
-        if (nodeViewSignature(existing) !== nodeViewSignature(nextView)) changedNodeIds.add(nodeId);
+        if (existingSignature !== nodeViewSignature(nextView)) changedNodeIds.add(nodeId);
         state.nodeViews[nodeId] = nextView;
       } else {
-        if (nodeViewSignature(existing) !== nodeViewSignature(newView)) changedNodeIds.add(nodeId);
+        if (newView?.kind === 'empty') delete state.graphBuffers[nodeId];
+        if (newView?.kind === 'plot') mergeGraphView(nodeId, newView);
+        if (existingSignature !== nodeViewSignature(newView)) changedNodeIds.add(nodeId);
         state.nodeViews[nodeId] = newView;
       }
     }
@@ -2106,6 +2191,30 @@ function updateNodeViews(nodes) {
     if (!changedNodeIds.has(el.dataset.nodeView)) return;
     patchNodeViewEl(el, state.nodeViews[el.dataset.nodeView]);
   });
+}
+
+function mergeGraphView(nodeId, view) {
+  const points = Array.isArray(view.points) ? view.points : [];
+  const resetKey = String(view.resetKey || '');
+  const node = nodeFor(nodeId);
+  const limit = Math.max(8, Math.min(Number(node?.params?.sampleLimit || view.sampleLimit || 600), 100000));
+  let buffer = state.graphBuffers[nodeId];
+  if (!buffer || buffer.resetKey !== resetKey) {
+    buffer = { resetKey, lastSeq: 0, points: [] };
+    state.graphBuffers[nodeId] = buffer;
+  }
+  for (const point of points) {
+    const seq = Number(point?.seq || 0);
+    if (seq && seq <= buffer.lastSeq) continue;
+    const y = Number(point?.y);
+    if (!Number.isFinite(y)) continue;
+    const t = Number.isFinite(Number(point?.t)) ? Number(point.t) : performance.now() / 1000;
+    buffer.points.push({ t, y, seq: seq || buffer.lastSeq + 1 });
+    if (seq) buffer.lastSeq = seq;
+    else buffer.lastSeq += 1;
+  }
+  if (buffer.points.length > limit) buffer.points.splice(0, buffer.points.length - limit);
+  view.series = buffer.points.slice();
 }
 
 function nodeViewSignature(view) {
@@ -2490,8 +2599,18 @@ function patchPlotViewEl(el, view) {
   const nextView = el._pendingPlotView || view;
   el._pendingPlotView = null;
   el.dataset.plotRenderedAt = String(now);
-  const newHtml = renderViewContent(nextView);
-  if (el.innerHTML !== newHtml) el.innerHTML = newHtml;
+  const model = plotRenderModel(nextView.series || [], nextView.status || '', nextView);
+  let container = el.querySelector('.plot-view');
+  if (!container) {
+    el.innerHTML = '<div class="plot-view"><svg viewBox="0 0 280 120"><polyline></polyline></svg><span></span></div>';
+    container = el.querySelector('.plot-view');
+  }
+  const svg = container.querySelector('svg');
+  const polyline = container.querySelector('polyline');
+  const caption = container.querySelector('span');
+  if (svg && svg.getAttribute('viewBox') !== '0 0 280 120') svg.setAttribute('viewBox', '0 0 280 120');
+  if (polyline && polyline.getAttribute('points') !== model.points) polyline.setAttribute('points', model.points);
+  if (caption && caption.textContent !== model.caption) caption.textContent = model.caption;
 }
 
 function normalizedNodeView(nodeId, view) {
@@ -2519,6 +2638,11 @@ function renderViewContent(view) {
 }
 
 function renderPlot(series, label, view = {}) {
+  const model = plotRenderModel(series, label, view);
+  return `<div class="plot-view"><svg viewBox="0 0 280 120"><polyline points="${escapeAttr(model.points)}"></polyline></svg><span>${escapeHtml(model.caption)}</span></div>`;
+}
+
+function plotRenderModel(series, label, view = {}) {
   const width = 280;
   const height = 120;
   const allPoints = series.map((item, index) => {
@@ -2530,7 +2654,7 @@ function renderPlot(series, label, view = {}) {
   const startT = latestT - windowSec;
   const pointsData = allPoints.filter((point) => point.t >= startT);
   if (pointsData.length < 2) {
-    return `<div class="plot-view"><svg viewBox="0 0 ${width} ${height}"></svg><span>${escapeHtml(label || 'Waiting for values')}</span></div>`;
+    return { points: '', caption: label || 'Waiting for values' };
   }
   const values = pointsData.map((point) => point.y);
   const yAxis = view.yAxis || {};
@@ -2550,7 +2674,7 @@ function renderPlot(series, label, view = {}) {
     const y = clamp(height - ((point.y - min) / span) * (height - 12) - 6, 0, height);
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
-  return `<div class="plot-view"><svg viewBox="0 0 ${width} ${height}"><polyline points="${points}"></polyline></svg><span>${escapeHtml(label)} ${windowSec.toFixed(1)}s / ${min.toFixed(3)} .. ${max.toFixed(3)}</span></div>`;
+  return { points, caption: `${label} ${windowSec.toFixed(1)}s / ${min.toFixed(3)} .. ${max.toFixed(3)}` };
 }
 
 function decimatePlotPoints(points, width) {
@@ -2636,6 +2760,80 @@ async function selectVideoFileFromServer() {
   const data = await response.json();
   if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
   return data.canceled ? null : data;
+}
+
+async function selectMcapFileFromServer() {
+  const response = await fetch('/api/select-mcap-file', { method: 'POST' });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+  return data.canceled ? null : data;
+}
+
+async function openMcapFileFromServer(path) {
+  const response = await fetch('/api/open-mcap-file', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+function applyMcapSelection(node, selected) {
+  const channels = (Array.isArray(selected.channels) ? selected.channels : [])
+    .filter((channel) => channel?.topic)
+    .map((channel) => ({
+      topic: String(channel.topic),
+      type: String(channel.type || '').replace(/\./g, '/'),
+      messageCount: Math.max(0, Number(channel.messageCount || 0)),
+      messageEncoding: String(channel.messageEncoding || ''),
+      schemaEncoding: String(channel.schemaEncoding || ''),
+      ros2Compatible: Boolean(channel.ros2Compatible),
+    }));
+  const usedIds = new Set();
+  const outputTopics = {};
+  const ros2Channels = channels.filter((channel) => isRos2McapChannel(channel));
+  const outputs = ros2Channels.map((channel, index) => {
+    const base = safeFileName(channel.topic.replace(/^\/+/, '') || `topic_${index + 1}`).replace(/-/g, '_') || `topic_${index + 1}`;
+    let id = `out_${base}`;
+    while (usedIds.has(id)) id = `${id}_${index + 1}`;
+    usedIds.add(id);
+    outputTopics[id] = channel.topic;
+    return {
+      id,
+      name: channel.topic,
+      dataType: channel.type,
+    };
+  });
+  const outputIds = new Set((node.outputs || []).map((port) => port.id));
+  state.links = state.links.filter((link) => link.fromNode !== node.id || !outputIds.has(link.fromPort));
+  node.outputs = outputs;
+  node.params = {
+    ...(node.params || {}),
+    mcapPath: selected.path,
+    fileName: selected.fileName || selected.path.split(/[\\/]/).filter(Boolean).pop() || selected.path,
+    mcapChannels: channels,
+    mcapOutputTopics: outputTopics,
+    startTimeNs: Number(selected.startTimeNs || 0),
+    endTimeNs: Number(selected.endTimeNs || 0),
+    durationSec: Number(selected.durationSec || 0),
+    metadataPath: selected.metadataPath || '',
+    metadataError: selected.metadataError || '',
+    probeError: selected.probeError || '',
+    playbackRate: Math.max(0.001, Number(node.params?.playbackRate || 1)),
+    loop: Boolean(node.params?.loop),
+  };
+  renderAll();
+  commitHistory();
+  scheduleRun();
+}
+
+function isRos2McapChannel(channel) {
+  const type = String(channel?.type || '').replace(/\./g, '/');
+  const encoding = String(channel?.messageEncoding || '').toLowerCase();
+  if (channel?.ros2Compatible === true) return true;
+  return encoding === 'cdr' && type.includes('/msg/');
 }
 
 function _detectVideoNativeFps(video, callback) {
@@ -3053,6 +3251,7 @@ async function resetGraphRuntimeState({ stopServer = false } = {}) {
   stopAllFramePullLoops();
   stopAllVideoInputs();
   state.nodeViews = {};
+  state.graphBuffers = {};
   state.videoInputs = {};
   state.embeddedVideoInputs = {};
   state.videoDirtyNodes.clear();
@@ -4387,7 +4586,10 @@ function normalizeImportedNode(node) {
   if (normalized.toolType === 'video_file_input') {
     const outputType = normalized.params.outputType || normalized.outputs?.[0]?.dataType;
     const videoType = outputType === VIDEO_COMPRESSED_IMAGE_TYPE ? VIDEO_COMPRESSED_IMAGE_TYPE : VIDEO_RAW_IMAGE_TYPE;
-    if (normalized.outputs?.[0]) normalized.outputs[0].dataType = videoType;
+    if (normalized.outputs?.[0]) {
+      normalized.outputs[0].name = normalizeTopic(normalized.outputs[0].name || 'frame');
+      normalized.outputs[0].dataType = videoType;
+    }
     normalized.params = { ...(normalized.params || {}), outputType: videoType };
   }
   return normalized;
@@ -4403,9 +4605,10 @@ function uniqueNodeId(preferred) {
 }
 
 function normalizeTopic(name) {
-  const topic = String(name || '').trim();
+  let topic = String(name || '').trim();
   if (!topic) return '/topic';
-  return topic.startsWith('/') ? topic : `/${topic}`;
+  topic = topic.replace(/^\/+/, '');
+  return `/${topic}`;
 }
 
 function safeFileName(value) {
@@ -4521,7 +4724,7 @@ function canConnect(fromNodeId, fromPortId, toNodeId, toPortId) {
 
 function defaultLinkTopic(fromNode, fromPort, toNode, toPort) {
   const src = nodeFor(fromNode)?.outputs.find((port) => port.id === fromPort);
-  return `/${src?.name || fromPort || 'topic'}`;
+  return normalizeTopic(src?.name || fromPort || 'topic');
 }
 
 function sourceTopicKey(fromNode, fromPort) {
@@ -4530,12 +4733,12 @@ function sourceTopicKey(fromNode, fromPort) {
 
 function sourceTopicName(fromNode, fromPort) {
   const link = state.links.find((item) => item.fromNode === fromNode && item.fromPort === fromPort && item.name);
-  return link?.name || '';
+  return link?.name ? normalizeTopic(link.name) : '';
 }
 
 function syncSourceTopicNames(fromNode, fromPort, name) {
   const fallback = defaultLinkTopic(fromNode, fromPort, '', '');
-  const topic = name || fallback;
+  const topic = normalizeTopic(name || fallback);
   state.links.forEach((link) => {
     if (link.fromNode === fromNode && link.fromPort === fromPort) link.name = topic;
   });
@@ -4545,10 +4748,10 @@ function normalizeSourceTopicNames() {
   const topics = new Map();
   state.links.forEach((link) => {
     const key = sourceTopicKey(link.fromNode, link.fromPort);
-    if (!topics.has(key)) topics.set(key, link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort));
+    if (!topics.has(key)) topics.set(key, normalizeTopic(link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort)));
   });
   state.links.forEach((link) => {
-    link.name = topics.get(sourceTopicKey(link.fromNode, link.fromPort)) || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort);
+    link.name = normalizeTopic(topics.get(sourceTopicKey(link.fromNode, link.fromPort)) || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort));
   });
 }
 

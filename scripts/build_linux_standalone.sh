@@ -167,7 +167,10 @@ fi
   --collect-all lwrclpy \
   --collect-all rclpy \
   --collect-all fastdds \
+  --collect-all mcap \
+  --collect-all mcap_ros2 \
   --hidden-import cv2 \
+  --hidden-import yaml \
   --hidden-import PySide6.QtCore \
   --hidden-import PySide6.QtGui \
   --hidden-import PySide6.QtNetwork \

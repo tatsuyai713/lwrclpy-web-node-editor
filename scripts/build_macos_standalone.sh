@@ -212,8 +212,11 @@ fi
   --collect-all lwrclpy \
   --collect-all rclpy \
   --collect-all fastdds \
+  --collect-all mcap \
+  --collect-all mcap_ros2 \
   --collect-all webview \
   --hidden-import cv2 \
+  --hidden-import yaml \
   --hidden-import webview.platforms.cocoa \
   --hidden-import objc \
   --hidden-import Cocoa \

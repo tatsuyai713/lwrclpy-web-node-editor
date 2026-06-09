@@ -134,18 +134,7 @@ def import_type_class(type_name: str):
 
 
 def topic_qos(data_type: str, depth: int = 1) -> Any:
-    if normalize_type(data_type) not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
-        return 10
-    try:
-        qos = importlib.import_module("rclpy.qos")
-        return qos.QoSProfile(
-            history=qos.HistoryPolicy.KEEP_LAST,
-            depth=depth,
-            reliability=qos.ReliabilityPolicy.BEST_EFFORT,
-            durability=qos.DurabilityPolicy.VOLATILE,
-        )
-    except Exception:
-        return depth
+    return depth
 
 
 def publisher_qos(data_type: str) -> Any:
@@ -160,21 +149,18 @@ class LwrclpyRuntime:
     def __init__(self) -> None:
         self.available = False
         self.initialized = False
-        self.error = ""
+        self.error = "DDS access is isolated in worker processes"
         self.version = ""
         self.rclpy = None
         self.executor = None
         self._spin_thread: threading.Thread | None = None
         self._stop_spin = threading.Event()
         try:
-            self.rclpy = importlib.import_module("rclpy")
-            self.available = True
-        except Exception as exc:  # pragma: no cover
-            self.error = str(exc)
-        try:
             self.version = importlib.metadata.version("lwrclpy")
+            self.available = True
         except Exception:
             self.version = ""
+            self.error = "lwrclpy is installed per isolated node environment"
 
     def status(self, error: str = "") -> dict[str, Any]:
         return {
@@ -184,37 +170,11 @@ class LwrclpyRuntime:
         }
 
     def ensure_initialized(self) -> bool:
-        if not self.available or self.rclpy is None:
-            return False
-        if self.initialized:
-            return True
-        try:
-            executors = importlib.import_module("rclpy.executors")
-            if not self.rclpy.ok():
-                self.rclpy.init(args=None)
-            self.executor = executors.MultiThreadedExecutor(num_threads=max(4, min(16, (os.cpu_count() or 4))))
-            # Spin the executor in a dedicated background thread so ROS subscription
-            # callbacks are not driven by the main graph processing loop.
-            self._stop_spin.clear()
-            self._spin_thread = threading.Thread(
-                target=self._spin_loop, daemon=True, name="lwrclpy-executor-spin"
-            )
-            self._spin_thread.start()
-            self.initialized = True
-            return True
-        except Exception as exc:
-            self.error = str(exc)
-            return False
+        self.error = "DDS access is isolated in worker processes"
+        return False
 
     def _spin_loop(self) -> None:
-        """Background thread: lets lwrclpy's executor drain callbacks with its worker pool."""
-        if self.executor is None:
-            return
-        try:
-            self.executor.spin()
-        except Exception as exc:
-            if not self._stop_spin.is_set():
-                self.error = str(exc)
+        return
 
     def spin_once(self) -> None:
         # No-op: executor is now spun by the dedicated background thread.
@@ -307,11 +267,6 @@ class CustomLwrclNodeInstance:
     def close(self) -> None:
         self._stop_builtin_thread()
         self._stop_node_executor()
-        if self.lwrcl_node is not None and self.runtime.available:
-            try:
-                self.lwrcl_node.destroy_node()
-            except Exception:
-                pass
         self.lwrcl_node = None
         self.publishers = {}
         self.clients = {}
@@ -445,68 +400,18 @@ class CustomLwrclNodeInstance:
 
     def _setup_transport(self) -> None:
         self.signature = self._signature(self.config)
-        if self.config.tool_type in {"topic_input", "topic_output"}:
-            return
-        if self.config.tool_type in {"function_generator", "image_file_input", "video_file_input", "image_view", "topic_hz_monitor", "graph_view", "image_file_save"}:
-            return
-        needs_transport = any(self._port_topics(port) for port in [*self.config.inputs, *self.config.outputs])
-        if not needs_transport:
-            return
-        if not self.runtime.ensure_initialized():
-            return
-        self.lwrcl_node = self.runtime.rclpy.create_node(f"ipn_user_{self.config.id}".replace("-", "_")[:80])
-        if self.config.tool_type:
-            self._setup_tool_transport()
-        else:
-            self._setup_worker_bridge_transport()
-        self._start_node_executor()
+        return
 
     def _start_node_executor(self) -> None:
-        if self.lwrcl_node is None:
-            return
-        try:
-            executors = importlib.import_module("rclpy.executors")
-            self.node_executor = executors.MultiThreadedExecutor(num_threads=1)
-            self.node_executor.add_node(self.lwrcl_node)
-            self.node_executor_thread = threading.Thread(
-                target=self._spin_node_executor,
-                daemon=True,
-                name=f"dds-node-{self.config.id}",
-            )
-            self.node_executor_thread.start()
-        except Exception as exc:
-            self.node_executor = None
-            self.node_executor_thread = None
-            self.env_status = f"node executor start failed: {exc}"
-            self.log(self.env_status)
+        return
 
     def _spin_node_executor(self) -> None:
-        executor = self.node_executor
-        if executor is None:
-            return
-        try:
-            executor.spin()
-        except Exception as exc:
-            if self.node_executor is executor:
-                name = exc.__class__.__name__
-                if name != "ExternalShutdownException":
-                    self.log(f"node executor error: {exc}")
+        return
 
     def _stop_node_executor(self) -> None:
-        executor = self.node_executor
         thread = self.node_executor_thread
         self.node_executor = None
         self.node_executor_thread = None
-        if executor is not None:
-            try:
-                if self.lwrcl_node is not None:
-                    executor.remove_node(self.lwrcl_node)
-            except Exception:
-                pass
-            try:
-                executor.shutdown(timeout_sec=0.2)
-            except Exception:
-                pass
         if thread is not None and thread.is_alive():
             thread.join(timeout=0.2)
 
@@ -514,10 +419,10 @@ class CustomLwrclNodeInstance:
         tool = self.config.tool_type
         if self._builtin_runs_in_background():
             self._ensure_builtin_workers_once()
-            if self._should_update_background_view():
+            if self._should_update_background_view() or self._background_view_needs_startup_refresh():
                 self._execute_builtin_worker_status_once()
             if not self.view:
-                self.view = {"kind": "text", "status": "running in background"}
+                self.view = {"kind": "text", "status": self._background_starting_status()}
             return True
         if tool in {"function_generator", "image_file_input", "video_file_input", "image_view", "topic_hz_monitor", "graph_view", "image_file_save"}:
             self.last_outputs.clear()
@@ -654,12 +559,12 @@ class CustomLwrclNodeInstance:
     def _uses_builtin_source_worker(self) -> bool:
         if self.config.tool_type == "video_file_input" and self._uses_video_worker():
             return False
-        return self.config.tool_type in {"function_generator", "image_file_input", "video_file_input"} and any(port.topics for port in self.config.outputs)
+        return self.config.tool_type in {"function_generator", "image_file_input", "video_file_input", "mcap_file_input"} and any(port.topics for port in self.config.outputs)
 
     def _ensure_builtin_source_worker(self) -> None:
         signature = self._builtin_source_worker_signature()
         if self.worker_process is not None and self.worker_process.poll() is None and self.worker_signature == signature:
-            self.env_status = "built-in source worker running"
+            self.env_status = "built-in source worker running" if self._source_worker_has_published() else "built-in source worker starting"
             return
         self.stop_worker(force=True)
         worker_dir = Path.cwd() / ".node_workers"
@@ -690,19 +595,52 @@ class CustomLwrclNodeInstance:
             self.worker_log_path = log_path
             self.worker_pid_path = pid_path
             pid_path.write_text(str(self.worker_process.pid), encoding="utf-8")
-            self.env_status = "built-in source worker running"
+            self.env_status = "built-in source worker starting"
+            self.view = {"kind": "text", "status": "source worker starting"}
         except Exception as exc:
             self.env_status = f"built-in source worker start failed: {exc}"
             self.view = {"kind": "text", "status": self.env_status}
             self.log(self.env_status)
 
+    def _background_starting_status(self) -> str:
+        if self._uses_builtin_source_worker():
+            return "source worker starting"
+        if self._uses_dds_tap_worker():
+            return "DDS tap worker starting"
+        if self._uses_video_worker():
+            return "video DDS worker starting"
+        return "worker starting"
+
+    def _background_view_needs_startup_refresh(self) -> bool:
+        status = str((self.view or {}).get("status") or "").lower()
+        if "starting" not in status:
+            return False
+        if self._uses_builtin_source_worker():
+            return True
+        return False
+
+    def _source_worker_has_published(self) -> bool:
+        status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.source.status.json"
+        if not status_path.exists():
+            return False
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if status.get("error") or status.get("ended"):
+            return True
+        try:
+            return int(status.get("published") or 0) > 0
+        except Exception:
+            return False
+
     def _builtin_source_worker_signature(self) -> tuple[Any, ...]:
         output = next((port for port in self.config.outputs if port.topics), None)
         return (
+            "builtin-source-v3",
             self.config.id,
             self.config.tool_type,
-            output.data_type if output else "",
-            output.topics if output else (),
+            tuple((port.id, port.name, port.data_type, port.topics) for port in self.config.outputs if port.topics),
             json.dumps(self.config.params, sort_keys=True, default=str),
         )
 
@@ -715,6 +653,16 @@ class CustomLwrclNodeInstance:
             "toolType": self.config.tool_type,
             "topic": output.topics[0],
             "dataType": output.data_type,
+            "outputs": [
+                {
+                    "id": port.id,
+                    "name": port.name,
+                    "dataType": port.data_type,
+                    "topics": list(port.topics),
+                    "mcapTopic": str((self.config.params.get("mcapOutputTopics") or {}).get(port.id) or port.name),
+                }
+                for port in self.config.outputs
+            ],
             "params": self.config.params,
             "statusPath": str(status_path),
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
@@ -765,6 +713,7 @@ class CustomLwrclNodeInstance:
     def _dds_tap_worker_signature(self) -> tuple[Any, ...]:
         input_port = next((port for port in self.config.inputs if port.topics), None)
         return (
+            "dds-tap-v15",
             self.config.id,
             self.config.tool_type,
             input_port.data_type if input_port else "",
@@ -774,6 +723,7 @@ class CustomLwrclNodeInstance:
             int(self.config.params.get("sampleLimit") or 10000),
             bool(self.config.params.get("_externalDdsCompatible")),
             "preview:bmp:max640" if self.config.tool_type == "image_view" else "preview:jpeg",
+            self._dds_tap_transport(),
         )
 
     def _dds_tap_worker_config(self, status_path: Path, frame_path: Path) -> dict[str, Any]:
@@ -795,6 +745,7 @@ class CustomLwrclNodeInstance:
             "statusPath": str(status_path),
             "framePath": str(frame_path),
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
+            "transport": self._dds_tap_transport(),
             "previewEncoding": "bmp" if self.config.tool_type == "image_view" else "jpeg",
             "previewMaxSide": 640,
         }
@@ -807,6 +758,11 @@ class CustomLwrclNodeInstance:
         if self.config.tool_type == "image_file_save":
             return "save"
         return "hz"
+
+    def _dds_tap_transport(self) -> str:
+        if self.config.tool_type == "graph_view":
+            return "polling"
+        return "callback"
 
     def _ensure_video_worker(self) -> None:
         signature = self._video_worker_signature()
@@ -1116,7 +1072,14 @@ class CustomLwrclNodeInstance:
             status = json.loads(status_path.read_text(encoding="utf-8"))
         except Exception:
             return
-        text = str(status.get("status") or "source worker running")
+        if status.get("error"):
+            text = str(status.get("error"))
+        elif status.get("phase") and not status.get("published"):
+            text = str(status.get("status") or f"starting: {status.get('phase')}")
+            if "starting" not in text.lower():
+                text = f"starting: {text}"
+        else:
+            text = str(status.get("status") or "source worker running")
         if self.config.tool_type == "image_file_input":
             image = self.config.params.get("imageMessage")
             if isinstance(image, dict):
@@ -1238,15 +1201,21 @@ class CustomLwrclNodeInstance:
     def _execute_graph_view_worker_once(self) -> None:
         status = self._read_dds_tap_status()
         if not status:
-            self.view = {"kind": "plot", "series": [], "status": "DDS tap worker starting"}
+            self.view = {"kind": "empty", "status": "DDS tap worker starting"}
             return
-        series = status.get("series")
-        if not isinstance(series, list):
-            series = []
+        points = status.get("points")
+        if not isinstance(points, list):
+            points = []
+        if not points and int(status.get("count") or 0) <= 0:
+            self.view = {"kind": "empty", "status": "No graph data"}
+            return
         y_mode = str(self.config.params.get("yAxisMode") or "auto")
         self.view = {
             "kind": "plot",
-            "series": series,
+            "points": points,
+            "series": [],
+            "sampleLimit": max(8, min(int(self.config.params.get("sampleLimit") or 10000), 100000)),
+            "resetKey": str(status.get("resetKey") or ""),
             "status": str(status.get("fieldPath") or self.config.params.get("fieldPath") or "data"),
             "xAxisSeconds": max(0.1, float(self.config.params.get("xAxisSeconds") or 10.0)),
             "yAxis": {
@@ -1798,40 +1767,10 @@ class CustomLwrclNodeInstance:
         setattr(target, key, value)
 
     def _setup_tool_transport(self) -> None:
-        for output in self.config.outputs:
-            topics = self._port_topics(output)
-            if self.config.tool_type in {"function_generator", "image_file_input", "video_file_input"} and topics:
-                continue
-            type_cls = import_type_class(output.data_type)
-            _, kind, _ = split_type(output.data_type)
-            for topic in topics:
-                if kind == "msg":
-                    self.publishers.setdefault(output.id, []).append(self.lwrcl_node.create_publisher(type_cls, topic, publisher_qos(output.data_type)))
-                else:
-                    self.clients.setdefault(output.id, []).append(self.lwrcl_node.create_client(type_cls, topic))
-        for input_port in self.config.inputs:
-            topics = self._port_topics(input_port)
-            if self.config.tool_type in {"image_view", "topic_hz_monitor", "graph_view", "image_file_save"} and topics:
-                continue
-            type_cls = import_type_class(input_port.data_type)
-            _, kind, _ = split_type(input_port.data_type)
-            for topic in topics:
-                if kind == "msg":
-                    sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port.id), subscriber_qos(input_port.data_type))
-                    self.subscriptions.append(sub)
-                else:
-                    srv = self.lwrcl_node.create_service(type_cls, topic, self._make_service_callback(input_port.id))
-                    self.services.append(srv)
+        return
 
     def _setup_worker_bridge_transport(self) -> None:
-        for output in self.config.outputs:
-            type_cls = import_type_class(output.data_type)
-            _, kind, _ = split_type(output.data_type)
-            if kind != "msg":
-                continue
-            for topic in self._port_topics(output):
-                sub = self.lwrcl_node.create_subscription(type_cls, topic, self._make_output_subscription_callback(output.id), subscriber_qos(output.data_type))
-                self.subscriptions.append(sub)
+        return
 
     def _port_topics(self, port: PortConfig) -> tuple[str, ...]:
         if port.topics:
@@ -2674,7 +2613,7 @@ class GraphRuntime:
             dst = nodes.get(str(link.get("toNode")))
             src_port = next((port for port in (src.outputs if src else []) if port.id == str(link.get("fromPort"))), None)
             name = f"{src_port.name if src_port else link.get('fromPort') or 'topic'}"
-        return name if name.startswith("/") else f"/{name}"
+        return f"/{name.lstrip('/') or 'topic'}"
 
     def _sort(self, nodes: list[CustomLwrclNodeConfig], links: list[dict[str, Any]]) -> list[CustomLwrclNodeConfig]:
         by_id = {node.id: node for node in nodes}
