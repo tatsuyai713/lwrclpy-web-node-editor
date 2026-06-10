@@ -117,7 +117,7 @@ const INTERFACE_NODE_TEMPLATES = [
     node: {
       name: 'video_file_input',
       inputs: [],
-      outputs: [{ id: 'out1', name: '/frame', dataType: VIDEO_RAW_IMAGE_TYPE }],
+      outputs: [{ id: 'out1', name: 'frame', dataType: VIDEO_RAW_IMAGE_TYPE }],
       params: { loop: false, publishHz: 30, detectedFps: 0, maxSide: 0, frameSkip: 0 },
       loopCode: '',
     },
