@@ -24,7 +24,6 @@
         <button id="run-model">Run</button>
         <button id="stop-model">Stop</button>
         <button id="force-stop-model">Force Stop</button>
-        <label class="menu-field">Run Hz <input id="run-hz" type="number" min="1" max="1000" step="any" value="1000"></label>
         <label class="menu-field">Duration sec <input id="run-duration" type="number" min="0.1" step="0.1" value="5"></label>
         <button id="run-duration-model">Run For</button>
       </section>
@@ -101,6 +100,16 @@
         </label>
         <div class="count-grid">
           <label class="field">
+            <span>Python Version</span>
+            <select id="config-python-version"></select>
+          </label>
+          <label class="field">
+            <span>lwrclpy Version</span>
+            <select id="config-lwrclpy-version"></select>
+          </label>
+        </div>
+        <div class="count-grid">
+          <label class="field">
             <span>Input Count</span>
             <input id="config-input-count" type="number" min="0" max="16" value="1">
           </label>
@@ -129,7 +138,6 @@
       </div>
       <footer class="dialog-footer">
         <button type="button" data-close-dialog="node-dialog">Cancel</button>
-        <button id="export-node-config" type="button">Export Custom Node</button>
         <button id="save-node-config" type="submit">Save Node</button>
       </footer>
     </form>

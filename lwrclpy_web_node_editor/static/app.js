@@ -2,6 +2,7 @@ const UI_DISPLAY_FPS = 30;
 const UI_DISPLAY_FRAME_MS = 1000 / UI_DISPLAY_FPS;
 const UI_STATUS_FPS = 30;
 const UI_STATUS_POLL_MS = 1000 / UI_STATUS_FPS;
+const GRAPH_RUN_HZ = 60;
 const VIDEO_RAW_IMAGE_TYPE = 'sensor_msgs/msg/Image';
 const VIDEO_COMPRESSED_IMAGE_TYPE = 'sensor_msgs/msg/CompressedImage';
 const FRAME_FETCH_TIMEOUT_MS = 1200;
@@ -40,6 +41,9 @@ const state = {
   projectFileHandle: null,
   projectFileName: 'lwrclpy_web_node_project.json',
   customNodes: [],
+  lwrclpyReleases: [],
+  pythonVersions: [],
+  hostPythonVersion: '',
   activeView: 'editor',
   ready: false,
   readyInFlight: false,
@@ -79,6 +83,7 @@ const DEFAULT_IMPORT_CODE = `# Node-level imports run after this node's venv is 
 
 const INTERFACE_NODE_TEMPLATES = [
   {
+    category: 'Boundary',
     label: 'Topic Input',
     toolType: 'topic_input',
     node: {
@@ -90,6 +95,7 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    category: 'Boundary',
     label: 'Topic Output',
     toolType: 'topic_output',
     node: {
@@ -101,6 +107,7 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    category: 'Sources',
     label: 'Image File Input',
     toolType: 'image_file_input',
     node: {
@@ -112,6 +119,7 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    category: 'Sources',
     label: 'Video File Input',
     toolType: 'video_file_input',
     node: {
@@ -123,6 +131,7 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    category: 'Sources',
     label: 'MCAP File Input',
     toolType: 'mcap_file_input',
     node: {
@@ -134,6 +143,19 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    category: 'Recording',
+    label: 'MCAP Record',
+    toolType: 'mcap_record',
+    node: {
+      name: 'mcap_record',
+      inputs: [{ id: 'in1', name: 'topic', dataType: '', receiveMode: 'manual', callbackCode: '' }],
+      outputs: [],
+      params: { mcapPath: '', topicCount: 1, splitSizeMb: 0 },
+      loopCode: '',
+    },
+  },
+  {
+    category: 'Signal',
     label: 'Function Generator',
     toolType: 'function_generator',
     node: {
@@ -165,6 +187,7 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    category: 'Views',
     label: 'Image Viewer',
     toolType: 'image_view',
     node: {
@@ -176,6 +199,7 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    category: 'Recording',
     label: 'Image File Save',
     toolType: 'image_file_save',
     node: {
@@ -187,6 +211,7 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    category: 'Views',
     label: 'Graph Viewer',
     toolType: 'graph_view',
     node: {
@@ -198,6 +223,7 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    category: 'Views',
     label: 'Topic Hz Monitor',
     toolType: 'topic_hz_monitor',
     node: {
@@ -214,6 +240,7 @@ async function init() {
   const data = await fetch('/api/message-types').then((res) => res.json());
   state.messageTypes = data.types || {};
   await refreshCustomNodes();
+  await refreshLwrclpyReleases();
   bindToolbar();
   bindCanvas();
   renderInterfaceNodeList();
@@ -231,7 +258,6 @@ function bindToolbar() {
   $('run-model').onclick = startRun;
   $('stop-model').onclick = stopRun;
   $('force-stop-model').onclick = forceStopRun;
-  $('run-hz').oninput = refreshRunTimer;
   $('run-duration-model').onclick = runForDuration;
   $('save-project').onclick = () => saveProject(false);
   $('load-project').onchange = loadProject;
@@ -248,7 +274,8 @@ function bindToolbar() {
   $('config-input-count').oninput = renderConfigPorts;
   $('config-output-count').oninput = renderConfigPorts;
   $('config-timer-count').oninput = renderConfigPorts;
-  $('export-node-config').onclick = exportNodeDialogDraft;
+  $('config-python-version').onchange = updateDraftRuntimeVersions;
+  $('config-lwrclpy-version').onchange = updateDraftRuntimeVersions;
   $('node-form').addEventListener('submit', saveNodeDialog);
   $('code-form').addEventListener('submit', saveCodeDialog);
   $('signal-form').addEventListener('submit', saveSignalDialog);
@@ -344,6 +371,8 @@ function createDefaultNode(pos = centerWorld()) {
     timerCode: DEFAULT_TIMER_CODE,
     importCode: DEFAULT_IMPORT_CODE,
     requirements: '',
+    pythonVersion: defaultPythonVersion(),
+    lwrclpyVersion: defaultLwrclpyVersion(),
   };
 }
 
@@ -365,32 +394,49 @@ function createNodeFromTemplate(template, pos = centerWorld()) {
 function renderInterfaceNodeList() {
   const list = $('interface-node-list');
   list.innerHTML = '';
+  const groups = new Map();
   INTERFACE_NODE_TEMPLATES.forEach((template, index) => {
-    const button = document.createElement('button');
-    button.className = 'interface-node-item';
-    button.textContent = template.label;
-    button.draggable = true;
-    button.addEventListener('dragstart', (ev) => {
-      ev.dataTransfer.setData('application/x-node-template', `builtin:${index}`);
-      ev.dataTransfer.effectAllowed = 'copy';
+    const category = template.category || 'Other';
+    if (!groups.has(category)) groups.set(category, []);
+    groups.get(category).push({ template, index });
+  });
+  groups.forEach((items, category) => {
+    const group = document.createElement('section');
+    group.className = 'interface-node-group';
+    const title = document.createElement('h3');
+    title.className = 'interface-node-group-title';
+    title.textContent = category;
+    group.appendChild(title);
+    items.forEach(({ template, index }) => {
+      const button = document.createElement('button');
+      button.className = 'interface-node-item';
+      button.textContent = template.label;
+      button.draggable = true;
+      button.addEventListener('dragstart', (ev) => {
+        ev.dataTransfer.setData('application/x-node-template', `builtin:${index}`);
+        ev.dataTransfer.effectAllowed = 'copy';
+      });
+      button.onclick = () => {
+        const node = createNodeFromTemplate(template);
+        state.nodes.push(node);
+        state.selectedNode = node.id;
+        state.selectedLink = null;
+        renderAll();
+        scheduleRun();
+      };
+      group.appendChild(button);
     });
-    button.onclick = () => {
-      const node = createNodeFromTemplate(template);
-      state.nodes.push(node);
-      state.selectedNode = node.id;
-      state.selectedLink = null;
-      renderAll();
-      scheduleRun();
-    };
-    list.appendChild(button);
+    list.appendChild(group);
   });
 }
 
 function customNodeTemplate(item) {
+  const node = structuredClone(item.node || {});
+  node.customNodeMeta = customNodeMetadata(item);
   return {
     label: item.name || item.node?.name || item.id,
     toolType: '',
-    node: item.node || {},
+    node,
   };
 }
 
@@ -430,7 +476,67 @@ function customNodeSummary(node) {
   const inputs = Array.isArray(node.inputs) ? node.inputs.length : 0;
   const outputs = Array.isArray(node.outputs) ? node.outputs.length : 0;
   const timers = normalizeTimers(node || {}).length;
-  return `${inputs} in / ${outputs} out${timers ? ` / ${timers} timer${timers === 1 ? '' : 's'}` : ''}`;
+  const runtime = nodeRuntimeSummary(node);
+  return `${inputs} in / ${outputs} out${timers ? ` / ${timers} timer${timers === 1 ? '' : 's'}` : ''}${runtime ? ` / ${runtime}` : ''}`;
+}
+
+async function refreshLwrclpyReleases() {
+  try {
+    const data = await fetch('/api/lwrclpy-releases').then((res) => res.json());
+    state.lwrclpyReleases = Array.isArray(data.releases) ? data.releases : [];
+    state.hostPythonVersion = data.hostPythonVersion || '';
+  } catch (err) {
+    console.error(err);
+    state.lwrclpyReleases = [];
+  }
+  const versions = new Set();
+  state.lwrclpyReleases.forEach((release) => {
+    (release.pythonVersions || []).forEach((version) => versions.add(String(version)));
+  });
+  if (state.hostPythonVersion) versions.add(state.hostPythonVersion);
+  state.pythonVersions = [...versions].sort(versionCompare);
+}
+
+function versionCompare(a, b) {
+  const left = String(a).split('.').map(Number);
+  const right = String(b).split('.').map(Number);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const diff = (left[index] || 0) - (right[index] || 0);
+    if (diff) return diff;
+  }
+  return String(a).localeCompare(String(b));
+}
+
+function defaultPythonVersion() {
+  return state.hostPythonVersion || state.pythonVersions[0] || '';
+}
+
+function defaultLwrclpyVersion() {
+  return state.lwrclpyReleases[0]?.version || '';
+}
+
+function lwrclpyVersionsForPython(pythonVersion) {
+  return state.lwrclpyReleases
+    .filter((release) => !pythonVersion || (release.pythonVersions || []).map(String).includes(String(pythonVersion)))
+    .map((release) => release.version || release.tag || '')
+    .filter(Boolean);
+}
+
+function nodeRuntimeSummary(node) {
+  if (!node || node.toolType) return '';
+  const py = node.pythonVersion || defaultPythonVersion();
+  const lw = node.lwrclpyVersion || defaultLwrclpyVersion();
+  return `${py ? `Python ${py}` : 'Python host'}${lw ? ` / lwrclpy ${lw}` : ''}`;
+}
+
+function customNodeMetadata(item) {
+  return {
+    format: item.format || 'lwrclpy-web-node-editor-custom-node',
+    version: Number(item.version || 1),
+    id: item.id || safeFileName(item.name || item.node?.name || 'custom_node'),
+    name: item.name || item.node?.name || item.id || 'custom_node',
+    description: item.description || '',
+  };
 }
 
 async function refreshCustomNodes() {
@@ -455,28 +561,37 @@ async function postCustomNodeApi(path, payload) {
   return data;
 }
 
-function customNodeStoragePayload(node, name = '') {
+function customNodeStoragePayload(node, name = '', description = null) {
   const stored = structuredClone(node);
+  const meta = stored.customNodeMeta || {};
   delete stored.id;
   delete stored.x;
   delete stored.y;
   delete stored.toolType;
+  delete stored.customNodeMeta;
+  stored.pythonVersion = stored.pythonVersion || defaultPythonVersion();
+  stored.lwrclpyVersion = stored.lwrclpyVersion || defaultLwrclpyVersion();
+  const exportName = name || meta.name || stored.name || 'custom_node';
+  const exportDescription = description === null ? (meta.description || '') : String(description || '').trim();
   return {
-    id: safeFileName(name || stored.name || 'custom_node'),
-    name: name || stored.name || 'custom_node',
-    description: '',
+    format: meta.format || 'lwrclpy-web-node-editor-custom-node',
+    version: Number(meta.version || 1),
+    id: safeFileName(meta.id && (!name || name === meta.name) ? meta.id : exportName),
+    name: exportName,
+    description: exportDescription,
     node: stored,
   };
 }
 
-async function exportNodeDialogDraft() {
-  renderConfigPorts();
-  const draft = JSON.parse($('node-dialog').dataset.draft || JSON.stringify(createDefaultNode()));
-  if (draft.toolType) return;
-  const name = prompt('Custom node export name', draft.name || 'custom_node');
+async function exportCustomNodeFromEditor(node) {
+  if (!node || node.toolType) return;
+  const meta = node.customNodeMeta || {};
+  const name = prompt('Custom node export name', meta.name || node.name || 'custom_node');
   if (!name) return;
+  const description = prompt('Custom node description', meta.description || '');
+  if (description === null) return;
   try {
-    await postCustomNodeApi('/api/custom-nodes/save', customNodeStoragePayload(draft, name.trim()));
+    await postCustomNodeApi('/api/custom-nodes/save', customNodeStoragePayload(node, name.trim(), description));
     renderCustomNodePalette();
     renderCustomNodeManager();
     setExecutionStatus('idle', `Exported custom node ${name.trim()}`);
@@ -595,8 +710,10 @@ function openNodeDialog(node = null) {
   draft.timers = normalizeTimers(draft);
   $('node-dialog').dataset.draft = JSON.stringify(draft);
   $('node-dialog-title').textContent = node ? 'Edit lwrclpy Node' : 'Create lwrclpy Node';
-  $('export-node-config').style.display = draft.toolType ? 'none' : 'inline-flex';
   $('config-node-name').value = draft.name;
+  draft.pythonVersion = draft.pythonVersion || defaultPythonVersion();
+  draft.lwrclpyVersion = draft.lwrclpyVersion || defaultLwrclpyVersion();
+  renderRuntimeVersionSelects(draft);
   $('config-input-count').value = draft.inputs.length;
   $('config-output-count').value = draft.outputs.length;
   $('config-timer-count').value = draft.timers.length;
@@ -604,10 +721,40 @@ function openNodeDialog(node = null) {
   $('node-dialog').showModal();
 }
 
+function renderRuntimeVersionSelects(draft) {
+  const pythonSelect = $('config-python-version');
+  const lwrclpySelect = $('config-lwrclpy-version');
+  const pythonVersions = state.pythonVersions.length ? state.pythonVersions : [draft.pythonVersion || defaultPythonVersion()].filter(Boolean);
+  const selectedPython = draft.pythonVersion || defaultPythonVersion();
+  pythonSelect.innerHTML = pythonVersions.map((version) => `<option value="${escapeAttr(version)}"${version === selectedPython ? ' selected' : ''}>Python ${escapeHtml(version)}</option>`).join('');
+  if (!pythonSelect.innerHTML) pythonSelect.innerHTML = '<option value="">Host Python</option>';
+  const selected = pythonSelect.value || selectedPython;
+  const lwrclpyVersions = lwrclpyVersionsForPython(selected);
+  const selectedLwrclpy = lwrclpyVersions.includes(draft.lwrclpyVersion) ? draft.lwrclpyVersion : (lwrclpyVersions[0] || draft.lwrclpyVersion || '');
+  lwrclpySelect.innerHTML = lwrclpyVersions.map((version) => `<option value="${escapeAttr(version)}"${version === selectedLwrclpy ? ' selected' : ''}>lwrclpy ${escapeHtml(version)}</option>`).join('');
+  if (!lwrclpySelect.innerHTML) lwrclpySelect.innerHTML = `<option value="${escapeAttr(selectedLwrclpy)}">${selectedLwrclpy ? `lwrclpy ${escapeHtml(selectedLwrclpy)}` : 'Latest compatible lwrclpy'}</option>`;
+  draft.pythonVersion = pythonSelect.value;
+  draft.lwrclpyVersion = lwrclpySelect.value;
+  $('node-dialog').dataset.draft = JSON.stringify(draft);
+}
+
+function updateDraftRuntimeVersions() {
+  const dialog = $('node-dialog');
+  const draft = JSON.parse(dialog.dataset.draft || JSON.stringify(createDefaultNode()));
+  draft.pythonVersion = $('config-python-version').value || '';
+  const compatible = lwrclpyVersionsForPython(draft.pythonVersion);
+  draft.lwrclpyVersion = compatible.includes($('config-lwrclpy-version').value)
+    ? $('config-lwrclpy-version').value
+    : (compatible[0] || $('config-lwrclpy-version').value || '');
+  renderRuntimeVersionSelects(draft);
+}
+
 function renderConfigPorts() {
   const dialog = $('node-dialog');
   const draft = JSON.parse(dialog.dataset.draft || JSON.stringify(createDefaultNode()));
   draft.name = $('config-node-name').value || draft.name;
+  draft.pythonVersion = $('config-python-version').value || draft.pythonVersion || defaultPythonVersion();
+  draft.lwrclpyVersion = $('config-lwrclpy-version').value || draft.lwrclpyVersion || defaultLwrclpyVersion();
   draft.inputs = resizePorts(draft.inputs || [], Number($('config-input-count').value || 0), 'in');
   draft.outputs = resizePorts(draft.outputs || [], Number($('config-output-count').value || 0), 'out');
   draft.timers = resizeTimers(normalizeTimers(draft), Number($('config-timer-count').value || 0));
@@ -792,6 +939,8 @@ function saveNodeDialog(ev) {
   ev.preventDefault();
   const draft = JSON.parse($('node-dialog').dataset.draft);
   draft.name = $('config-node-name').value || 'custom_ros_node';
+  draft.pythonVersion = $('config-python-version').value || draft.pythonVersion || defaultPythonVersion();
+  draft.lwrclpyVersion = $('config-lwrclpy-version').value || draft.lwrclpyVersion || defaultLwrclpyVersion();
   draft.timers = resizeTimers(normalizeTimers(draft), Number($('config-timer-count').value || 0));
   draft.timerEnabled = draft.timers.length > 0;
   draft.timerPeriodSec = draft.timers[0]?.periodSec || 1.0;
@@ -1065,9 +1214,10 @@ function renderNodes() {
     el.dataset.id = node.id;
     el.style.left = `${node.x}px`;
     el.style.top = `${node.y}px`;
+    const runtimeSummary = nodeRuntimeSummary(node);
     el.innerHTML = `
       <div class="node-title">
-        <div><strong>${escapeHtml(node.name)}</strong><small>${escapeHtml(nodeKindLabel(node))}</small></div>
+        <div><strong>${escapeHtml(node.name)}</strong><small>${escapeHtml(nodeKindLabel(node))}${runtimeSummary ? ` / ${escapeHtml(runtimeSummary)}` : ''}</small></div>
         <button class="delete" title="Delete">x</button>
       </div>
       <div class="ports">
@@ -1149,7 +1299,8 @@ function nodeKindLabel(node) {
 function inspectorHint(node) {
   if (!node.toolType) {
     const timers = normalizeTimers(node);
-    return `${node.inputs.length} subscriptions / ${node.outputs.length} publishers${timers.length ? ` / ${timers.length} timer${timers.length === 1 ? '' : 's'}` : ''}`;
+    const runtime = nodeRuntimeSummary(node);
+    return `${node.inputs.length} subscriptions / ${node.outputs.length} publishers${timers.length ? ` / ${timers.length} timer${timers.length === 1 ? '' : 's'}` : ''}${runtime ? ` / ${runtime}` : ''}`;
   }
   if (['topic_input', 'topic_output'].includes(node.toolType)) {
     return 'Graph boundary only. Sub/Pub is handled by the connected processing node.';
@@ -1194,6 +1345,29 @@ function applyVideoOutputType(node, outputType) {
   });
 }
 
+function mcapRecordTopicCount(node) {
+  return Math.max(1, Math.min(64, Math.floor(Number(node?.params?.topicCount || node?.inputs?.length || 1))));
+}
+
+function applyMcapRecordTopicCount(node, count) {
+  const nextCount = Math.max(1, Math.min(64, Math.floor(Number(count || 1))));
+  const nextInputs = [];
+  for (let index = 0; index < nextCount; index += 1) {
+    const existing = node.inputs?.[index];
+    nextInputs.push(existing ? { ...existing } : {
+      id: `in${index + 1}`,
+      name: `topic${index + 1}`,
+      dataType: '',
+      receiveMode: 'manual',
+      callbackCode: '',
+    });
+  }
+  const keptInputIds = new Set(nextInputs.map((port) => port.id));
+  state.links = state.links.filter((link) => link.toNode !== node.id || keptInputIds.has(link.toPort));
+  node.inputs = nextInputs;
+  node.params = { ...(node.params || {}), topicCount: nextCount };
+}
+
 function timerActionButtons(node) {
   const timers = normalizeTimers(node);
   return timers.map((timer) => `<button data-timer-input="${escapeAttr(timer.id)}">Timer: ${escapeHtml(timer.name)}</button>`).join('');
@@ -1232,14 +1406,31 @@ function toolActionHtml(node) {
     const playbackRate = Math.max(0.001, Number(p.playbackRate || 1));
     const channels = Array.isArray(p.mcapChannels) ? p.mcapChannels : [];
     const ros2Channels = channels.filter((channel) => isRos2McapChannel(channel));
+    const fileCount = Math.max(1, Number(p.fileCount || (Array.isArray(p.mcapFiles) ? p.mcapFiles.length : 1)));
+    const fileText = fileCount > 1 ? ` / ${fileCount} files` : '';
     const summary = p.mcapPath
-      ? `${channels.length} topics (${ros2Channels.length} ROS 2 topics) / ${formatDuration(Number(p.durationSec || 0))}${p.probeError ? ' / probe error' : ''}${p.metadataError ? ' / metadata error' : ''}`
+      ? `${channels.length} topics (${ros2Channels.length} ROS 2 topics) / ${formatDuration(Number(p.durationSec || 0))}${fileText}${p.probeError ? ' / probe error' : ''}${p.metadataError ? ' / metadata error' : ''}`
       : 'No MCAP selected';
     return `<div class="node-actions tool-actions">
-      <label class="tool-field tool-field-wide"><span>Path</span><input data-tool-mcap-path type="text" value="${escapeAttr(mcapPath)}" placeholder="/path/to/file.mcap"></label>
-      <button data-action="select-mcap-file">Select MCAP</button>
+      <label class="tool-field tool-field-wide"><span>Path</span><input data-tool-mcap-path type="text" value="${escapeAttr(mcapPath)}" placeholder="/path/to/file.mcap or /path/to/rosbag"></label>
+      <button data-action="select-mcap-file">Select MCAP/Bag</button>
       <label class="tool-field"><span>Rate</span><input data-tool-mcap-rate type="number" min="0.001" step="0.1" value="${escapeAttr(playbackRate)}"></label>
       <label class="tool-check"><input data-tool-mcap-loop type="checkbox" ${loopChecked}> Loop</label>
+      <div class="tool-summary">${escapeHtml(summary)}</div>
+    </div>`;
+  }
+  if (node.toolType === 'mcap_record') {
+    const p = node.params || {};
+    const mcapPath = p.mcapPath || '';
+    const topicCount = mcapRecordTopicCount(node);
+    const splitSizeMb = Math.max(0, Number(p.splitSizeMb || 0));
+    const splitText = splitSizeMb > 0 ? ` / split ${splitSizeMb} MB` : '';
+    const summary = mcapPath ? `Recording ${topicCount} topic${topicCount === 1 ? '' : 's'} to ROS 2 bag ${mcapPath}${splitText}` : 'No ROS 2 bag output selected';
+    return `<div class="node-actions tool-actions">
+      <label class="tool-field tool-field-wide"><span>Bag</span><input data-tool-mcap-record-path type="text" value="${escapeAttr(mcapPath)}" placeholder="/path/to/rosbag_name"></label>
+      <button data-action="select-mcap-record-file">Save Bag</button>
+      <label class="tool-field"><span>Topics</span><input data-tool-mcap-record-count type="number" min="1" max="64" step="1" value="${escapeAttr(topicCount)}"></label>
+      <label class="tool-field"><span>Split MB</span><input data-tool-mcap-record-split type="number" min="0" step="100" value="${escapeAttr(splitSizeMb)}"></label>
       <div class="tool-summary">${escapeHtml(summary)}</div>
     </div>`;
   }
@@ -1289,7 +1480,7 @@ function formatDuration(seconds) {
 }
 
 function viewNodeHtml(node) {
-  if (!['image_file_input', 'video_file_input', 'mcap_file_input', 'function_generator', 'image_view', 'image_file_save', 'graph_view', 'topic_hz_monitor'].includes(node.toolType)) return '';
+  if (!['image_file_input', 'video_file_input', 'mcap_file_input', 'mcap_record', 'function_generator', 'image_view', 'image_file_save', 'graph_view', 'topic_hz_monitor'].includes(node.toolType)) return '';
   const viewClass = node.toolType === 'video_file_input' ? ' node-view-video' : '';
   return `<div class="node-view${viewClass}" data-node-view="${escapeAttr(node.id)}">${renderViewContent(state.nodeViews[node.id])}</div>`;
 }
@@ -1439,6 +1630,52 @@ function bindToolActions(el, node) {
       scheduleRun();
     };
   }
+  const selectMcapRecordFile = el.querySelector('[data-action="select-mcap-record-file"]');
+  if (selectMcapRecordFile) selectMcapRecordFile.onclick = async () => {
+    selectMcapRecordFile.disabled = true;
+    try {
+      const selected = await selectMcapRecordFileFromServer();
+      if (selected?.path) {
+        node.params = { ...(node.params || {}), mcapPath: selected.path, fileName: selected.fileName || selected.path.split(/[\\/]/).filter(Boolean).pop() || selected.path };
+        renderAll();
+        commitHistory();
+        scheduleRun();
+      }
+    } catch (err) {
+      setExecutionStatus('error', `MCAP record path selection failed: ${err.message}`);
+    } finally {
+      selectMcapRecordFile.disabled = false;
+    }
+  };
+  const mcapRecordPath = el.querySelector('[data-tool-mcap-record-path]');
+  if (mcapRecordPath) {
+    mcapRecordPath.onchange = (ev) => {
+      const path = String(ev.target.value || '').trim();
+      node.params = { ...(node.params || {}), mcapPath: path, fileName: path.split(/[\\/]/).filter(Boolean).pop() || path };
+      renderAll();
+      commitHistory();
+      scheduleRun();
+    };
+  }
+  const mcapRecordCount = el.querySelector('[data-tool-mcap-record-count]');
+  if (mcapRecordCount) {
+    mcapRecordCount.onchange = (ev) => {
+      applyMcapRecordTopicCount(node, ev.target.value);
+      renderAll();
+      commitHistory();
+      scheduleRun();
+    };
+  }
+  const mcapRecordSplit = el.querySelector('[data-tool-mcap-record-split]');
+  if (mcapRecordSplit) {
+    mcapRecordSplit.onchange = (ev) => {
+      const value = Math.max(0, Number(ev.target.value || 0));
+      node.params = { ...(node.params || {}), splitSizeMb: Number.isFinite(value) ? value : 0 };
+      renderAll();
+      commitHistory();
+      scheduleRun();
+    };
+  }
   const signalSettings = el.querySelector('[data-action="signal-settings"]');
   if (signalSettings) {
     signalSettings.onclick = (ev) => {
@@ -1509,6 +1746,7 @@ function renderInspector() {
     ${node.toolType === 'graph_view' ? `<div class="inspector-actions"><button id="inspect-graph-settings">Graph Settings</button></div>` : ''}
     ${node.toolType ? '' : `<div class="inspector-actions">
         <button id="inspect-config">Configure Ports</button>
+        <button id="inspect-export-custom-node">Export Custom Node</button>
         <button id="inspect-imports">Import Code</button>
         <button id="inspect-requirements">Requirements</button>
         <button id="inspect-callback">Subscribe Callback Code</button>
@@ -1522,6 +1760,8 @@ function renderInspector() {
     ${node.toolType ? '' : `<h3>Timers</h3>${timerSummary(node)}`}`;
   const inspectConfig = $('inspect-config');
   if (inspectConfig) inspectConfig.onclick = () => openNodeDialog(node);
+  const inspectExportCustomNode = $('inspect-export-custom-node');
+  if (inspectExportCustomNode) inspectExportCustomNode.onclick = () => exportCustomNodeFromEditor(node);
   const inspectSignalSettings = $('inspect-signal-settings');
   if (inspectSignalSettings) inspectSignalSettings.onclick = () => openSignalDialog(node);
   const inspectGraphSettings = $('inspect-graph-settings');
@@ -1740,6 +1980,8 @@ function makeLinkLabel(a, b, link) {
   if (state.selectedLink === link.id) text.classList.add('selected');
   text.setAttribute('x', String((a.x + b.x) / 2));
   text.setAttribute('y', String((a.y + b.y) / 2 - 8));
+  text.setAttribute('text-anchor', 'middle');
+  text.setAttribute('dominant-baseline', 'middle');
   text.dataset.link = link.id;
   text.textContent = link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort);
   text.onpointerdown = (ev) => {
@@ -2071,7 +2313,7 @@ function isStartupStatusText(text) {
 
 async function stopWorkers(force = false) {
   const controller = new AbortController();
-  const timeoutMs = force ? 2500 : 2000;
+  const timeoutMs = force ? 8000 : 2000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const endpoint = force ? '/api/force-stop' : '/api/stop';
@@ -2081,7 +2323,9 @@ async function stopWorkers(force = false) {
       signal: controller.signal,
       body: JSON.stringify({ force }),
     }).then((res) => res.json());
-    const count = Object.keys(data.stopped || {}).length;
+    const stoppedCount = Object.keys(data.stopped || {}).length;
+    const orphanCount = Array.isArray(data.orphanProcesses?.killed) ? data.orphanProcesses.killed.length : 0;
+    const count = stoppedCount + orphanCount;
     if (!force && data.pending) {
       setExecutionStatus('stopping', 'Stop is taking too long, escalating to force stop');
       return await stopWorkers(true);
@@ -2769,6 +3013,13 @@ async function selectMcapFileFromServer() {
   return data.canceled ? null : data;
 }
 
+async function selectMcapRecordFileFromServer() {
+  const response = await fetch('/api/select-mcap-record-file', { method: 'POST' });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+  return data.canceled ? null : data;
+}
+
 async function openMcapFileFromServer(path) {
   const response = await fetch('/api/open-mcap-file', {
     method: 'POST',
@@ -2813,6 +3064,8 @@ function applyMcapSelection(node, selected) {
     ...(node.params || {}),
     mcapPath: selected.path,
     fileName: selected.fileName || selected.path.split(/[\\/]/).filter(Boolean).pop() || selected.path,
+    mcapFiles: Array.isArray(selected.mcapFiles) ? selected.mcapFiles : [],
+    fileCount: Math.max(1, Number(selected.fileCount || (Array.isArray(selected.mcapFiles) ? selected.mcapFiles.length : 1))),
     mcapChannels: channels,
     mcapOutputTopics: outputTopics,
     startTimeNs: Number(selected.startTimeNs || 0),
@@ -3188,7 +3441,7 @@ function refreshRunTimer() {
 }
 
 function runLoopHz() {
-  return clamp(Number($('run-hz')?.value || 1000), 1, 1000);
+  return GRAPH_RUN_HZ;
 }
 
 function runIntervalMs() {
@@ -3460,7 +3713,7 @@ function exportRos2Package() {
   }
   const files = renderRos2PackageFiles(config);
   const zip = makeZip(files);
-  downloadBlob(`${config.packageName}.zip`, zip, 'application/zip');
+  downloadBlob(`${config.projectName}_ros2_packages.zip`, zip, 'application/zip');
 }
 
 function exportPythonNode(node) {
@@ -3520,464 +3773,640 @@ function projectPythonConfig() {
   };
 }
 
-  function projectRos2PackageConfig() {
-    const baseName = safePackageName(projectConfig().name || 'rclpy_exported_nodes');
-    const usedModules = new Set();
-    const nodes = state.nodes.filter((node) => !node.toolType).map((node) => {
-    const config = nodePythonConfig(node);
+function projectRos2PackageConfig() {
+  const baseName = projectExportBaseName();
+  const usedModules = new Set();
+  const usedPackages = new Set();
+  const nodes = state.nodes.filter((node) => !node.toolType).map((node) => {
+    const nodeConfig = nodePythonConfig(node);
     const moduleName = uniqueModuleName(safePythonIdentifier(node.name || node.id), usedModules);
-    return { ...config, moduleName, executableName: moduleName };
-    });
+    const packageName = uniqueModuleName(safePackageName(`${baseName}_${moduleName}`), usedPackages);
     return {
-    format: 'lwrclpy-web-node-editor-ros2-package',
-    version: 1,
-    packageName: baseName,
+      ...nodeConfig,
+      moduleName,
+      executableName: moduleName,
+      packageName,
+      dependencies: ros2NodePackageDependencies(nodeConfig),
+      requirements: aggregateRequirements([nodeConfig]),
+    };
+  });
+  const launchPackageName = uniqueModuleName(safePackageName(`${baseName}_launch`), usedPackages);
+  return {
+    format: 'lwrclpy-web-node-editor-ros2-workspace',
+    version: 2,
+    projectName: baseName,
+    packageName: launchPackageName,
+    launchPackageName,
     nodes,
     skippedNodes: state.nodes.filter((node) => node.toolType).map((node) => ({ id: node.id, name: node.name, toolType: node.toolType })),
-    dependencies: ros2PackageDependencies(nodes),
-    };
-  }
+  };
+}
 
-  function renderRos2PackageFiles(config) {
-    const packageName = config.packageName;
-    const files = [];
-    files.push({ path: `${packageName}/package.xml`, content: renderRos2PackageXml(config) });
-    files.push({ path: `${packageName}/setup.py`, content: renderRos2SetupPy(config) });
-    files.push({ path: `${packageName}/setup.cfg`, content: renderRos2SetupCfg(config) });
-    files.push({ path: `${packageName}/resource/${packageName}`, content: '' });
-    files.push({ path: `${packageName}/${packageName}/__init__.py`, content: '' });
-    files.push({ path: `${packageName}/${packageName}/runtime.py`, content: renderRos2RuntimePy() });
-    files.push({ path: `${packageName}/launch/project.launch.py`, content: renderRos2LaunchPy(config) });
-    files.push({ path: `${packageName}/README.md`, content: renderRos2PackageReadme(config) });
-    const requirements = aggregateRequirements(config.nodes);
-    if (requirements) files.push({ path: `${packageName}/requirements.txt`, content: requirements });
-    config.nodes.forEach((nodeConfig) => {
-    files.push({ path: `${packageName}/${packageName}/${nodeConfig.moduleName}.py`, content: renderRos2NodePy(nodeConfig) });
+function renderRos2PackageFiles(config) {
+  const files = [];
+  config.nodes.forEach((nodeConfig) => {
+    files.push(...renderRos2NodePackageFiles(nodeConfig));
+  });
+  files.push(...renderRos2LaunchPackageFiles(config));
+  files.push({ path: `README.md`, content: renderRos2PackageReadme(config) });
+  return files.map((file) => ({
+    ...file,
+    content: typeof file.content === 'string' ? normalizeGeneratedFile(file.content) : file.content,
+  }));
+}
+
+function renderRos2NodePackageFiles(nodeConfig) {
+  const packageName = nodeConfig.packageName;
+  const files = [
+    { path: `${packageName}/package.xml`, content: renderRos2NodePackageXml(nodeConfig) },
+    { path: `${packageName}/setup.py`, content: renderRos2NodeSetupPy(nodeConfig) },
+    { path: `${packageName}/setup.cfg`, content: renderRos2SetupCfg(packageName) },
+    { path: `${packageName}/resource/${packageName}`, content: '' },
+    { path: `${packageName}/${packageName}/__init__.py`, content: '' },
+    { path: `${packageName}/${packageName}/runtime.py`, content: renderRos2RuntimePy() },
+    { path: `${packageName}/${packageName}/${nodeConfig.moduleName}.py`, content: renderRos2NodePy(nodeConfig) },
+    { path: `${packageName}/README.md`, content: renderRos2NodePackageReadme(nodeConfig) },
+  ];
+  if (nodeConfig.requirements) files.push({ path: `${packageName}/requirements.txt`, content: nodeConfig.requirements });
+  return files;
+}
+
+function renderRos2LaunchPackageFiles(config) {
+  const packageName = config.launchPackageName;
+  return [
+    { path: `${packageName}/package.xml`, content: renderRos2LaunchPackageXml(config) },
+    { path: `${packageName}/setup.py`, content: renderRos2LaunchSetupPy(config) },
+    { path: `${packageName}/setup.cfg`, content: renderRos2SetupCfg(packageName) },
+    { path: `${packageName}/resource/${packageName}`, content: '' },
+    { path: `${packageName}/${packageName}/__init__.py`, content: '' },
+    { path: `${packageName}/launch/${config.projectName}.launch.py`, content: renderRos2LaunchPy(config) },
+    { path: `${packageName}/README.md`, content: renderRos2LaunchPackageReadme(config) },
+  ];
+}
+
+function normalizeGeneratedFile(text) {
+  return String(text).trimEnd() + '\n';
+}
+
+function pythonJsonLoadExpression(config) {
+  const metadata = JSON.stringify(config, null, 2);
+  if (!metadata.includes("'''")) return `json.loads(r'''${metadata}''')`;
+  if (!metadata.includes('"""')) return `json.loads(r"""${metadata}""")`;
+  return `json.loads(${JSON.stringify(metadata)})`;
+}
+
+function pythonMultilineString(value) {
+  const text = String(value || '');
+  if (!text) return "''";
+  if (!text.endsWith('\\') && !text.includes("'''")) return `r'''${text}'''`;
+  if (!text.endsWith('\\') && !text.includes('"""')) return `r"""${text}"""`;
+  return JSON.stringify(text);
+}
+
+function configWithoutInlineCode(config) {
+  const copy = JSON.parse(JSON.stringify(config));
+  if (copy.node) clearNodeInlineCode(copy.node);
+  if (Array.isArray(copy.nodes)) {
+    copy.nodes.forEach((item) => {
+      if (item?.node) clearNodeInlineCode(item.node);
     });
-    return files.map((file) => ({
-      ...file,
-      content: typeof file.content === 'string' ? normalizeGeneratedFile(file.content) : file.content,
-    }));
   }
+  return copy;
+}
 
-  function normalizeGeneratedFile(text) {
-    return String(text).replace(/\n {2}/g, '\n').trimEnd() + '\n';
-  }
+function clearNodeInlineCode(node) {
+  node.importCode = '';
+  node.loopCode = '';
+  node.timerCode = '';
+  (node.inputs || []).forEach((input) => { input.callbackCode = ''; });
+  (node.timers || []).forEach((timer) => { timer.callbackCode = ''; });
+}
 
-  function renderRos2PackageXml(config) {
-    const deps = config.dependencies.map((dep) => `  <exec_depend>${escapeXml(dep)}</exec_depend>`).join('\n');
-    return `<?xml version="1.0"?>
-  <package format="3">
-    <name>${escapeXml(config.packageName)}</name>
-    <version>0.0.0</version>
-    <description>ROS 2 rclpy package exported from Web Node Editor.</description>
-    <maintainer email="user@example.com">user</maintainer>
-    <license>TODO</license>
+function nodeInlineCodeAssignments(nodePath, node) {
+  const lines = [];
+  const add = (path, value) => {
+    if (String(value || '')) lines.push(`${path} = ${pythonMultilineString(value)}`);
+  };
+  add(`${nodePath}["importCode"]`, node.importCode);
+  add(`${nodePath}["loopCode"]`, node.loopCode);
+  add(`${nodePath}["timerCode"]`, node.timerCode);
+  (node.inputs || []).forEach((input, index) => {
+    add(`${nodePath}["inputs"][${index}]["callbackCode"]`, input.callbackCode);
+  });
+  (node.timers || []).forEach((timer, index) => {
+    add(`${nodePath}["timers"][${index}]["callbackCode"]`, timer.callbackCode);
+  });
+  return lines.join('\n');
+}
 
-    <buildtool_depend>ament_python</buildtool_depend>
-  ${deps}
+function configInlineCodeAssignments(config) {
+  if (config.node) return nodeInlineCodeAssignments('CONFIG["node"]', config.node);
+  if (!Array.isArray(config.nodes)) return '';
+  return config.nodes
+    .map((item, index) => item?.node ? nodeInlineCodeAssignments(`CONFIG["nodes"][${index}]["node"]`, item.node) : '')
+    .filter(Boolean)
+    .join('\n\n');
+}
 
-    <export>
+function renderRos2NodePackageXml(config) {
+  const deps = config.dependencies.map((dep) => `  <exec_depend>${escapeXml(dep)}</exec_depend>`).join('\n');
+  return `<?xml version="1.0"?>
+<package format="3">
+  <name>${escapeXml(config.packageName)}</name>
+  <version>0.0.0</version>
+  <description>ROS 2 rclpy node package exported from Web Node Editor.</description>
+  <maintainer email="user@example.com">user</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+${deps}
+
+  <export>
     <build_type>ament_python</build_type>
-    </export>
-  </package>
-  `;
-  }
+  </export>
+</package>
+`;
+}
 
-  function renderRos2SetupPy(config) {
-    const consoleScripts = config.nodes.map((node) => `            '${node.executableName} = ${config.packageName}.${node.moduleName}:main',`).join('\n');
-    return `from setuptools import find_packages, setup
+function renderRos2LaunchPackageXml(config) {
+  const deps = ['launch', 'launch_ros', ...config.nodes.map((node) => node.packageName)]
+    .sort()
+    .map((dep) => `  <exec_depend>${escapeXml(dep)}</exec_depend>`)
+    .join('\n');
+  return `<?xml version="1.0"?>
+<package format="3">
+  <name>${escapeXml(config.launchPackageName)}</name>
+  <version>0.0.0</version>
+  <description>Launch package for Web Node Editor project ${escapeXml(config.projectName)}.</description>
+  <maintainer email="user@example.com">user</maintainer>
+  <license>TODO</license>
 
-  package_name = '${config.packageName}'
+  <buildtool_depend>ament_python</buildtool_depend>
+${deps}
 
-  setup(
-    name=package_name,
-    version='0.0.0',
-    packages=find_packages(exclude=['test']),
-    data_files=[
-      ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
-      ('share/' + package_name, ['package.xml']),
-      ('share/' + package_name + '/launch', ['launch/project.launch.py']),
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
+`;
+}
+
+function renderRos2NodeSetupPy(config) {
+  return `from setuptools import find_packages, setup
+
+package_name = '${config.packageName}'
+
+setup(
+  name=package_name,
+  version='0.0.0',
+  packages=find_packages(exclude=['test']),
+  data_files=[
+    ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+    ('share/' + package_name, ['package.xml']),
+  ],
+  install_requires=['setuptools'],
+  zip_safe=True,
+  maintainer='user',
+  maintainer_email='user@example.com',
+  description='ROS 2 rclpy node package exported from Web Node Editor.',
+  license='TODO',
+  tests_require=['pytest'],
+  entry_points={
+    'console_scripts': [
+      '${config.executableName} = ${config.packageName}.${config.moduleName}:main',
     ],
-    install_requires=['setuptools'],
-    zip_safe=True,
-    maintainer='user',
-    maintainer_email='user@example.com',
-    description='ROS 2 rclpy package exported from Web Node Editor.',
-    license='TODO',
-    tests_require=['pytest'],
-    entry_points={
-      'console_scripts': [
-  ${consoleScripts}
-      ],
-    },
-  )
-  `;
-  }
+  },
+)
+`;
+}
 
-  function renderRos2SetupCfg(config) {
-    return `[develop]
-  script_dir=$base/lib/${config.packageName}
-  [install]
-  install_scripts=$base/lib/${config.packageName}
-  `;
-  }
+function renderRos2LaunchSetupPy(config) {
+  return `from glob import glob
+from setuptools import find_packages, setup
 
-  function renderRos2LaunchPy(config) {
-    const nodes = config.nodes.map((node) => `        Node(
-        package='${config.packageName}',
-        executable='${node.executableName}',
-        name='${safeRosName(node.node.name || node.moduleName)}',
-        output='screen',
-      ),`).join('\n');
-    return `from launch import LaunchDescription
-  from launch_ros.actions import Node
+package_name = '${config.launchPackageName}'
+
+setup(
+  name=package_name,
+  version='0.0.0',
+  packages=find_packages(exclude=['test']),
+  data_files=[
+    ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+    ('share/' + package_name, ['package.xml']),
+    ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
+  ],
+  install_requires=['setuptools'],
+  zip_safe=True,
+  maintainer='user',
+  maintainer_email='user@example.com',
+  description='Launch package exported from Web Node Editor.',
+  license='TODO',
+  tests_require=['pytest'],
+  entry_points={'console_scripts': []},
+)
+`;
+}
+
+function renderRos2SetupCfg(packageName) {
+  return `[develop]
+script_dir=$base/lib/${packageName}
+[install]
+install_scripts=$base/lib/${packageName}
+`;
+}
+
+function renderRos2LaunchPy(config) {
+  const nodes = config.nodes.map((node) => `        Node(
+            package='${node.packageName}',
+            executable='${node.executableName}',
+            name='${safeRosName(node.node.name || node.moduleName)}',
+            output='screen',
+        ),`).join('\n');
+  return `from launch import LaunchDescription
+from launch_ros.actions import Node
 
 
-  def generate_launch_description():
+def generate_launch_description():
     return LaunchDescription([
-  ${nodes}
+${nodes}
     ])
-  `;
-  }
+`;
+}
 
-  function renderRos2NodePy(config) {
-    const metadata = JSON.stringify(config, null, 2);
-    return `#!/usr/bin/env python3
-  import json
+function renderRos2NodePy(config) {
+  const codeAssignments = configInlineCodeAssignments(config);
+  return `#!/usr/bin/env python3
+import json
 
-  from .runtime import run_node
-
-
-  CONFIG = json.loads(${JSON.stringify(metadata)})
+from .runtime import run_node
 
 
-  def main(args=None):
+CONFIG = ${pythonJsonLoadExpression(configWithoutInlineCode(config))}
+${codeAssignments ? `\n${codeAssignments}\n` : ''}
+
+
+def main(args=None):
     run_node(CONFIG, args=args)
 
 
-  if __name__ == '__main__':
+if __name__ == '__main__':
     main()
-  `;
-  }
+`;
+}
 
-  function renderRos2RuntimePy() {
-    return `import importlib
-  import sys
-  import time
+function renderRos2RuntimePy() {
+  return `import importlib
+import sys
+import time
 
-  import rclpy
-  from rclpy.executors import MultiThreadedExecutor
-
-
-  def import_type_class(type_name):
-    package, kind, name = type_name.split('/')
-    module = importlib.import_module(f'{package}.{kind}')
-    return getattr(module, name)
+import rclpy
+from rclpy.executors import MultiThreadedExecutor
 
 
-  def split_kind(type_name):
-    return type_name.split('/')[1]
+def import_type_class(type_name):
+  package, kind, name = type_name.split('/')
+  module = importlib.import_module(f'{package}.{kind}')
+  return getattr(module, name)
 
 
-  class ExportedNode:
-    def __init__(self, config):
-      self.config = config
-      self.node_config = config['node']
-      self.port_topics = config.get('portTopics', {'inputs': {}, 'outputs': {}})
-      self.state = {}
-      self.last_inputs = {}
-      self.input_queues = {}
-      self.last_outputs = {}
-      self.next_timer_at = 0.0
-      self.publishers = {}
-      self.clients = {}
-      self.subscriptions = []
-      self.services = []
-      self._globals_cache = None
-      self.node = rclpy.create_node(self.node_config['name'])
-      self._setup_transport()
+def split_kind(type_name):
+  return type_name.split('/')[1]
 
-    def _setup_transport(self):
-      for output in self.node_config.get('outputs', []):
-        type_cls = import_type_class(output['dataType'])
-        for topic in self.port_topics.get('outputs', {}).get(output['id'], []):
-          if split_kind(output['dataType']) == 'msg':
-            self.publishers.setdefault(output['id'], []).append(self.node.create_publisher(type_cls, topic, 10))
-          else:
-            self.clients.setdefault(output['id'], []).append(self.node.create_client(type_cls, topic))
-      for input_port in self.node_config.get('inputs', []):
-        type_cls = import_type_class(input_port['dataType'])
-        for topic in self.port_topics.get('inputs', {}).get(input_port['id'], []):
-          if split_kind(input_port['dataType']) == 'msg':
-            self.subscriptions.append(self.node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port), 10))
-          else:
-            self.services.append(self.node.create_service(type_cls, topic, self._make_service_callback(input_port)))
 
-    def publish(self, output_id, value):
-      self.last_outputs[output_id] = value
-      output = self._output_port(output_id)
-      if output is None:
+class ExportedNode:
+  def __init__(self, config):
+    self.config = config
+    self.node_config = config['node']
+    self.port_topics = config.get('portTopics', {'inputs': {}, 'outputs': {}})
+    self.state = {}
+    self.last_inputs = {}
+    self.input_queues = {}
+    self.last_outputs = {}
+    self.next_timer_at = 0.0
+    self.publishers = {}
+    self.clients = {}
+    self.subscriptions = []
+    self.services = []
+    self._globals_cache = None
+    self.node = rclpy.create_node(self.node_config['name'])
+    self._setup_transport()
+
+  def _setup_transport(self):
+    for output in self.node_config.get('outputs', []):
+      type_cls = import_type_class(output['dataType'])
+      for topic in self.port_topics.get('outputs', {}).get(output['id'], []):
+        if split_kind(output['dataType']) == 'msg':
+          self.publishers.setdefault(output['id'], []).append(self.node.create_publisher(type_cls, topic, 10))
+        else:
+          self.clients.setdefault(output['id'], []).append(self.node.create_client(type_cls, topic))
+    for input_port in self.node_config.get('inputs', []):
+      type_cls = import_type_class(input_port['dataType'])
+      for topic in self.port_topics.get('inputs', {}).get(input_port['id'], []):
+        if split_kind(input_port['dataType']) == 'msg':
+          self.subscriptions.append(self.node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port), 10))
+        else:
+          self.services.append(self.node.create_service(type_cls, topic, self._make_service_callback(input_port)))
+
+  def publish(self, output_id, value):
+    self.last_outputs[output_id] = value
+    output = self._output_port(output_id)
+    if output is None:
+      return
+    if output_id in self.publishers:
+      msg = self._coerce_message(output['dataType'], value)
+      for publisher in self.publishers[output_id]:
+        publisher.publish(msg)
+    if output_id in self.clients:
+      request = self._coerce_service_request(output['dataType'], value)
+      for client in self.clients[output_id]:
+        client.call_async(request)
+
+  def latest(self, input_id, default=None):
+    return self.last_inputs.get(input_id, default)
+
+  def take(self, input_id, default=None):
+    queue = self.input_queues.get(input_id) or []
+    if not queue:
+      return default
+    return queue.pop(0)
+
+  def has_input(self, input_id):
+    return bool(self.input_queues.get(input_id))
+
+  def log(self, *values):
+    print(f'[{self.node_config["name"]}]', *values)
+
+  def spin_tick(self):
+    outputs = {}
+    inputs = dict(self.last_inputs)
+    self._execute_timer_if_due(inputs, outputs)
+    self._execute_loop(inputs, outputs)
+    self._flush_outputs(outputs)
+
+  def _make_subscription_callback(self, input_port):
+    def callback(msg):
+      self._store_input(input_port['id'], msg)
+      if input_port.get('receiveMode', 'callback') != 'callback':
         return
-      if output_id in self.publishers:
-        msg = self._coerce_message(output['dataType'], value)
-        for publisher in self.publishers[output_id]:
-          publisher.publish(msg)
-      if output_id in self.clients:
-        request = self._coerce_service_request(output['dataType'], value)
-        for client in self.clients[output_id]:
-          client.call_async(request)
-
-    def latest(self, input_id, default=None):
-      return self.last_inputs.get(input_id, default)
-
-    def take(self, input_id, default=None):
-      queue = self.input_queues.get(input_id) or []
-      if not queue:
-        return default
-      return queue.pop(0)
-
-    def has_input(self, input_id):
-      return bool(self.input_queues.get(input_id))
-
-    def log(self, *values):
-      print(f'[{self.node_config["name"]}]', *values)
-
-    def spin_tick(self):
       outputs = {}
-      inputs = dict(self.last_inputs)
-      self._execute_timer_if_due(inputs, outputs)
-      self._execute_loop(inputs, outputs)
+      self._execute_callback(input_port, msg, None, outputs)
       self._flush_outputs(outputs)
+    return callback
 
-    def _make_subscription_callback(self, input_port):
-      def callback(msg):
-        self._store_input(input_port['id'], msg)
-        if input_port.get('receiveMode', 'callback') != 'callback':
-          return
-        outputs = {}
-        self._execute_callback(input_port, msg, None, outputs)
-        self._flush_outputs(outputs)
-      return callback
+  def _make_service_callback(self, input_port):
+    def callback(request, response):
+      self._store_input(input_port['id'], request)
+      outputs = {}
+      if input_port.get('receiveMode', 'callback') == 'callback':
+        self._execute_callback(input_port, request, response, outputs)
+      self._flush_outputs(outputs)
+      return response
+    return callback
 
-    def _make_service_callback(self, input_port):
-      def callback(request, response):
-        self._store_input(input_port['id'], request)
-        outputs = {}
-        if input_port.get('receiveMode', 'callback') == 'callback':
-          self._execute_callback(input_port, request, response, outputs)
-        self._flush_outputs(outputs)
-        return response
-      return callback
+  def _execute_callback(self, input_port, msg, response, outputs):
+    code = input_port.get('callbackCode', '').strip()
+    if not code:
+      return
+    local = self._locals({'input_id': input_port['id'], 'msg': msg, 'request': msg, 'response': response, 'outputs': outputs})
+    exec(code, self._globals(), local)
 
-    def _execute_callback(self, input_port, msg, response, outputs):
-      code = input_port.get('callbackCode', '').strip()
-      if not code:
-        return
-      local = self._locals({'input_id': input_port['id'], 'msg': msg, 'request': msg, 'response': response, 'outputs': outputs})
-      exec(code, self._globals(), local)
+  def _execute_loop(self, inputs, outputs):
+    code = self.node_config.get('loopCode', '').strip()
+    if not code:
+      return
+    local = self._locals({'inputs': inputs, 'outputs': outputs, 'now': time.time(), 'latest': self.latest, 'take': self.take, 'has_input': self.has_input})
+    exec(code, self._globals(), local)
 
-    def _execute_loop(self, inputs, outputs):
-      code = self.node_config.get('loopCode', '').strip()
-      if not code:
-        return
-      local = self._locals({'inputs': inputs, 'outputs': outputs, 'now': time.time(), 'latest': self.latest, 'take': self.take, 'has_input': self.has_input})
-      exec(code, self._globals(), local)
+  def _execute_timer_if_due(self, inputs, outputs):
+    if not self.node_config.get('timerEnabled', False):
+      return
+    code = self.node_config.get('timerCode', '').strip()
+    if not code:
+      return
+    now = time.time()
+    period = max(0.001, float(self.node_config.get('timerPeriodSec', 1.0) or 1.0))
+    if self.next_timer_at <= 0:
+      self.next_timer_at = now
+    if now < self.next_timer_at:
+      return
+    self.next_timer_at = now + period
+    local = self._locals({'inputs': inputs, 'outputs': outputs, 'now': now, 'period': period, 'latest': self.latest, 'take': self.take, 'has_input': self.has_input})
+    exec(code, self._globals(), local)
 
-    def _execute_timer_if_due(self, inputs, outputs):
-      if not self.node_config.get('timerEnabled', False):
-        return
-      code = self.node_config.get('timerCode', '').strip()
-      if not code:
-        return
-      now = time.time()
-      period = max(0.001, float(self.node_config.get('timerPeriodSec', 1.0) or 1.0))
-      if self.next_timer_at <= 0:
-        self.next_timer_at = now
-      if now < self.next_timer_at:
-        return
-      self.next_timer_at = now + period
-      local = self._locals({'inputs': inputs, 'outputs': outputs, 'now': now, 'period': period, 'latest': self.latest, 'take': self.take, 'has_input': self.has_input})
-      exec(code, self._globals(), local)
+  def _flush_outputs(self, outputs):
+    for key, value in outputs.items():
+      self.last_outputs[key] = value
+      self.publish(key, value)
 
-    def _flush_outputs(self, outputs):
-      for key, value in outputs.items():
-        self.last_outputs[key] = value
-        self.publish(key, value)
-
-    def _globals(self):
-      if self._globals_cache is not None:
-        return self._globals_cache
-      globals_dict = {
-        '__builtins__': {
-          '__import__': __import__,
-          'abs': abs,
-          'bool': bool,
-          'bytes': bytes,
-          'dict': dict,
-          'enumerate': enumerate,
-          'float': float,
-          'getattr': getattr,
-          'hasattr': hasattr,
-          'int': int,
-          'len': len,
-          'list': list,
-          'max': max,
-          'min': min,
-          'print': self.log,
-          'range': range,
-          'round': round,
-          'setattr': setattr,
-          'str': str,
-          'sum': sum,
-        }
+  def _globals(self):
+    if self._globals_cache is not None:
+      return self._globals_cache
+    globals_dict = {
+      '__builtins__': {
+        '__import__': __import__,
+        'abs': abs,
+        'bool': bool,
+        'bytes': bytes,
+        'dict': dict,
+        'enumerate': enumerate,
+        'float': float,
+        'getattr': getattr,
+        'hasattr': hasattr,
+        'int': int,
+        'len': len,
+        'list': list,
+        'max': max,
+        'min': min,
+        'print': self.log,
+        'range': range,
+        'round': round,
+        'setattr': setattr,
+        'str': str,
+        'sum': sum,
       }
-      import_code = self.node_config.get('importCode', '').strip()
-      if import_code:
-        exec(import_code, globals_dict, globals_dict)
-      self._globals_cache = globals_dict
-      return globals_dict
-
-    def _locals(self, extra):
-      return {'node': self.node, 'params': self.node_config.get('params', {}), 'state': self.state, 'publish': self.publish, 'log': self.log, **extra}
-
-    def _store_input(self, input_id, value):
-      self.last_inputs[input_id] = value
-      queue = self.input_queues.setdefault(input_id, [])
-      queue.append(value)
-      del queue[:-100]
-
-    def _output_port(self, output_id):
-      for output in self.node_config.get('outputs', []):
-        if output['id'] == output_id:
-          return output
-      return None
-
-    def _coerce_message(self, data_type, value):
-      msg_cls = import_type_class(data_type)
-      if hasattr(value, '_fields_and_field_types'):
-        return value
-      msg = msg_cls()
-      self._populate_message(msg, value)
-      return msg
-
-    def _populate_message(self, msg, value):
-      if isinstance(value, dict):
-        for key, item in value.items():
-          if hasattr(msg, key):
-            setattr(msg, key, item)
-      elif hasattr(msg, 'data'):
-        msg.data = value
-
-    def _coerce_service_request(self, data_type, value):
-      srv_cls = import_type_class(data_type)
-      request = srv_cls.Request()
-      if hasattr(value, '_fields_and_field_types'):
-        return value
-      if hasattr(request, 'data'):
-        request.data = value
-      elif isinstance(value, dict):
-        for key, item in value.items():
-          if hasattr(request, key):
-            setattr(request, key, item)
-      return request
-
-
-  def run_node(config, args=None):
-    rclpy.init(args=args)
-    exported = ExportedNode(config)
-    executor = MultiThreadedExecutor()
-    executor.add_node(exported.node)
-    try:
-      while rclpy.ok():
-        executor.spin_once(timeout_sec=0.05)
-        exported.spin_tick()
-    finally:
-      executor.remove_node(exported.node)
-      exported.node.destroy_node()
-      rclpy.shutdown()
-  `;
-  }
-
-  function renderRos2PackageReadme(config) {
-    const nodes = config.nodes.map((node) => `- \`${node.executableName}\`: \`${node.node.name}\``).join('\n');
-    const skipped = config.skippedNodes.length
-    ? `\n\nThe following browser-only nodes were not exported as ROS 2 executables:\n${config.skippedNodes.map((node) => `- ${node.name} (${node.toolType})`).join('\n')}\n`
-    : '';
-    return `# ${config.packageName}
-
-  ROS 2 Python package exported for standard rclpy.
-
-  ## Nodes
-
-  ${nodes}
-  ${skipped}
-  ## Build and run
-
-  Copy this package into a ROS 2 workspace ` + '`src`' + ` directory, then run:
-
-  ` + '```bash' + `
-  colcon build --packages-select ${config.packageName}
-  source install/setup.bash
-  ros2 launch ${config.packageName} project.launch.py
-  ` + '```' + `
-
-  If node code imports extra Python packages, install the generated ` + '`requirements.txt`' + ` in the same environment before launching.
-  `;
-  }
-
-  function ros2PackageDependencies(nodes) {
-    const deps = new Set(['rclpy', 'launch', 'launch_ros']);
-    nodes.forEach((item) => {
-    const node = item.node || {};
-    [...(node.inputs || []), ...(node.outputs || [])].forEach((port) => {
-      const packageName = String(port.dataType || '').split('/')[0];
-      if (packageName) deps.add(packageName);
-    });
-    });
-    return [...deps].sort();
-  }
-
-  function aggregateRequirements(nodes) {
-    const lines = new Set();
-    nodes.forEach((item) => {
-    String(item.node?.requirements || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean).forEach((line) => lines.add(line));
-    });
-    return [...lines].join('\n') + (lines.size ? '\n' : '');
-  }
-
-  function safePackageName(value) {
-    let name = String(value || 'rclpy_exported_nodes').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
-    if (!name || /^[0-9]/.test(name)) name = `ros2_${name || 'exported_nodes'}`;
-    return name;
-  }
-
-  function safePythonIdentifier(value) {
-    let name = String(value || 'node').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
-    if (!name || /^[0-9]/.test(name)) name = `node_${name || 'exported'}`;
-    return name;
-  }
-
-  function safeRosName(value) {
-    return safePythonIdentifier(value).replace(/_+/g, '_');
-  }
-
-  function uniqueModuleName(base, used) {
-    let name = base || 'node';
-    let index = 2;
-    while (used.has(name)) {
-    name = `${base}_${index++}`;
     }
-    used.add(name);
-    return name;
-  }
+    import_code = self.node_config.get('importCode', '').strip()
+    if import_code:
+      exec(import_code, globals_dict, globals_dict)
+    self._globals_cache = globals_dict
+    return globals_dict
 
-  function escapeXml(value) {
-    return String(value).replace(/[<>&"']/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[ch]));
+  def _locals(self, extra):
+    return {'node': self.node, 'params': self.node_config.get('params', {}), 'state': self.state, 'publish': self.publish, 'log': self.log, **extra}
+
+  def _store_input(self, input_id, value):
+    self.last_inputs[input_id] = value
+    queue = self.input_queues.setdefault(input_id, [])
+    queue.append(value)
+    del queue[:-100]
+
+  def _output_port(self, output_id):
+    for output in self.node_config.get('outputs', []):
+      if output['id'] == output_id:
+        return output
+    return None
+
+  def _coerce_message(self, data_type, value):
+    msg_cls = import_type_class(data_type)
+    if hasattr(value, '_fields_and_field_types'):
+      return value
+    msg = msg_cls()
+    self._populate_message(msg, value)
+    return msg
+
+  def _populate_message(self, msg, value):
+    if isinstance(value, dict):
+      for key, item in value.items():
+        if hasattr(msg, key):
+          setattr(msg, key, item)
+    elif hasattr(msg, 'data'):
+      msg.data = value
+
+  def _coerce_service_request(self, data_type, value):
+    srv_cls = import_type_class(data_type)
+    request = srv_cls.Request()
+    if hasattr(value, '_fields_and_field_types'):
+      return value
+    if hasattr(request, 'data'):
+      request.data = value
+    elif isinstance(value, dict):
+      for key, item in value.items():
+        if hasattr(request, key):
+          setattr(request, key, item)
+    return request
+
+
+def run_node(config, args=None):
+  rclpy.init(args=args)
+  exported = ExportedNode(config)
+  executor = MultiThreadedExecutor()
+  executor.add_node(exported.node)
+  try:
+    while rclpy.ok():
+      executor.spin_once(timeout_sec=0.05)
+      exported.spin_tick()
+  finally:
+    executor.remove_node(exported.node)
+    exported.node.destroy_node()
+    rclpy.shutdown()
+`;
+}
+
+function renderRos2PackageReadme(config) {
+  const packages = [config.launchPackageName, ...config.nodes.map((node) => node.packageName)];
+  const nodes = config.nodes.map((node) => `- \`${node.packageName}\`: executable \`${node.executableName}\`, ROS node \`${node.node.name}\``).join('\n');
+  const skipped = config.skippedNodes.length
+    ? `\n\nThe following built-in/browser tool nodes were not exported:\n${config.skippedNodes.map((node) => `- ${node.name} (${node.toolType})`).join('\n')}\n`
+    : '';
+  return `# ${config.projectName} ROS 2 export
+
+This export contains one ROS 2 package per custom node plus one launch package.
+Built-in nodes are not exported as executables.
+
+## Packages
+
+${packages.map((name) => `- \`${name}\``).join('\n')}
+
+## Nodes
+
+${nodes}
+${skipped}
+## Build and run
+
+Copy every package directory from this archive into a ROS 2 workspace ` + '`src`' + ` directory, then run:
+
+` + '```bash' + `
+colcon build --packages-select ${packages.join(' ')}
+source install/setup.bash
+ros2 launch ${config.launchPackageName} ${config.projectName}.launch.py
+` + '```' + `
+
+If a node package contains a ` + '`requirements.txt`' + `, install those Python packages in the same ROS 2 environment before launching.
+`;
+}
+
+function renderRos2NodePackageReadme(config) {
+  return `# ${config.packageName}
+
+ROS 2 Python package for custom node \`${config.node.name}\`.
+
+## Run
+
+` + '```bash' + `
+ros2 run ${config.packageName} ${config.executableName}
+` + '```' + `
+`;
+}
+
+function renderRos2LaunchPackageReadme(config) {
+  return `# ${config.launchPackageName}
+
+Launch package for project \`${config.projectName}\`.
+
+## Run
+
+` + '```bash' + `
+ros2 launch ${config.launchPackageName} ${config.projectName}.launch.py
+` + '```' + `
+`;
+}
+
+function ros2NodePackageDependencies(item) {
+  const deps = new Set(['rclpy']);
+  const node = item.node || {};
+  [...(node.inputs || []), ...(node.outputs || [])].forEach((port) => {
+    const packageName = String(port.dataType || '').split('/')[0];
+    if (packageName) deps.add(packageName);
+  });
+  return [...deps].sort();
+}
+
+function aggregateRequirements(nodes) {
+  const lines = new Set();
+  nodes.forEach((item) => {
+    String(item.node?.requirements || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean).forEach((line) => lines.add(line));
+  });
+  return [...lines].join('\n') + (lines.size ? '\n' : '');
+}
+
+function projectExportBaseName() {
+  const fromFile = String(state.projectFileName || '').replace(/\.[^.]+$/, '');
+  return safePackageName(projectConfig().name || fromFile || 'lwrclpy_exported_project');
+}
+
+function safePackageName(value) {
+  let name = String(value || 'rclpy_exported_nodes').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!name || /^[0-9]/.test(name)) name = `ros2_${name || 'exported_nodes'}`;
+  return name;
+}
+
+function safePythonIdentifier(value) {
+  let name = String(value || 'node').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!name || /^[0-9]/.test(name)) name = `node_${name || 'exported'}`;
+  return name;
+}
+
+function safeRosName(value) {
+  return safePythonIdentifier(value).replace(/_+/g, '_');
+}
+
+function uniqueModuleName(base, used) {
+  const cleanBase = base || 'node';
+  let name = cleanBase;
+  let index = 2;
+  while (used.has(name)) {
+    name = `${cleanBase}_${index++}`;
   }
+  used.add(name);
+  return name;
+}
+
+function escapeXml(value) {
+  return String(value).replace(/[<>&"']/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[ch]));
+}
 
 function renderProjectPythonFile(config) {
-  const metadata = JSON.stringify(config, null, 2);
+  const codeAssignments = configInlineCodeAssignments(config);
   return `#!/usr/bin/env python3
 # Generated by Web Node Editor for standard ROS 2 rclpy.
 # This file runs exported custom ROS 2 nodes from one saved project.
@@ -3995,7 +4424,8 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 
 
-CONFIG = json.loads(${JSON.stringify(metadata)})
+CONFIG = ${pythonJsonLoadExpression(configWithoutInlineCode(config))}
+${codeAssignments ? `\n${codeAssignments}\n` : ''}
 
 
 def import_type_class(type_name):
@@ -4273,6 +4703,7 @@ def generate_launch_description():
 
 function renderPythonNodeFile(config) {
   const metadata = JSON.stringify(config, null, 2);
+  const codeAssignments = configInlineCodeAssignments(config);
   return `#!/usr/bin/env python3
 # Generated by Web Node Editor for standard ROS 2 rclpy.
 # LWRCLPY_WEB_NODE_EDITOR_CONFIG_START
@@ -4287,7 +4718,8 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 
 
-CONFIG = json.loads(${JSON.stringify(metadata)})
+CONFIG = ${pythonJsonLoadExpression(configWithoutInlineCode(config))}
+${codeAssignments ? `\n${codeAssignments}\n` : ''}
 
 
 def import_type_class(type_name):
@@ -4554,6 +4986,7 @@ function normalizeImportedNode(node) {
   const isTool = Boolean(node.toolType);
   const toolInputType = (port, fallback) => {
     if (node.toolType === 'graph_view' && !port.dataType) return 'std_msgs/msg/Float32';
+    if (node.toolType === 'mcap_record' && !port.dataType) return '';
     return port.dataType ?? fallback;
   };
   const normalized = {
@@ -4577,11 +5010,14 @@ function normalizeImportedNode(node) {
     timers: isTool ? [] : normalizeTimers(node),
     timerEnabled: Boolean(node.timerEnabled),
     timerPeriodSec: Number(node.timerPeriodSec || 1.0),
-    timerCode: node.timerCode || DEFAULT_TIMER_CODE,
+    timerCode: Object.prototype.hasOwnProperty.call(node, 'timerCode') ? node.timerCode : DEFAULT_TIMER_CODE,
     importCode: node.importCode || DEFAULT_IMPORT_CODE,
     requirements: node.requirements || '',
+    pythonVersion: isTool ? '' : (node.pythonVersion || defaultPythonVersion()),
+    lwrclpyVersion: isTool ? '' : (node.lwrclpyVersion || defaultLwrclpyVersion()),
     toolType: node.toolType || '',
     params: node.params || {},
+    customNodeMeta: node.customNodeMeta || null,
   };
   if (normalized.toolType === 'video_file_input') {
     const outputType = normalized.params.outputType || normalized.outputs?.[0]?.dataType;
@@ -4591,6 +5027,23 @@ function normalizeImportedNode(node) {
       normalized.outputs[0].dataType = videoType;
     }
     normalized.params = { ...(normalized.params || {}), outputType: videoType };
+  }
+  if (normalized.toolType === 'mcap_record') {
+    const count = Math.max(1, Math.min(64, Math.floor(Number(normalized.params.topicCount || normalized.inputs.length || 1))));
+    const splitSizeMb = Math.max(0, Number(normalized.params.splitSizeMb || 0));
+    normalized.params = { ...(normalized.params || {}), topicCount: count, splitSizeMb: Number.isFinite(splitSizeMb) ? splitSizeMb : 0 };
+    while (normalized.inputs.length < count) {
+      const index = normalized.inputs.length;
+      normalized.inputs.push({ id: `in${index + 1}`, name: `topic${index + 1}`, dataType: '', receiveMode: 'manual', callbackCode: '' });
+    }
+    normalized.inputs = normalized.inputs.slice(0, count).map((port, index) => ({
+      ...port,
+      id: port.id || `in${index + 1}`,
+      name: port.name || `topic${index + 1}`,
+      dataType: port.dataType || '',
+      receiveMode: 'manual',
+      callbackCode: '',
+    }));
   }
   return normalized;
 }

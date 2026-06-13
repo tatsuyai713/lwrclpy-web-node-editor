@@ -41,12 +41,12 @@ def _topic_qos(data_type: str) -> Any:
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=5,
-            reliability=qos.ReliabilityPolicy.BEST_EFFORT,
+            depth=64,
+            reliability=qos.ReliabilityPolicy.RELIABLE,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
-        return 5
+        return 64
 
 
 def _set_field(msg: Any, key: str, value: Any) -> None:

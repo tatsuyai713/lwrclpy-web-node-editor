@@ -11,6 +11,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from .runtime_exec import configure_local_lwrclpy_wheel, local_lwrclpy_wheel
 from .server import _server_lock_path, cleanup_framework_processes
 
 
@@ -65,11 +66,15 @@ def _stop_existing_app_server() -> None:
 
 
 def _server_command(host: str, port: int) -> list[str]:
+    wheel_args: list[str] = []
+    wheel = local_lwrclpy_wheel()
+    if wheel is not None:
+        wheel_args = ["--lwrclpy-wheel", str(wheel)]
     if getattr(sys, "frozen", False):
-        return [str(Path(sys.executable).resolve()), "--server", "--host", host, "--port", str(port)]
+        return [str(Path(sys.executable).resolve()), "--server", "--host", host, "--port", str(port), *wheel_args]
     project_root = Path(__file__).resolve().parents[1]
     main_py = project_root / "main.py"
-    return [str(Path(sys.executable).resolve()), str(main_py), "--server", "--host", host, "--port", str(port)]
+    return [str(Path(sys.executable).resolve()), str(main_py), "--server", "--host", host, "--port", str(port), *wheel_args]
 
 
 def _shutdown_runtime(server_proc: subprocess.Popen[str] | None, app_url: str) -> None:
@@ -111,7 +116,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--title", default="lwrclpy Web Node Editor")
     parser.add_argument("--width", type=int, default=1400)
     parser.add_argument("--height", type=int, default=900)
+    parser.add_argument("--lwrclpy-wheel", default="", help="Use this local lwrclpy .whl for the server and every node venv.")
     args = parser.parse_args(argv)
+    if args.lwrclpy_wheel:
+        try:
+            configure_local_lwrclpy_wheel(args.lwrclpy_wheel)
+        except Exception as exc:
+            print(f"Failed to configure local lwrclpy wheel: {exc}", file=sys.stderr)
+            return 1
 
     port = args.port if int(args.port) > 0 else _find_free_port(args.host)
     startup_cleanup = cleanup_framework_processes(force=True)

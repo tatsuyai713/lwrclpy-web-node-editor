@@ -7,6 +7,7 @@ import json
 import math
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -90,12 +91,12 @@ def _topic_qos(data_type: str) -> Any:
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=5,
-            reliability=qos.ReliabilityPolicy.BEST_EFFORT,
+            depth=64,
+            reliability=qos.ReliabilityPolicy.RELIABLE,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
-        return 5
+        return 64
 
 
 def _set_field(msg: Any, key: str, value: Any) -> None:
@@ -162,6 +163,75 @@ def _write_status(path: Path, **values: Any) -> None:
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     tmp_path.write_text(json.dumps({"time": time.time(), **values}, ensure_ascii=False, default=str), encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _natural_sort_key(path: Path) -> list[object]:
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
+
+
+def _strip_yaml_scalar(value: str) -> str:
+    text = value.strip()
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        return text[1:-1]
+    return text
+
+
+def _yaml_relative_file_paths(metadata_path: Path) -> list[str]:
+    try:
+        text = metadata_path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "relative_file_paths:":
+            continue
+        paths: list[str] = []
+        for item in lines[index + 1:]:
+            stripped = item.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("- "):
+                paths.append(_strip_yaml_scalar(stripped[2:]))
+                continue
+            if not item.startswith(" ") and stripped.endswith(":"):
+                break
+        return paths
+    return []
+
+
+def _resolve_mcap_input_files(path: Path) -> tuple[Path, list[Path]]:
+    selected = path.expanduser()
+    if selected.is_file() and selected.name in {"metadata.yaml", "metadata.yml", "metadata.json"}:
+        selected = selected.parent
+    if selected.is_file():
+        if selected.suffix.lower() != ".mcap":
+            raise RuntimeError(f"selected file is not an .mcap file: {selected}")
+        return selected, [selected]
+    if not selected.is_dir():
+        raise RuntimeError(f"selected MCAP path does not exist: {selected}")
+    metadata_path = next((candidate for candidate in [
+        selected / "metadata.yaml",
+        selected / "metadata.yml",
+        selected / "metadata.json",
+    ] if candidate.is_file()), None)
+    files: list[Path] = []
+    if metadata_path is not None and metadata_path.suffix.lower() == ".json":
+        try:
+            data = json.loads(metadata_path.read_text(encoding="utf-8"))
+            info = data.get("rosbag2_bagfile_information") if isinstance(data, dict) else {}
+            rels = info.get("relative_file_paths") if isinstance(info, dict) else []
+            if isinstance(rels, list):
+                files = [selected / str(rel) for rel in rels]
+        except Exception:
+            files = []
+    elif metadata_path is not None:
+        files = [selected / rel for rel in _yaml_relative_file_paths(metadata_path)]
+    files = [file for file in files if file.is_file() and file.suffix.lower() == ".mcap"]
+    if not files:
+        files = sorted(selected.glob("*.mcap"), key=_natural_sort_key)
+    if not files:
+        raise RuntimeError(f"ROS 2 bag directory has no .mcap files: {selected}")
+    return selected, files
 
 
 def _normalize_image(image: dict[str, Any]) -> dict[str, Any]:
@@ -377,8 +447,10 @@ def _run_mcap_input(config: dict[str, Any], publishers: dict[str, Any]) -> None:
     params = config.get("params") or {}
     status_path = Path(config["statusPath"])
     mcap_path = Path(str(params.get("mcapPath") or "")).expanduser()
-    if not mcap_path.is_file():
-        _write_status(status_path, running=False, status="No MCAP file selected")
+    try:
+        display_path, mcap_files = _resolve_mcap_input_files(mcap_path)
+    except Exception as exc:
+        _write_status(status_path, running=False, status=str(exc))
         return
     outputs = [item for item in config.get("outputs", []) if isinstance(item, dict)]
     topics_by_port = {
@@ -403,7 +475,7 @@ def _run_mcap_input(config: dict[str, Any], publishers: dict[str, Any]) -> None:
     _ensure_mcap_dependencies()
     from mcap_ros2.reader import read_ros2_messages
 
-    _write_status(status_path, running=True, phase="open", published=0, status=f"starting: opening {mcap_path.name}")
+    _write_status(status_path, running=True, phase="open", published=0, status=f"starting: opening {display_path.name} ({len(mcap_files)} file{'s' if len(mcap_files) != 1 else ''})")
     playback_rate = max(0.001, float(params.get("playbackRate") or 1.0))
     loop = bool(params.get("loop", False))
     selected_topics = sorted(ports_by_topic)
@@ -419,58 +491,81 @@ def _run_mcap_input(config: dict[str, Any], publishers: dict[str, Any]) -> None:
             phase="read" if count == 0 else "",
             published=count,
             status=(
-                f"starting: reading {mcap_path.name} topics={', '.join(selected_topics)}"
+                f"starting: reading {display_path.name} topics={', '.join(selected_topics)}"
                 if count == 0
-                else f"reading {mcap_path.name} topics={', '.join(selected_topics)}"
+                else f"reading {display_path.name} topics={', '.join(selected_topics)}"
             ),
+            fileCount=len(mcap_files),
         )
-        for item in read_ros2_messages(str(mcap_path), topics=selected_topics, log_time_order=True):
+        for file_index, file_path in enumerate(mcap_files, start=1):
             if not RUNNING:
                 break
-            log_time = int(getattr(item, "log_time_ns", 0) or getattr(getattr(item, "message", None), "log_time", 0) or 0)
-            if first_log_time is None:
-                first_log_time = log_time
-                wall_start = time.monotonic()
-            wait_sec = ((log_time - first_log_time) / 1e9) / playback_rate
-            target = wall_start + max(0.0, wait_sec)
-            while RUNNING:
-                remaining = target - time.monotonic()
-                if remaining <= 0:
+            _write_status(
+                status_path,
+                running=True,
+                phase="read" if count == 0 else "",
+                published=count,
+                status=f"reading {file_path.name} ({file_index}/{len(mcap_files)})",
+                currentFile=str(file_path),
+                fileIndex=file_index,
+                fileCount=len(mcap_files),
+            )
+            for item in read_ros2_messages(str(file_path), topics=selected_topics, log_time_order=True):
+                if not RUNNING:
                     break
-                time.sleep(min(0.01, remaining))
-            if not RUNNING:
-                break
-            plain_msg = _plain_value(item.ros_msg)
-            item_topic = str(getattr(item.channel, "topic", ""))
-            for port_id in ports_by_topic.get(item_topic, []):
-                _write_status(
-                    status_path,
-                    running=True,
-                    phase="first_publish" if count == 0 else "",
-                    published=count,
-                    status=f"starting: publishing first {item_topic}" if count == 0 else f"publishing {item_topic}",
-                )
-                publishers[port_id].publish(_coerce_message(data_types_by_port[port_id], plain_msg))
-                count += 1
-                if count == 1:
+                log_time = int(getattr(item, "log_time_ns", 0) or getattr(getattr(item, "message", None), "log_time", 0) or 0)
+                if first_log_time is None:
+                    first_log_time = log_time
+                    wall_start = time.monotonic()
+                wait_sec = ((log_time - first_log_time) / 1e9) / playback_rate
+                target = wall_start + max(0.0, wait_sec)
+                while RUNNING:
+                    remaining = target - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.01, remaining))
+                if not RUNNING:
+                    break
+                plain_msg = _plain_value(item.ros_msg)
+                item_topic = str(getattr(item.channel, "topic", ""))
+                for port_id in ports_by_topic.get(item_topic, []):
+                    _write_status(
+                        status_path,
+                        running=True,
+                        phase="first_publish" if count == 0 else "",
+                        published=count,
+                        status=f"starting: publishing first {item_topic}" if count == 0 else f"publishing {item_topic}",
+                        currentFile=str(file_path),
+                        fileIndex=file_index,
+                        fileCount=len(mcap_files),
+                    )
+                    publishers[port_id].publish(_coerce_message(data_types_by_port[port_id], plain_msg))
+                    count += 1
+                    if count == 1:
+                        _write_status(
+                            status_path,
+                            running=True,
+                            published=count,
+                            status=f"publishing {item_topic}",
+                            currentFile=str(file_path),
+                            fileIndex=file_index,
+                            fileCount=len(mcap_files),
+                        )
+                played_any = True
+                if count == 1 or count % 30 == 0:
+                    elapsed = ((log_time - first_log_time) / 1e9) if first_log_time is not None else 0.0
                     _write_status(
                         status_path,
                         running=True,
                         published=count,
-                        status=f"publishing {item_topic}",
+                        status=f"{display_path.name} {elapsed:.2f}s x{playback_rate:g} / {count} messages ({file_index}/{len(mcap_files)})",
+                        currentFile=str(file_path),
+                        fileIndex=file_index,
+                        fileCount=len(mcap_files),
                     )
-            played_any = True
-            if count == 1 or count % 30 == 0:
-                elapsed = ((log_time - first_log_time) / 1e9) if first_log_time is not None else 0.0
-                _write_status(
-                    status_path,
-                    running=True,
-                    published=count,
-                    status=f"{mcap_path.name} {elapsed:.2f}s x{playback_rate:g} / {count} messages",
-                )
         if not RUNNING:
             break
-        _write_status(status_path, running=loop and played_any, published=count, ended=not loop, status=f"{mcap_path.name} playback ended / {count} messages")
+        _write_status(status_path, running=loop and played_any, published=count, ended=not loop, status=f"{display_path.name} playback ended / {count} messages", fileCount=len(mcap_files))
         if not loop or not played_any:
             break
 

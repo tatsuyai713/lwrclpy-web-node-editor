@@ -28,6 +28,13 @@ python3.13 -m venv .venv
 .venv/bin/python main.py --host 127.0.0.1 --port 8765
 ```
 
+ローカルでビルドした `lwrclpy` wheel を使う場合は、サーバー起動時に指定できます。指定した wheel はサーバー本体と各ノード専用 `.node_envs/<node-id>` の両方で使用されます。
+
+```bash
+.venv/bin/python main.py --host 127.0.0.1 --port 8765 \
+  --lwrclpy-wheel /Users/tatsuyai/repos/lwrclpy/dist/lwrclpy-0.5.1-cp313-cp313-macosx_26_0_arm64.whl
+```
+
 ## Linux向けスタンドアロンアプリ化
 
 LinuxではPyInstallerで `onedir` 形式のスタンドアロン実行ファイルを作成できます。

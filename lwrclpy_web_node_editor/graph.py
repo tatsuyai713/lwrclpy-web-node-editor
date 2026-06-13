@@ -9,18 +9,24 @@ import base64
 import builtins
 import hashlib
 import os
+import platform
 import random
+import re
 import signal
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .runtime_exec import find_lwrclpy_installer, resolve_worker_command
+from .runtime_exec import find_lwrclpy_installer, local_lwrclpy_wheel, resolve_worker_command
+
+LWRCLPY_RELEASES_API_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
 
 
 def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
@@ -72,6 +78,17 @@ GUI_DISPLAY_HZ = 30.0
 LWRCLPY_INSTALL_MARKER = "github-latest-wheel"
 
 
+def lwrclpy_install_marker() -> str:
+    wheel = local_lwrclpy_wheel()
+    if wheel is None:
+        return LWRCLPY_INSTALL_MARKER
+    try:
+        stat = wheel.stat()
+        return f"local-wheel:{wheel}:{stat.st_size}:{stat.st_mtime_ns}"
+    except Exception:
+        return f"local-wheel:{wheel}"
+
+
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
@@ -112,6 +129,8 @@ class CustomLwrclNodeConfig:
     timer_code: str = ""
     import_code: str = ""
     requirements: str = ""
+    python_version: str = ""
+    lwrclpy_version: str = ""
     tool_type: str = ""
     params: dict[str, Any] = field(default_factory=dict)
 
@@ -274,6 +293,26 @@ class CustomLwrclNodeInstance:
         self.services = []
         self.stop_worker()
 
+    def _kill_pid_file_process(self, pid_path: Path) -> None:
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip())
+        except Exception:
+            return
+        if pid <= 0 or (self.worker_process is not None and pid == self.worker_process.pid):
+            return
+        try:
+            if os.name != "nt":
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
     def stop_worker(self, force: bool = False, timeout: float | None = None) -> bool:
         process = self.worker_process
         self.worker_process = None
@@ -284,8 +323,14 @@ class CustomLwrclNodeInstance:
                 except Exception:
                     pass
             return False
-        self._signal_worker(process, force)
-        wait_timeout = 0.2 if force else (0.5 if timeout is None else max(0.0, float(timeout)))
+        graceful_mcap_record = self.config.tool_type == "mcap_record"
+        self._signal_worker(process, False if graceful_mcap_record else force)
+        if timeout is not None:
+            wait_timeout = max(0.0, float(timeout))
+        elif graceful_mcap_record:
+            wait_timeout = 30.0
+        else:
+            wait_timeout = 0.2 if force else 0.5
         try:
             process.wait(timeout=wait_timeout)
         except subprocess.TimeoutExpired:
@@ -293,6 +338,16 @@ class CustomLwrclNodeInstance:
             try:
                 process.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
+                pass
+        if process.poll() is None:
+            try:
+                if os.name != "nt":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            except Exception:
                 pass
         if self.worker_pid_path:
             try:
@@ -424,7 +479,7 @@ class CustomLwrclNodeInstance:
             if not self.view:
                 self.view = {"kind": "text", "status": self._background_starting_status()}
             return True
-        if tool in {"function_generator", "image_file_input", "video_file_input", "image_view", "topic_hz_monitor", "graph_view", "image_file_save"}:
+        if tool in {"function_generator", "image_file_input", "video_file_input", "image_view", "topic_hz_monitor", "graph_view", "image_file_save", "mcap_record"}:
             self.last_outputs.clear()
             self.view = {"kind": "text", "status": "DDS topic is required; node execution is isolated in worker processes"}
             return True
@@ -495,6 +550,8 @@ class CustomLwrclNodeInstance:
             return bool(self.publishers)
         if tool in {"image_view", "topic_hz_monitor", "graph_view", "image_file_save"} and self._uses_dds_tap_worker():
             return True
+        if tool == "mcap_record" and self._uses_mcap_record_worker():
+            return True
         return False
 
     def _ensure_builtin_workers_once(self) -> None:
@@ -504,6 +561,8 @@ class CustomLwrclNodeInstance:
             self._ensure_dds_tap_worker()
         if self._uses_builtin_source_worker():
             self._ensure_builtin_source_worker()
+        if self._uses_mcap_record_worker():
+            self._ensure_mcap_record_worker()
 
     def _execute_builtin_worker_status_once(self) -> None:
         tool = self.config.tool_type
@@ -522,6 +581,8 @@ class CustomLwrclNodeInstance:
             self._execute_graph_view_worker_once()
         elif tool == "image_file_save":
             self._execute_image_save_worker_once()
+        elif tool == "mcap_record":
+            self._execute_mcap_record_worker_once()
 
     def _ensure_builtin_thread(self) -> None:
         if self._uses_video_worker():
@@ -530,6 +591,8 @@ class CustomLwrclNodeInstance:
             self._ensure_dds_tap_worker()
         if self._uses_builtin_source_worker():
             self._ensure_builtin_source_worker()
+        if self._uses_mcap_record_worker():
+            self._ensure_mcap_record_worker()
         if self._builtin_thread is not None and self._builtin_thread.is_alive():
             return
         self._builtin_stop.clear()
@@ -556,6 +619,9 @@ class CustomLwrclNodeInstance:
     def _uses_dds_tap_worker(self) -> bool:
         return self.config.tool_type in {"image_view", "topic_hz_monitor", "graph_view", "image_file_save"} and any(port.topics for port in self.config.inputs)
 
+    def _uses_mcap_record_worker(self) -> bool:
+        return self.config.tool_type == "mcap_record" and any(port.topics for port in self.config.inputs)
+
     def _uses_builtin_source_worker(self) -> bool:
         if self.config.tool_type == "video_file_input" and self._uses_video_worker():
             return False
@@ -573,6 +639,7 @@ class CustomLwrclNodeInstance:
         log_path = worker_dir / f"{self.config.id}.source.log"
         pid_path = worker_dir / f"{self.config.id}.source.pid"
         status_path = worker_dir / f"{self.config.id}.source.status.json"
+        self._kill_pid_file_process(pid_path)
         try:
             status_path.unlink(missing_ok=True)
             log_path.unlink(missing_ok=True)
@@ -609,6 +676,8 @@ class CustomLwrclNodeInstance:
             return "DDS tap worker starting"
         if self._uses_video_worker():
             return "video DDS worker starting"
+        if self._uses_mcap_record_worker():
+            return "MCAP record worker starting"
         return "worker starting"
 
     def _background_view_needs_startup_refresh(self) -> bool:
@@ -681,6 +750,7 @@ class CustomLwrclNodeInstance:
         pid_path = worker_dir / f"{self.config.id}.tap.pid"
         status_path = worker_dir / f"{self.config.id}.tap.status.json"
         frame_path = worker_dir / f"{self.config.id}.tap.frame"
+        self._kill_pid_file_process(pid_path)
         try:
             status_path.unlink(missing_ok=True)
             frame_path.unlink(missing_ok=True)
@@ -764,6 +834,75 @@ class CustomLwrclNodeInstance:
             return "polling"
         return "callback"
 
+    def _ensure_mcap_record_worker(self) -> None:
+        signature = self._mcap_record_worker_signature()
+        if self.worker_process is not None and self.worker_process.poll() is None and self.worker_signature == signature:
+            self.env_status = "MCAP record worker running"
+            return
+        self.stop_worker(force=False, timeout=30.0)
+        worker_dir = Path.cwd() / ".node_workers"
+        worker_dir.mkdir(parents=True, exist_ok=True)
+        config_path = worker_dir / f"{self.config.id}.mcap_record.json"
+        log_path = worker_dir / f"{self.config.id}.mcap_record.log"
+        pid_path = worker_dir / f"{self.config.id}.mcap_record.pid"
+        status_path = worker_dir / f"{self.config.id}.mcap_record.status.json"
+        self._kill_pid_file_process(pid_path)
+        try:
+            status_path.unlink(missing_ok=True)
+            log_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        write_json_atomic(config_path, self._mcap_record_worker_config(status_path))
+        try:
+            log_file = log_path.open("a", encoding="utf-8")
+            self.worker_process = subprocess.Popen(
+                resolve_worker_command("mcap_record", config_path, self._worker_python()),
+                cwd=Path.cwd(),
+                env=self._worker_env(),
+                stdout=log_file,
+                stderr=log_file,
+                text=True,
+                start_new_session=(os.name != "nt"),
+            )
+            self.worker_signature = signature
+            self.worker_config_path = config_path
+            self.worker_log_path = log_path
+            self.worker_pid_path = pid_path
+            pid_path.write_text(str(self.worker_process.pid), encoding="utf-8")
+            self.env_status = "MCAP record worker running"
+            self.view = {"kind": "text", "status": "MCAP record worker starting"}
+        except Exception as exc:
+            self.env_status = f"MCAP record worker start failed: {exc}"
+            self.view = {"kind": "text", "status": self.env_status}
+            self.log(self.env_status)
+
+    def _mcap_record_worker_signature(self) -> tuple[Any, ...]:
+        return (
+            "mcap-record-v8",
+            self.config.id,
+            tuple((port.id, port.name, port.data_type, port.topics) for port in self.config.inputs if port.topics),
+            json.dumps(self.config.params, sort_keys=True, default=str),
+            bool(self.config.params.get("_externalDdsCompatible")),
+        )
+
+    def _mcap_record_worker_config(self, status_path: Path) -> dict[str, Any]:
+        return {
+            "nodeId": self.config.id,
+            "toolType": self.config.tool_type,
+            "inputs": [
+                {
+                    "id": port.id,
+                    "name": port.name,
+                    "dataType": port.data_type,
+                    "topics": list(port.topics),
+                }
+                for port in self.config.inputs
+            ],
+            "params": self.config.params,
+            "statusPath": str(status_path),
+            "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
+        }
+
     def _ensure_video_worker(self) -> None:
         signature = self._video_worker_signature()
         if self.worker_signature == signature and self._video_worker_completed():
@@ -792,6 +931,7 @@ class CustomLwrclNodeInstance:
         pid_path = worker_dir / f"{self.config.id}.video.pid"
         status_path = worker_dir / f"{self.config.id}.video.status.json"
         frame_path = worker_dir / f"{self.config.id}.video.preview"
+        self._kill_pid_file_process(pid_path)
         try:
             status_path.unlink(missing_ok=True)
             frame_path.unlink(missing_ok=True)
@@ -1167,6 +1307,16 @@ class CustomLwrclNodeInstance:
         except Exception:
             return None
 
+    def _read_mcap_record_status(self) -> dict[str, Any] | None:
+        status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.mcap_record.status.json"
+        if not status_path.exists():
+            return None
+        try:
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
     def _execute_graph_view_once(self) -> None:
         queued_values = []
         while self.has_input("in1"):
@@ -1231,6 +1381,20 @@ class CustomLwrclNodeInstance:
             self.view = {"kind": "text", "status": "DDS tap worker starting"}
             return
         self.view = {"kind": "text", "status": str(status.get("savedPath") or "No image to save")}
+
+    def _execute_mcap_record_worker_once(self) -> None:
+        status = self._read_mcap_record_status()
+        if not status:
+            self.view = {"kind": "text", "status": "MCAP record worker starting"}
+            return
+        if status.get("error"):
+            self.view = {"kind": "text", "status": str(status.get("error"))}
+            return
+        text = str(status.get("status") or "MCAP record worker running")
+        path = str(status.get("path") or "")
+        if path and path not in text:
+            text = f"{text} -> {path}"
+        self.view = {"kind": "text", "status": text}
 
     def _should_publish_image_input(self, image: dict[str, Any]) -> bool:
         signature = self._image_signature(image)
@@ -2078,6 +2242,22 @@ class GraphRuntime:
         with self._lock:
             return self._prepare_locked(payload)
 
+    def ready_status(self) -> dict[str, Any]:
+        with self._lock:
+            nodes: dict[str, Any] = {}
+            for node_id, instance in self.instances.items():
+                nodes[node_id] = {
+                    "meta": {"environment": instance.env_status, "logs": instance.logs[-20:]},
+                    "values": {},
+                    "view": instance.view,
+                }
+            return {
+                "ready": True,
+                "nodes": nodes,
+                "lwrclpy": self.runtime.status(),
+                "setup": {"complete": True},
+            }
+
     def _prepare_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.close()
         configs = [self._parse_node(node) for node in payload.get("nodes", [])]
@@ -2195,7 +2375,9 @@ class GraphRuntime:
         env_root = Path.cwd() / ".node_envs" / config.id
         req_text = self._requirements_text_for(config)
         req_hash = hashlib.sha256(req_text.encode("utf-8")).hexdigest()
-        desired_env_signature = (str(env_root), req_hash)
+        desired_lwrclpy_marker = self._lwrclpy_install_marker_for(config)
+        desired_python = self._selected_python_version(config)
+        desired_env_signature = (str(env_root), req_hash, desired_lwrclpy_marker, desired_python)
         hash_file = env_root / ".requirements.sha256"
         python_marker = env_root / ".python-runtime"
         lwrclpy_marker = env_root / ".lwrclpy-installed"
@@ -2216,7 +2398,8 @@ class GraphRuntime:
             instance.env_status = "uv command not found"
             instance.log(instance.env_status)
             return False
-        expected_python = self._python_runtime_signature()
+        requested_python = self._python_for_config(config)
+        expected_python = self._python_runtime_signature(requested_python, desired_python)
         try:
             current_python = python_marker.read_text(encoding="utf-8") if python_marker.exists() else ""
             if python_bin.exists() and (current_python != expected_python or not self._venv_python_matches(env_root)):
@@ -2228,9 +2411,8 @@ class GraphRuntime:
             env_root.mkdir(parents=True, exist_ok=True)
             if not python_bin.exists():
                 instance.env_status = "creating venv"
-                real_python = self._real_python()
-                subprocess.run([uv, "venv", "--clear", "--python", real_python, str(env_root)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
-                python_marker.write_text(self._python_runtime_signature(real_python), encoding="utf-8")
+                subprocess.run([uv, "venv", "--clear", "--python", requested_python, str(env_root)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
+                python_marker.write_text(self._python_runtime_signature(requested_python, desired_python), encoding="utf-8")
             req_file.write_text(req_text, encoding="utf-8")
             current_hash = hash_file.read_text(encoding="utf-8") if hash_file.exists() else ""
             if current_hash != req_hash:
@@ -2242,9 +2424,9 @@ class GraphRuntime:
             instance.env_python_bin = python_bin
             instance.env_site_packages = self._site_packages_for(env_root)
             current_lwrclpy_marker = lwrclpy_marker.read_text(encoding="utf-8").strip() if lwrclpy_marker.exists() else ""
-            if current_lwrclpy_marker != LWRCLPY_INSTALL_MARKER and not self._ensure_lwrclpy_in_env(python_bin, instance):
+            if current_lwrclpy_marker != desired_lwrclpy_marker and not self._ensure_lwrclpy_in_env(python_bin, instance):
                 return False
-            lwrclpy_marker.write_text(LWRCLPY_INSTALL_MARKER, encoding="utf-8")
+            lwrclpy_marker.write_text(desired_lwrclpy_marker, encoding="utf-8")
             instance.env_signature = desired_env_signature
             instance.env_status = "ready (built-in venv)" if config.tool_type else "ready"
             return True
@@ -2290,6 +2472,29 @@ class GraphRuntime:
             f"Install {tag} or set PATH so {tag} is found."
         )
 
+    def _selected_python_version(self, config: CustomLwrclNodeConfig) -> str:
+        return str(config.python_version or "").strip() or f"{sys.version_info.major}.{sys.version_info.minor}"
+
+    def _python_for_config(self, config: CustomLwrclNodeConfig) -> str:
+        version = self._selected_python_version(config)
+        host_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        if version == host_version:
+            return self._real_python()
+        tag = f"python{version}"
+        pyenv = shutil.which("pyenv")
+        if pyenv:
+            try:
+                completed = subprocess.run([pyenv, "which", tag], check=True, capture_output=True, text=True)
+                candidate = completed.stdout.strip()
+                if candidate:
+                    return candidate
+            except Exception:
+                pass
+        found = shutil.which(tag)
+        if found:
+            return found
+        return version
+
     def _python_executable_matches(self, python_path: str | Path) -> bool:
         try:
             completed = subprocess.run(
@@ -2306,10 +2511,10 @@ class GraphRuntime:
             return False
         return completed.stdout.strip() == f"{sys.version_info.major}.{sys.version_info.minor}"
 
-    def _python_runtime_signature(self, python_path: str | Path | None = None) -> str:
+    def _python_runtime_signature(self, python_path: str | Path | None = None, requested_version: str = "") -> str:
         real_python = str(python_path or self._real_python())
         version = self._python_full_version(real_python)
-        return f"{real_python}\n{version}\n"
+        return f"{requested_version}\n{real_python}\n{version}\n"
 
     def _python_full_version(self, python_path: str | Path) -> str:
         try:
@@ -2335,7 +2540,7 @@ class GraphRuntime:
             text = cfg.read_text(encoding="utf-8")
         except Exception:
             return False
-        expected = f"version_info = {sys.version_info.major}.{sys.version_info.minor}."
+        expected = "version_info = "
         return expected in text
 
     def _requirements_text_for(self, config: CustomLwrclNodeConfig) -> str:
@@ -2361,11 +2566,176 @@ class GraphRuntime:
         return None
 
     def _ensure_lwrclpy_in_env(self, python_bin: Path, instance: CustomLwrclNodeInstance) -> bool:
+        local_wheel = local_lwrclpy_wheel()
+        if local_wheel is not None and self._local_wheel_matches_config(local_wheel, instance.config, python_bin):
+            instance.env_status = f"installing local lwrclpy: {local_wheel.name}"
+            try:
+                uv = self._uv_command()
+                if uv:
+                    subprocess.run(
+                        [uv, "pip", "install", "--upgrade", "--force-reinstall", "--no-cache", "--python", str(python_bin), str(local_wheel)],
+                        cwd=Path.cwd(),
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                else:
+                    subprocess.run(
+                        [str(python_bin), "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", str(local_wheel)],
+                        cwd=Path.cwd(),
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                return True
+            except subprocess.CalledProcessError as exc:
+                detail = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()[-1:]
+                instance.env_status = "local lwrclpy install failed: " + (detail[0] if detail else str(exc))
+                instance.log(instance.env_status)
+                return False
+        selected_version = str(instance.config.lwrclpy_version or "").strip()
+        if selected_version:
+            wheel_url = self._lwrclpy_wheel_url_for(selected_version, python_bin)
+            if not wheel_url:
+                instance.env_status = f"lwrclpy {selected_version} wheel not found for Python {self._python_tag_for(python_bin)}"
+                instance.log(instance.env_status)
+                return False
+            instance.env_status = f"installing lwrclpy {selected_version}"
+            try:
+                uv = self._uv_command()
+                if uv:
+                    subprocess.run(
+                        [uv, "pip", "install", "--upgrade", "--force-reinstall", "--no-cache", "--python", str(python_bin), wheel_url],
+                        cwd=Path.cwd(),
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                else:
+                    subprocess.run(
+                        [str(python_bin), "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", wheel_url],
+                        cwd=Path.cwd(),
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                return True
+            except subprocess.CalledProcessError as exc:
+                detail = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()[-1:]
+                instance.env_status = "lwrclpy install failed: " + (detail[0] if detail else str(exc))
+                instance.log(instance.env_status)
+                return False
         installer = find_lwrclpy_installer()
         if installer is None:
             instance.env_status = "lwrclpy installer not found"
             instance.log(instance.env_status)
             return False
+
+    def _lwrclpy_install_marker_for(self, config: CustomLwrclNodeConfig) -> str:
+        local_wheel = local_lwrclpy_wheel()
+        local_marker = lwrclpy_install_marker() if local_wheel is not None and self._local_wheel_matches_config(local_wheel, config, None) else ""
+        if local_marker and local_marker != LWRCLPY_INSTALL_MARKER:
+            return local_marker
+        selected_version = str(config.lwrclpy_version or "").strip()
+        return f"release:{selected_version}" if selected_version else "release:latest"
+
+    def _local_wheel_matches_config(self, wheel: Path, config: CustomLwrclNodeConfig, python_bin: Path | None) -> bool:
+        info = self._lwrclpy_wheel_info(wheel.name)
+        if not info:
+            return False
+        selected_python = self._selected_python_version(config)
+        selected_lwrclpy = str(config.lwrclpy_version or "").strip()
+        if info.get("pythonVersion") != selected_python:
+            return False
+        if selected_lwrclpy and info.get("lwrclpyVersion") != selected_lwrclpy:
+            return False
+        if python_bin is not None and info.get("pythonTag") != self._python_tag_for(python_bin):
+            return False
+        return self._wheel_matches_platform(wheel.name)
+
+    def _lwrclpy_wheel_info(self, name: str) -> dict[str, str] | None:
+        match = re.search(r"lwrclpy-([^-]+)-cp(\d)(\d{1,2})-", name)
+        if not match:
+            return None
+        return {
+            "lwrclpyVersion": match.group(1),
+            "pythonVersion": f"{match.group(2)}.{match.group(3)}",
+            "pythonTag": f"cp{match.group(2)}{match.group(3)}",
+        }
+
+    def _python_tag_for(self, python_bin: Path) -> str:
+        version = self._python_full_version(python_bin)
+        parts = version.split(".")
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            return f"cp{parts[0]}{parts[1]}"
+        return f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+    def _lwrclpy_wheel_url_for(self, version: str, python_bin: Path) -> str:
+        py_tag = self._python_tag_for(python_bin)
+        try:
+            request = urllib.request.Request(
+                LWRCLPY_RELEASES_API_URL,
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "lwrclpy-web-node-editor"},
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                releases = json.loads(response.read().decode("utf-8"))
+            for release in releases if isinstance(releases, list) else []:
+                if str(release.get("tag_name") or "") == "latest":
+                    continue
+                assets = release.get("assets") if isinstance(release, dict) else []
+                candidates = []
+                for asset in assets if isinstance(assets, list) else []:
+                    name = str(asset.get("name") or "")
+                    url = str(asset.get("browser_download_url") or "")
+                    info = self._lwrclpy_wheel_info(name)
+                    if (
+                        name.endswith(".whl")
+                        and py_tag in name
+                        and url
+                        and info
+                        and info.get("lwrclpyVersion") == version.lstrip("v")
+                        and self._wheel_matches_platform(name)
+                    ):
+                        candidates.append((name, url))
+                if candidates:
+                    return sorted(candidates, key=lambda item: self._wheel_platform_score(item[0]), reverse=True)[0][1]
+        except Exception:
+            return ""
+        return ""
+
+    def _wheel_matches_platform(self, name: str) -> bool:
+        lowered = name.lower()
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+        if system == "darwin":
+            return "macosx" in lowered and (
+                "universal2" in lowered
+                or (machine in {"arm64", "aarch64"} and "arm64" in lowered)
+                or (machine in {"x86_64", "amd64"} and "x86_64" in lowered)
+            )
+        if system == "linux":
+            return "linux" in lowered and (
+                (machine in {"arm64", "aarch64"} and "aarch64" in lowered)
+                or (machine in {"x86_64", "amd64"} and "x86_64" in lowered)
+            )
+        if system == "windows":
+            return "win" in lowered and (
+                (machine in {"arm64", "aarch64"} and "arm64" in lowered)
+                or (machine in {"x86_64", "amd64"} and ("amd64" in lowered or "x86_64" in lowered))
+            )
+        return False
+
+    def _wheel_platform_score(self, name: str) -> tuple[int, str]:
+        lowered = name.lower()
+        machine = platform.machine().lower()
+        score = 0
+        if "universal2" in lowered:
+            score += 1
+        if machine in {"arm64", "aarch64"} and any(token in lowered for token in ("arm64", "aarch64")):
+            score += 3
+        if machine in {"x86_64", "amd64"} and any(token in lowered for token in ("x86_64", "amd64")):
+            score += 3
+        return score, name
         instance.env_status = "installing lwrclpy"
         try:
             subprocess.run([str(python_bin), str(installer)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
@@ -2386,6 +2756,7 @@ class GraphRuntime:
         config_path = worker_dir / f"{config.id}.json"
         log_path = worker_dir / f"{config.id}.log"
         pid_path = worker_dir / f"{config.id}.pid"
+        instance._kill_pid_file_process(pid_path)
         write_json_atomic(config_path, self._worker_config(config))
         try:
             log_file = log_path.open("a", encoding="utf-8")
@@ -2417,6 +2788,8 @@ class GraphRuntime:
             config.loop_code,
             tuple((timer.id, timer.name, timer.period_sec, timer.callback_code) for timer in config.timers),
             config.import_code,
+            config.python_version,
+            config.lwrclpy_version,
             json.dumps(config.params, sort_keys=True, default=str),
             tuple((p.id, p.name, p.data_type, p.topics, p.receive_mode, p.callback_code) for p in config.inputs),
             tuple((p.id, p.name, p.data_type, p.topics) for p in config.outputs),
@@ -2435,6 +2808,8 @@ class GraphRuntime:
                 "timerPeriodSec": config.timer_period_sec,
                 "timerCode": config.timer_code,
                 "importCode": config.import_code,
+                "pythonVersion": config.python_version,
+                "lwrclpyVersion": config.lwrclpy_version,
                 "params": config.params,
             },
             "portTopics": {
@@ -2486,6 +2861,8 @@ class GraphRuntime:
             timer_code=str(node.get("timerCode", "")),
             import_code=str(node.get("importCode", "")),
             requirements=str(node.get("requirements", "")),
+            python_version=str(node.get("pythonVersion", "")),
+            lwrclpy_version=str(node.get("lwrclpyVersion", "")),
             tool_type=tool_type,
             params=dict(node.get("params", {}) if isinstance(node.get("params", {}), dict) else {}),
         )
@@ -2494,6 +2871,8 @@ class GraphRuntime:
         data_type = str(port.get("dataType", "std_msgs/msg/String"))
         if tool_type == "graph_view" and not data_type:
             data_type = "std_msgs/msg/Float32"
+        if tool_type == "mcap_record" and not port.get("dataType"):
+            data_type = ""
         return PortConfig(
             id=str(port.get("id")),
             name=str(port.get("name") or port.get("id")),

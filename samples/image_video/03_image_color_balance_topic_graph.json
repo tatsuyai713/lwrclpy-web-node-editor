@@ -4670,7 +4670,9 @@
       "timerCode": "",
       "importCode": "",
       "requirements": "",
-      "params": {}
+      "params": {},
+      "pythonVersion": "3.13",
+      "lwrclpyVersion": "0.5.1"
     },
     {
       "id": "n3",
@@ -4705,7 +4707,9 @@
       "timerCode": "",
       "importCode": "from std_msgs.msg import Float32\n",
       "requirements": "",
-      "params": {}
+      "params": {},
+      "pythonVersion": "3.13",
+      "lwrclpyVersion": "0.5.1"
     },
     {
       "id": "n4",

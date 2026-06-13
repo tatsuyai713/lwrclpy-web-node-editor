@@ -30,7 +30,7 @@ def split_kind(type_name: str) -> str:
     return type_name.split("/")[1]
 
 
-def topic_qos(data_type: str, depth: int = 1) -> Any:
+def topic_qos(data_type: str, depth: int = 1, reliable: bool = False) -> Any:
     if data_type.replace(".", "/") not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
         return 10
     try:
@@ -38,7 +38,7 @@ def topic_qos(data_type: str, depth: int = 1) -> Any:
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
             depth=depth,
-            reliability=qos.ReliabilityPolicy.BEST_EFFORT,
+            reliability=qos.ReliabilityPolicy.RELIABLE if reliable else qos.ReliabilityPolicy.BEST_EFFORT,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
@@ -46,11 +46,11 @@ def topic_qos(data_type: str, depth: int = 1) -> Any:
 
 
 def publisher_qos(data_type: str) -> Any:
-    return topic_qos(data_type, depth=1)
+    return topic_qos(data_type, depth=64, reliable=True)
 
 
 def subscriber_qos(data_type: str) -> Any:
-    return topic_qos(data_type, depth=1)
+    return topic_qos(data_type, depth=5, reliable=False)
 
 
 class LwrclpyWorkerNode:

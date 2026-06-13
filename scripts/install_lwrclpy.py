@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import platform
+import os
 import re
 import shutil
 import subprocess
@@ -10,13 +11,20 @@ import urllib.parse
 import urllib.request
 import zipfile
 import tempfile
+from pathlib import Path
 
 
 LATEST_TAG_RELEASE_URL = "https://github.com/tatsuyai713/lwrclpy/releases/expanded_assets/latest"
 GITHUB_BASE_URL = "https://github.com"
+LOCAL_WHEEL_ENV = "LWRCLPY_LOCAL_WHEEL"
 
 
 def main() -> int:
+    local_wheel = local_wheel_from_env()
+    if local_wheel is not None:
+        print(f"Installing local lwrclpy wheel {local_wheel}")
+        install_target(str(local_wheel), force_reinstall=True, no_cache=True)
+        return 0
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -40,6 +48,14 @@ def main() -> int:
     print(f"Installing {asset['name']} from latest")
     install_target(asset["url"], force_reinstall=True, no_cache=True)
     return 0
+
+
+def local_wheel_from_env() -> Path | None:
+    raw = os.environ.get(LOCAL_WHEEL_ENV, "").strip()
+    if not raw:
+        return None
+    wheel = Path(raw).expanduser().resolve()
+    return wheel if wheel.exists() and wheel.suffix == ".whl" else None
 
 
 def install_target(target: str, force_reinstall: bool = False, no_cache: bool = False) -> None:
@@ -114,6 +130,11 @@ def install_to_target(target_dir: "Path | str") -> int:
     """
     from pathlib import Path as _Path
     target_dir = _Path(target_dir)
+    local_wheel = local_wheel_from_env()
+    if local_wheel is not None:
+        print(f"Installing local lwrclpy wheel {local_wheel} to {target_dir}")
+        _install_wheel_to_target(str(local_wheel), target_dir)
+        return 0
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -200,18 +221,25 @@ def _extract_wheel_to_target(wheel_url: str, target_dir: "Path") -> None:
     reject ``macosx_15_0_universal2`` wheels on newer macOS hosts.
     """
     target_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(suffix=".whl", delete=False) as tmp:
-        tmp_path = tmp.name
-        with urllib.request.urlopen(wheel_url, timeout=60) as response:
-            shutil.copyfileobj(response, tmp)
+    local_path = Path(wheel_url).expanduser()
+    if local_path.exists():
+        tmp_path = str(local_path)
+        remove_tmp = False
+    else:
+        remove_tmp = True
+        with tempfile.NamedTemporaryFile(suffix=".whl", delete=False) as tmp:
+            tmp_path = tmp.name
+            with urllib.request.urlopen(wheel_url, timeout=60) as response:
+                shutil.copyfileobj(response, tmp)
     try:
         with zipfile.ZipFile(tmp_path) as wheel:
             wheel.extractall(target_dir)
     finally:
-        try:
-            Path(tmp_path).unlink(missing_ok=True)
-        except Exception:
-            pass
+        if remove_tmp:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

@@ -51,7 +51,7 @@ Image samples contain an embedded image. Video samples contain an embedded base 
 
 ## Deep Learning
 
-- `deep_learning/13_mac_yolo_mps_detection_segmentation.json`: Video File Input publishes raw `sensor_msgs/msg/Image`, fans out to `mac_yolo_object_detection_overlay` and `mac_yolo_segmentation_overlay`, then displays both annotated images in Image View. The nodes use Ultralytics `yolov8n.pt` and `yolov8n-seg.pt`; on Apple Silicon they request PyTorch `mps` and fall back to CPU when MPS is unavailable. Select a local video in the Video File Input node before running. Inference is timer-driven and uses only the latest frame to avoid YOLO backlog.
+- `deep_learning/13_mac_yolo_mps_detection_segmentation.json`: Video File Input publishes raw `sensor_msgs/msg/Image`, fans out to `mac_yolo_object_detection_overlay` and `mac_yolo_segmentation_overlay`, then displays both annotated images in Image View. The nodes use Ultralytics `yolov8n.pt` and `yolov8n-seg.pt`; on Apple Silicon they request PyTorch `mps` and fall back to CPU when MPS is unavailable. Select a local video in the Video File Input node before running. Inference runs directly from each subscribed image callback.
 
 ## Regenerate
 

@@ -64,6 +64,66 @@ _ensure_orig_import_alias()
 from lwrclpy_web_node_editor.runtime_exec import standalone_app_home  # noqa: E402
 
 
+def _configure_startup_local_lwrclpy(argv: list[str]) -> None:
+    for index, arg in enumerate(argv):
+        value = ""
+        if arg == "--lwrclpy-wheel" and index + 1 < len(argv):
+            value = argv[index + 1]
+        elif arg.startswith("--lwrclpy-wheel="):
+            value = arg.split("=", 1)[1]
+        if not value:
+            continue
+        from lwrclpy_web_node_editor.runtime_exec import configure_local_lwrclpy_wheel
+
+        configure_local_lwrclpy_wheel(value)
+        if not getattr(sys, "frozen", False):
+            _install_local_lwrclpy_for_current_python()
+        return
+
+
+def _install_local_lwrclpy_for_current_python() -> None:
+    from lwrclpy_web_node_editor.runtime_exec import LWRCLPY_LOCAL_WHEEL_INSTALLED_ENV, local_lwrclpy_wheel, local_lwrclpy_wheel_marker
+
+    wheel = local_lwrclpy_wheel()
+    if wheel is None:
+        return
+    marker = local_lwrclpy_wheel_marker(wheel)
+    if os.environ.get(LWRCLPY_LOCAL_WHEEL_INSTALLED_ENV) == marker:
+        return
+    import shutil
+    import subprocess
+    import importlib
+
+    uv = shutil.which("uv")
+    if uv:
+        command = [
+            uv,
+            "pip",
+            "install",
+            "--upgrade",
+            "--force-reinstall",
+            "--no-cache",
+            "--python",
+            sys.executable,
+            str(wheel),
+        ]
+    else:
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--force-reinstall",
+            "--no-cache-dir",
+            str(wheel),
+        ]
+    print(f"[lwrclpy-web-node-editor] Installing local lwrclpy wheel: {wheel}", flush=True)
+    subprocess.run(command, check=True)
+    os.environ[LWRCLPY_LOCAL_WHEEL_INSTALLED_ENV] = marker
+    importlib.invalidate_caches()
+
+
 def _dispatch_worker(argv: list[str]) -> int | None:
     if not argv:
         return None
@@ -99,6 +159,14 @@ def _dispatch_worker(argv: list[str]) -> int | None:
             return 2
         sys.argv = [sys.argv[0], argv[1]]
         return builtin_source_worker.main()
+    if mode == "--worker-mcap-record":
+        from lwrclpy_web_node_editor import mcap_record_worker
+
+        if len(argv) < 2:
+            print("usage: lwrclpy-web-node-editor --worker-mcap-record CONFIG_JSON", file=sys.stderr)
+            return 2
+        sys.argv = [sys.argv[0], argv[1]]
+        return mcap_record_worker.main()
     return None
 
 
@@ -113,7 +181,12 @@ def _prepare_standalone_runtime() -> None:
     site_dir = home / "lwrclpy_site"
     site_dir.mkdir(parents=True, exist_ok=True)
     _prepend_to_sys_path(site_dir)
-    if _has_lwrclpy_site_packages(site_dir):
+    from lwrclpy_web_node_editor.runtime_exec import local_lwrclpy_wheel
+
+    if local_lwrclpy_wheel() is not None:
+        _auto_update_lwrclpy(site_dir)
+        _prefer_lwrclpy_site_packages(site_dir)
+    elif _has_lwrclpy_site_packages(site_dir):
         _prefer_lwrclpy_site_packages(site_dir)
     elif not _bundled_lwrclpy_is_available():
         _auto_update_lwrclpy(site_dir)
@@ -199,6 +272,7 @@ if __name__ == "__main__":
         if worker_exit is not None:
             exit_code = int(worker_exit)
         else:
+            _configure_startup_local_lwrclpy(argv)
             _prepare_standalone_runtime()
             # Import server lazily, AFTER auto-update has installed lwrclpy into
             # lwrclpy_site and it has been prepended to sys.path. This ensures

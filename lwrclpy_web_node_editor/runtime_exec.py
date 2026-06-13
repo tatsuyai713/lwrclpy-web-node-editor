@@ -5,13 +5,16 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-WorkerKind = Literal["node", "video", "dds_tap", "builtin_source"]
+LWRCLPY_LOCAL_WHEEL_ENV = "LWRCLPY_LOCAL_WHEEL"
+LWRCLPY_LOCAL_WHEEL_INSTALLED_ENV = "LWRCLPY_LOCAL_WHEEL_INSTALLED"
+WorkerKind = Literal["node", "video", "dds_tap", "builtin_source", "mcap_record"]
 
 _WORKER_FLAGS: dict[WorkerKind, str] = {
     "node": "--worker-node",
     "video": "--worker-video",
     "dds_tap": "--worker-dds-tap",
     "builtin_source": "--worker-builtin-source",
+    "mcap_record": "--worker-mcap-record",
 }
 
 _WORKER_SCRIPT_NAMES: dict[WorkerKind, str] = {
@@ -19,6 +22,7 @@ _WORKER_SCRIPT_NAMES: dict[WorkerKind, str] = {
     "video": "video_dds_worker.py",
     "dds_tap": "dds_tap_worker.py",
     "builtin_source": "builtin_source_worker.py",
+    "mcap_record": "mcap_record_worker.py",
 }
 
 
@@ -68,6 +72,38 @@ def find_lwrclpy_installer() -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def configure_local_lwrclpy_wheel(path: str | Path | None) -> Path | None:
+    if path is None or not str(path).strip():
+        os.environ.pop(LWRCLPY_LOCAL_WHEEL_ENV, None)
+        return None
+    wheel = Path(path).expanduser().resolve()
+    if not wheel.exists():
+        raise FileNotFoundError(f"lwrclpy wheel not found: {wheel}")
+    if wheel.suffix != ".whl":
+        raise ValueError(f"lwrclpy wheel must be a .whl file: {wheel}")
+    os.environ[LWRCLPY_LOCAL_WHEEL_ENV] = str(wheel)
+    return wheel
+
+
+def local_lwrclpy_wheel() -> Path | None:
+    raw = os.environ.get(LWRCLPY_LOCAL_WHEEL_ENV, "").strip()
+    if not raw:
+        return None
+    wheel = Path(raw).expanduser().resolve()
+    return wheel if wheel.exists() else None
+
+
+def local_lwrclpy_wheel_marker(wheel: Path | None = None) -> str:
+    wheel = wheel or local_lwrclpy_wheel()
+    if wheel is None:
+        return ""
+    try:
+        stat = wheel.stat()
+        return f"{wheel}:{stat.st_size}:{stat.st_mtime_ns}"
+    except Exception:
+        return str(wheel)
 
 
 def framework_worker_tokens() -> list[str]:

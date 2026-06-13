@@ -9,6 +9,8 @@ from pathlib import Path
 
 
 OUT_DIR = Path(__file__).resolve().parent
+DEFAULT_PYTHON_VERSION = "3.13"
+DEFAULT_LWRCLPY_VERSION = "0.5.1"
 
 
 def png_data_url(width: int, height: int, rgb: list[int]) -> str:
@@ -434,6 +436,8 @@ def custom_node(
 		"timerCode": str(timer_items[0].get("callbackCode", "")) if timer_items else "",
 		"importCode": import_code,
 		"requirements": "",
+		"pythonVersion": DEFAULT_PYTHON_VERSION,
+		"lwrclpyVersion": DEFAULT_LWRCLPY_VERSION,
 		"params": params or {},
 	}
 

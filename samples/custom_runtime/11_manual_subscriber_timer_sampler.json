@@ -79,7 +79,9 @@
       "timerCode": "value = latest(\"in\")\nif value is None:\n\treturn_value = None\nelse:\n\traw = value.get(\"data\", 0.0) if isinstance(value, dict) else getattr(value, \"data\", 0.0)\n\tstate[\"last_raw\"] = float(raw)\n\tstate[\"filtered\"] = state.get(\"filtered\", float(raw)) * 0.85 + float(raw) * 0.15\n\tpublish(\"raw\", {\"data\": float(raw)})\n\tpublish(\"filtered\", {\"data\": float(state[\"filtered\"])})\n",
       "importCode": "",
       "requirements": "",
-      "params": {}
+      "params": {},
+      "pythonVersion": "3.13",
+      "lwrclpyVersion": "0.5.1"
     },
     {
       "id": "n3",

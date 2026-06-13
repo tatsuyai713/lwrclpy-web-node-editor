@@ -3,21 +3,32 @@ from __future__ import annotations
 import argparse
 import atexit
 import hashlib
+import importlib
 import json
 import math
 import mimetypes
 import os
+import re
 import signal
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-from .graph import GraphRuntime, LWRCLPY_TYPE_TREE
-from .runtime_exec import framework_worker_tokens, standalone_app_home
+from . import graph as graph_module
+from .graph import GraphRuntime
+from .runtime_exec import (
+    LWRCLPY_LOCAL_WHEEL_INSTALLED_ENV,
+    configure_local_lwrclpy_wheel,
+    framework_worker_tokens,
+    local_lwrclpy_wheel,
+    local_lwrclpy_wheel_marker,
+    standalone_app_home,
+)
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -26,6 +37,8 @@ WORKER_DIR = PROJECT_DIR / ".node_workers"
 APP_SETTINGS_DIR = PROJECT_DIR / ".app_settings"
 CUSTOM_NODE_DIR = APP_SETTINGS_DIR / "custom_nodes"
 GUI_DISPLAY_HZ = 30.0
+GRAPH_RUN_HZ = 60.0
+LWRCLPY_RELEASES_API_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
 
 
 def _server_lock_path() -> Path:
@@ -191,7 +204,12 @@ def _select_video_file() -> dict[str, object]:
 def _select_mcap_file() -> dict[str, object]:
     if sys.platform == "darwin":
         script = (
-            'set f to choose file with prompt "Select MCAP file"\n'
+            'set modeChoice to button returned of (display dialog "Select MCAP file or ROS 2 bag directory" buttons {"Cancel", "ROS 2 Bag", "MCAP File"} default button "MCAP File" cancel button "Cancel")\n'
+            'if modeChoice is "ROS 2 Bag" then\n'
+            '  set f to choose folder with prompt "Select ROS 2 bag directory"\n'
+            'else\n'
+            '  set f to choose file with prompt "Select MCAP file"\n'
+            'end if\n'
             "POSIX path of f"
         )
         result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
@@ -221,24 +239,130 @@ def _select_mcap_file() -> dict[str, object]:
         if not path:
             return {"ok": True, "canceled": True}
     selected = Path(path).expanduser()
-    if not selected.is_file():
-        raise RuntimeError(f"selected file does not exist: {selected}")
+    if not selected.exists():
+        raise RuntimeError(f"selected MCAP path does not exist: {selected}")
     try:
-        return {"ok": True, **_probe_mcap_file(selected)}
+        return {"ok": True, **_probe_mcap_path(selected)}
     except Exception as exc:
         return {"ok": True, "path": str(selected), "fileName": selected.name, "channels": [], "channelCount": 0, "probeError": str(exc)}
+
+
+def _select_mcap_record_file() -> dict[str, object]:
+    if sys.platform == "darwin":
+        script = (
+            'set f to choose file name with prompt "Save ROS 2 bag recording as" default name "recording"\n'
+            "POSIX path of f"
+        )
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        if result.returncode != 0:
+            text = (result.stderr or result.stdout or "").strip()
+            if "User canceled" in text or result.returncode == 1:
+                return {"ok": True, "canceled": True}
+            raise RuntimeError(text or "MCAP output selection failed")
+        path = result.stdout.strip()
+    else:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            path = filedialog.asksaveasfilename(
+                title="Save ROS 2 bag recording as",
+                filetypes=[
+                    ("ROS 2 bag directories", "*"),
+                    ("All files", "*.*"),
+                ],
+            )
+        finally:
+            root.destroy()
+        if not path:
+            return {"ok": True, "canceled": True}
+    selected = Path(path).expanduser()
+    selected.parent.mkdir(parents=True, exist_ok=True)
+    return {"ok": True, "path": str(selected), "fileName": selected.name}
 
 
 def _open_mcap_file(path: object) -> dict[str, object]:
     selected = Path(str(path or "")).expanduser()
-    if not selected.is_file():
-        raise RuntimeError(f"selected file does not exist: {selected}")
-    if selected.suffix.lower() != ".mcap":
-        raise RuntimeError(f"selected file is not an .mcap file: {selected}")
+    if not selected.exists():
+        raise RuntimeError(f"selected MCAP path does not exist: {selected}")
+    if selected.is_file() and selected.suffix.lower() not in {".mcap", ".yaml", ".yml", ".json"}:
+        raise RuntimeError(f"selected file is not an MCAP or ROS 2 bag metadata file: {selected}")
     try:
-        return {"ok": True, **_probe_mcap_file(selected)}
+        return {"ok": True, **_probe_mcap_path(selected)}
     except Exception as exc:
         return {"ok": True, "path": str(selected), "fileName": selected.name, "channels": [], "channelCount": 0, "probeError": str(exc)}
+
+
+def _natural_sort_key(path: Path) -> list[object]:
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
+
+
+def _strip_yaml_scalar(value: str) -> str:
+    text = value.strip()
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        return text[1:-1]
+    return text
+
+
+def _yaml_relative_file_paths(metadata_path: Path) -> list[str]:
+    try:
+        text = metadata_path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "relative_file_paths:":
+            continue
+        paths: list[str] = []
+        for item in lines[index + 1:]:
+            stripped = item.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("- "):
+                paths.append(_strip_yaml_scalar(stripped[2:]))
+                continue
+            if not item.startswith(" ") and stripped.endswith(":"):
+                break
+        return paths
+    return []
+
+
+def _resolve_mcap_paths(path: Path) -> tuple[Path, list[Path], Path | None]:
+    selected = path.expanduser()
+    if selected.is_file() and selected.name in {"metadata.yaml", "metadata.yml", "metadata.json"}:
+        selected = selected.parent
+    if selected.is_file():
+        if selected.suffix.lower() != ".mcap":
+            raise RuntimeError(f"selected file is not an .mcap file: {selected}")
+        return selected, [selected], None
+    if not selected.is_dir():
+        raise RuntimeError(f"selected MCAP path does not exist: {selected}")
+    metadata_path = next((candidate for candidate in [
+        selected / "metadata.yaml",
+        selected / "metadata.yml",
+        selected / "metadata.json",
+    ] if candidate.is_file()), None)
+    files: list[Path] = []
+    if metadata_path is not None and metadata_path.suffix.lower() == ".json":
+        try:
+            data = json.loads(metadata_path.read_text(encoding="utf-8"))
+            info = data.get("rosbag2_bagfile_information") if isinstance(data, dict) else {}
+            rels = info.get("relative_file_paths") if isinstance(info, dict) else []
+            if isinstance(rels, list):
+                files = [selected / str(rel) for rel in rels]
+        except Exception:
+            files = []
+    elif metadata_path is not None:
+        files = [selected / rel for rel in _yaml_relative_file_paths(metadata_path)]
+    files = [file for file in files if file.is_file() and file.suffix.lower() == ".mcap"]
+    if not files:
+        files = sorted(selected.glob("*.mcap"), key=_natural_sort_key)
+    if not files:
+        raise RuntimeError(f"ROS 2 bag directory has no .mcap files: {selected}")
+    return selected, files, metadata_path
 
 
 def _normalize_mcap_message_type(value: object) -> str:
@@ -277,7 +401,6 @@ def _load_mcap_sidecar_metadata(path: Path) -> dict[str, object]:
                 data = json.loads(candidate.read_text(encoding="utf-8"))
             else:
                 import yaml
-
                 data = yaml.safe_load(candidate.read_text(encoding="utf-8"))
         except Exception as exc:
             return {"metadataPath": str(candidate), "metadataError": str(exc)}
@@ -310,7 +433,105 @@ def _metadata_topics(metadata: object) -> list[dict[str, object]]:
     return topics
 
 
-def _probe_mcap_file(path: Path) -> dict[str, object]:
+def _metadata_time_ns(value: object, key: str) -> int:
+    if isinstance(value, dict):
+        value = value.get(key)
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _metadata_bag_timing(metadata: object) -> tuple[int, int]:
+    if not isinstance(metadata, dict):
+        return 0, 0
+    info = metadata.get("rosbag2_bagfile_information")
+    if not isinstance(info, dict):
+        return 0, 0
+    return (
+        _metadata_time_ns(info.get("starting_time"), "nanoseconds_since_epoch"),
+        _metadata_time_ns(info.get("duration"), "nanoseconds"),
+    )
+
+
+def _duration_from_times(start_time: int | None, end_time: int | None, metadata: object) -> tuple[int | None, int | None, float]:
+    metadata_start_ns, metadata_duration_ns = _metadata_bag_timing(metadata)
+    if metadata_start_ns:
+        start_time = metadata_start_ns
+    if metadata_duration_ns > 0:
+        if start_time is not None:
+            end_time = int(start_time) + metadata_duration_ns
+        return start_time, end_time, metadata_duration_ns / 1e9
+    duration_sec = ((end_time - start_time) / 1e9) if start_time is not None and end_time is not None else 0.0
+    return start_time, end_time, duration_sec
+
+
+def _probe_mcap_path(path: Path) -> dict[str, object]:
+    display_path, files, metadata_path = _resolve_mcap_paths(path)
+    channels: dict[str, dict[str, object]] = {}
+    start_time: int | None = None
+    end_time: int | None = None
+    for file_path in files:
+        file_probe = _probe_mcap_file(file_path, include_sidecar=False)
+        file_start = int(file_probe.get("startTimeNs") or 0) or None
+        file_end = int(file_probe.get("endTimeNs") or 0) or None
+        start_time = file_start if start_time is None else (min(start_time, file_start) if file_start is not None else start_time)
+        end_time = file_end if end_time is None else (max(end_time, file_end) if file_end is not None else end_time)
+        for channel in file_probe.get("channels", []):
+            if not isinstance(channel, dict):
+                continue
+            topic = str(channel.get("topic") or "")
+            if not topic:
+                continue
+            item = channels.setdefault(topic, {
+                "topic": topic,
+                "type": channel.get("type") or "",
+                "messageEncoding": channel.get("messageEncoding") or "",
+                "schemaEncoding": channel.get("schemaEncoding") or "",
+                "messageCount": 0,
+            })
+            if channel.get("type") and not item.get("type"):
+                item["type"] = channel["type"]
+            if channel.get("messageEncoding") and not item.get("messageEncoding"):
+                item["messageEncoding"] = channel["messageEncoding"]
+            if channel.get("schemaEncoding") and not item.get("schemaEncoding"):
+                item["schemaEncoding"] = channel["schemaEncoding"]
+            item["messageCount"] = int(item.get("messageCount") or 0) + int(channel.get("messageCount") or 0)
+    sidecar = _load_mcap_sidecar_metadata(files[0])
+    if metadata_path is not None:
+        loaded = _load_mcap_sidecar_metadata(metadata_path if metadata_path.is_file() else files[0])
+        if loaded:
+            sidecar = loaded
+        sidecar.setdefault("metadataPath", str(metadata_path))
+    for meta_topic in _metadata_topics(sidecar.get("metadata")):
+        topic = str(meta_topic.get("topic") or "")
+        if not topic:
+            continue
+        item = channels.setdefault(topic, {"topic": topic, "messageCount": 0})
+        if meta_topic.get("type"):
+            item["type"] = meta_topic["type"]
+        if meta_topic.get("messageCount"):
+            item["messageCount"] = meta_topic["messageCount"]
+    sorted_channels = sorted(channels.values(), key=lambda item: str(item.get("topic") or ""))
+    for channel in sorted_channels:
+        channel["ros2Compatible"] = _is_ros2_mcap_channel(channel)
+    start_time, end_time, duration_sec = _duration_from_times(start_time, end_time, sidecar.get("metadata"))
+    return {
+        "path": str(display_path),
+        "fileName": display_path.name,
+        "mcapFiles": [str(file) for file in files],
+        "fileCount": len(files),
+        "channels": sorted_channels,
+        "channelCount": len(sorted_channels),
+        "ros2ChannelCount": sum(1 for channel in sorted_channels if channel.get("ros2Compatible")),
+        "startTimeNs": start_time or 0,
+        "endTimeNs": end_time or 0,
+        "durationSec": duration_sec,
+        **sidecar,
+    }
+
+
+def _probe_mcap_file(path: Path, include_sidecar: bool = True) -> dict[str, object]:
     _ensure_mcap_dependencies()
     from mcap.reader import make_reader
 
@@ -349,7 +570,7 @@ def _probe_mcap_file(path: Path) -> dict[str, object]:
                 item["messageCount"] = int(item.get("messageCount") or 0) + 1
                 start_time = message.log_time if start_time is None else min(start_time, message.log_time)
                 end_time = message.log_time if end_time is None else max(end_time, message.log_time)
-    sidecar = _load_mcap_sidecar_metadata(path)
+    sidecar = _load_mcap_sidecar_metadata(path) if include_sidecar else {}
     for meta_topic in _metadata_topics(sidecar.get("metadata")):
         topic = str(meta_topic.get("topic") or "")
         if not topic:
@@ -359,10 +580,10 @@ def _probe_mcap_file(path: Path) -> dict[str, object]:
             item["type"] = meta_topic["type"]
         if meta_topic.get("messageCount"):
             item["messageCount"] = meta_topic["messageCount"]
-    duration_sec = ((end_time - start_time) / 1e9) if start_time is not None and end_time is not None else 0.0
     sorted_channels = sorted(channels.values(), key=lambda item: str(item.get("topic") or ""))
     for channel in sorted_channels:
         channel["ros2Compatible"] = _is_ros2_mcap_channel(channel)
+    start_time, end_time, duration_sec = _duration_from_times(start_time, end_time, sidecar.get("metadata"))
     return {
         "path": str(path),
         "fileName": path.name,
@@ -406,25 +627,129 @@ def _custom_node_path(node_id: object) -> Path:
     return CUSTOM_NODE_DIR / f"{_safe_custom_node_id(node_id)}.json"
 
 
+def _wheel_runtime_info(name: str) -> dict[str, str] | None:
+    match = re.search(r"lwrclpy-([^-]+)-cp(\d)(\d{1,2})-", name)
+    if not match:
+        return None
+    return {"lwrclpyVersion": match.group(1), "pythonVersion": f"{match.group(2)}.{match.group(3)}"}
+
+
+def _local_lwrclpy_release_options() -> list[dict[str, object]]:
+    wheel = local_lwrclpy_wheel()
+    if wheel is None:
+        return []
+    info = _wheel_runtime_info(wheel.name)
+    if not info:
+        return []
+    return [{
+        "tag": info["lwrclpyVersion"],
+        "version": info["lwrclpyVersion"],
+        "pythonVersions": [info["pythonVersion"]],
+        "assetNames": [wheel.name],
+        "local": True,
+    }]
+
+
+def _lwrclpy_release_options() -> dict[str, object]:
+    releases: list[dict[str, object]] = []
+    error = ""
+    try:
+        request = urllib.request.Request(
+            LWRCLPY_RELEASES_API_URL,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "lwrclpy-web-node-editor",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        for release in payload if isinstance(payload, list) else []:
+            assets = release.get("assets") if isinstance(release, dict) else []
+            versions: set[str] = set()
+            lwrclpy_versions: set[str] = set()
+            asset_names: list[str] = []
+            tag = str(release.get("tag_name") or "")
+            if tag == "latest":
+                continue
+            for asset in assets if isinstance(assets, list) else []:
+                name = str(asset.get("name") or "")
+                info = _wheel_runtime_info(name)
+                if not info:
+                    continue
+                if "latest" in info["lwrclpyVersion"]:
+                    continue
+                versions.add(info["pythonVersion"])
+                lwrclpy_versions.add(info["lwrclpyVersion"])
+                asset_names.append(name)
+            if not versions:
+                continue
+            release_version = sorted(lwrclpy_versions, reverse=True)[0] if lwrclpy_versions else (tag.lstrip("v") or tag)
+            releases.append({
+                "tag": tag,
+                "version": release_version,
+                "pythonVersions": sorted(versions, key=lambda item: tuple(int(part) for part in item.split("."))),
+                "assetNames": sorted(asset_names),
+                "local": False,
+            })
+    except Exception as exc:
+        error = str(exc)
+    local = _local_lwrclpy_release_options()
+    for item in local:
+        existing = next((release for release in releases if str(release.get("version")) == str(item.get("version"))), None)
+        if existing is not None:
+            versions = set(map(str, existing.get("pythonVersions", [])))
+            versions.update(map(str, item.get("pythonVersions", [])))
+            existing["pythonVersions"] = sorted(versions, key=lambda value: tuple(int(part) for part in value.split(".")))
+            existing["local"] = True
+            existing["assetNames"] = sorted(set(map(str, existing.get("assetNames", []))) | set(map(str, item.get("assetNames", []))))
+        else:
+            releases.insert(0, item)
+    host_python = f"{sys.version_info.major}.{sys.version_info.minor}"
+    if not releases:
+        installed = ""
+        try:
+            installed = importlib.metadata.version("lwrclpy")
+        except Exception:
+            installed = ""
+        releases.append({
+            "tag": installed or "host",
+            "version": installed or "",
+            "pythonVersions": [host_python],
+            "assetNames": [],
+            "local": False,
+            "fallback": True,
+        })
+    releases.sort(key=_lwrclpy_release_sort_key, reverse=True)
+    return {"releases": releases, "hostPythonVersion": host_python, "error": error}
+
+
+def _lwrclpy_release_sort_key(release: dict[str, object]) -> tuple[int, tuple[int, ...], str]:
+    version = str(release.get("version") or "")
+    numeric = tuple(int(part) for part in re.findall(r"\d+", version)[:3])
+    return 0, numeric, version
+
+
 def _normalize_custom_node_payload(payload: dict) -> dict:
     node = payload.get("node")
     if not isinstance(node, dict):
         raise ValueError("custom node payload requires a node object")
     if node.get("toolType"):
         raise ValueError("only custom lwrclpy nodes can be saved as custom nodes")
-    name = str(payload.get("name") or node.get("name") or "custom_node").strip() or "custom_node"
-    node_id = _safe_custom_node_id(payload.get("id") or name)
+    meta = node.get("customNodeMeta") if isinstance(node.get("customNodeMeta"), dict) else {}
+    name = str(payload.get("name") or meta.get("name") or node.get("name") or "custom_node").strip() or "custom_node"
+    node_id = _safe_custom_node_id(payload.get("id") or meta.get("id") or name)
     stored_node = dict(node)
-    for key in ("id", "x", "y"):
+    for key in ("id", "x", "y", "toolType", "customNodeMeta"):
         stored_node.pop(key, None)
+    stored_node["pythonVersion"] = str(stored_node.get("pythonVersion") or "").strip()
+    stored_node["lwrclpyVersion"] = str(stored_node.get("lwrclpyVersion") or "").strip()
     return {
         "format": "lwrclpy-web-node-editor-custom-node",
-        "version": 1,
+        "version": int(payload.get("version") or meta.get("version") or 1),
         "id": node_id,
         "name": name,
-        "description": str(payload.get("description") or "").strip(),
+        "description": str(payload.get("description") or meta.get("description") or "").strip(),
         "node": stored_node,
-        "updatedAt": time.time(),
     }
 
 
@@ -485,18 +810,48 @@ def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
     targets = _framework_worker_pids()
     killed: list[int] = []
     failed: list[int] = []
+    sig = signal.SIGKILL if force else signal.SIGTERM
     for pid in sorted(targets):
         if pid == os.getpid():
             continue
         try:
-            os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
+            _signal_process_tree(pid, sig)
             killed.append(pid)
         except ProcessLookupError:
             continue
         except Exception:
             failed.append(pid)
+    if not force:
+        deadline = time.time() + 1.0
+        while time.time() < deadline and any(_pid_alive(pid) for pid in killed):
+            time.sleep(0.05)
+        for pid in list(killed):
+            if pid == os.getpid() or not _pid_alive(pid):
+                continue
+            try:
+                _signal_process_tree(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                if pid not in failed:
+                    failed.append(pid)
+    deadline = time.time() + 1.0
+    while time.time() < deadline and any(_pid_alive(pid) for pid in killed):
+        time.sleep(0.05)
     _cleanup_pid_files()
     return {"killed": killed, "failed": failed}
+
+
+def _signal_process_tree(pid: int, sig: int) -> None:
+    if os.name == "nt":
+        os.kill(pid, sig)
+        return
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        raise
+    except Exception:
+        os.kill(pid, sig)
 
 
 def _framework_worker_pids() -> set[int]:
@@ -576,6 +931,45 @@ def _cleanup_at_exit() -> None:
         pass
 
 
+def _install_local_lwrclpy_for_server() -> None:
+    wheel = local_lwrclpy_wheel()
+    if wheel is None:
+        return
+    marker = local_lwrclpy_wheel_marker(wheel)
+    if os.environ.get(LWRCLPY_LOCAL_WHEEL_INSTALLED_ENV) == marker:
+        graph_module.LWRCLPY_TYPE_TREE = graph_module.discover_lwrclpy_types()
+        return
+    uv = shutil.which("uv")
+    if uv:
+        command = [
+            uv,
+            "pip",
+            "install",
+            "--upgrade",
+            "--force-reinstall",
+            "--no-cache",
+            "--python",
+            sys.executable,
+            str(wheel),
+        ]
+    else:
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--force-reinstall",
+            "--no-cache-dir",
+            str(wheel),
+        ]
+    print(f"Installing local lwrclpy wheel for server: {wheel}", flush=True)
+    subprocess.run(command, cwd=Path.cwd(), check=True)
+    os.environ[LWRCLPY_LOCAL_WHEEL_INSTALLED_ENV] = marker
+    importlib.invalidate_caches()
+    graph_module.LWRCLPY_TYPE_TREE = graph_module.discover_lwrclpy_types()
+
+
 class ContinuousGraphRunner:
     def __init__(self, runtime: GraphRuntime) -> None:
         self.runtime = runtime
@@ -588,7 +982,7 @@ class ContinuousGraphRunner:
         self._tick_count = 0
         self._started_at = 0.0
         self._stopped_at = 0.0
-        self._hz = 1000.0
+        self._hz = GRAPH_RUN_HZ
         self._duration_sec: float | None = None
         self._error = ""
         self._pending_param_updates: list[dict] = []
@@ -600,7 +994,7 @@ class ContinuousGraphRunner:
             "nodes": payload.get("nodes", []),
             "links": payload.get("links", []),
         }
-        hz = max(1.0, min(float(payload.get("runHz") or 1000.0), 1000.0))
+        hz = GRAPH_RUN_HZ
         duration_value = payload.get("durationSec")
         duration_sec = None
         if duration_value is not None:
@@ -793,6 +1187,8 @@ class Handler(BaseHTTPRequestHandler):
                 "id": str(node.get("id") or ""),
                 "toolType": str(node.get("toolType") or ""),
                 "requirements": str(node.get("requirements") or ""),
+                "pythonVersion": str(node.get("pythonVersion") or ""),
+                "lwrclpyVersion": str(node.get("lwrclpyVersion") or ""),
                 "importCode": str(node.get("importCode") or ""),
                 "inputs": [
                     {
@@ -826,7 +1222,10 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/api/message-types":
-            self._send_json({"types": LWRCLPY_TYPE_TREE})
+            self._send_json({"types": graph_module.LWRCLPY_TYPE_TREE})
+            return
+        if path == "/api/lwrclpy-releases":
+            self._send_json(_lwrclpy_release_options())
             return
         if path == "/api/custom-nodes":
             self._send_json({"customNodes": _read_custom_nodes()})
@@ -854,6 +1253,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/select-mcap-file":
             try:
                 self._send_json(_select_mcap_file())
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=500)
+            return
+        if path == "/api/select-mcap-record-file":
+            try:
+                self._send_json(_select_mcap_record_file())
             except Exception as exc:
                 self._send_json({"error": str(exc)}, status=500)
             return
@@ -896,15 +1301,20 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 result = self.runtime.run(payload)
             elif path == "/api/ready":
-                self.runner.stop()
-                self.runtime.stop(force=True)
-                cleanup_framework_processes(force=True)
-                shutil.rmtree(Path.cwd() / ".node_envs", ignore_errors=True)
-                shutil.rmtree(WORKER_DIR, ignore_errors=True)
-                WORKER_DIR.mkdir(parents=True, exist_ok=True)
-                result = self.runtime.prepare(payload)
+                signature = self._payload_signature(payload)
+                run_state = self.runner.status().get("run", {})
+                if self.__class__._ready_signature == signature and not run_state.get("running"):
+                    result = self.runtime.ready_status()
+                    result["signature"] = signature
+                else:
+                    self.runner.stop()
+                    self.runtime.stop(force=True, lock_timeout=0.2)
+                    cleanup_framework_processes(force=True)
+                    shutil.rmtree(WORKER_DIR, ignore_errors=True)
+                    WORKER_DIR.mkdir(parents=True, exist_ok=True)
+                    result = self.runtime.prepare(payload)
                 if result.get("ready"):
-                    self.__class__._ready_signature = self._payload_signature(payload)
+                    self.__class__._ready_signature = signature
                     result["signature"] = self.__class__._ready_signature
                 else:
                     self.__class__._ready_signature = ""
@@ -1120,7 +1530,18 @@ def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--lwrclpy-wheel", default="", help="Use this local lwrclpy .whl for the server and every node venv.")
     args = parser.parse_args(argv)
+    try:
+        if args.lwrclpy_wheel:
+            configure_local_lwrclpy_wheel(args.lwrclpy_wheel)
+        _install_local_lwrclpy_for_server()
+        Handler.runtime.close()
+        Handler.runtime = GraphRuntime()
+        Handler.runner = ContinuousGraphRunner(Handler.runtime)
+    except Exception as exc:
+        print(f"Failed to configure local lwrclpy wheel: {exc}", file=sys.stderr)
+        return 1
     startup_cleanup = cleanup_framework_processes(force=True)
     killed_count = len(startup_cleanup.get("killed", []))
     if killed_count:
