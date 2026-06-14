@@ -36,6 +36,7 @@ PROJECT_DIR = Path.cwd()
 WORKER_DIR = PROJECT_DIR / ".node_workers"
 APP_SETTINGS_DIR = PROJECT_DIR / ".app_settings"
 CUSTOM_NODE_DIR = APP_SETTINGS_DIR / "custom_nodes"
+SAMPLES_DIR = PROJECT_DIR / "samples"
 GUI_DISPLAY_HZ = 30.0
 GRAPH_RUN_HZ = 60.0
 LWRCLPY_RELEASES_API_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
@@ -806,6 +807,41 @@ def _import_custom_nodes(payload: dict) -> dict:
     return {"ok": True, "imported": imported}
 
 
+def _sample_project_items() -> list[dict[str, object]]:
+    if not SAMPLES_DIR.exists():
+        return []
+    items: list[dict[str, object]] = []
+    for path in sorted(SAMPLES_DIR.glob("**/*.json")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(SAMPLES_DIR).as_posix()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        items.append({
+            "path": rel,
+            "name": str(payload.get("name") or Path(rel).stem),
+            "category": rel.split("/", 1)[0] if "/" in rel else "",
+        })
+    return items
+
+
+def _read_sample_project(path_value: object) -> dict[str, object]:
+    rel = str(path_value or "").strip()
+    if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+        raise ValueError("invalid sample path")
+    path = (SAMPLES_DIR / rel).resolve()
+    try:
+        path.relative_to(SAMPLES_DIR.resolve())
+    except ValueError:
+        raise ValueError("invalid sample path") from None
+    if not path.is_file() or path.suffix.lower() != ".json":
+        raise FileNotFoundError(f"sample not found: {rel}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {"ok": True, "path": rel, "project": payload}
+
+
 def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
     targets = _framework_worker_pids()
     killed: list[int] = []
@@ -1086,6 +1122,8 @@ class ContinuousGraphRunner:
         if not self._running:
             self._stopping = False
             self._phase = "stopped"
+            if self._error == "runner stop timed out":
+                self._error = ""
 
     def status(self) -> dict:
         with self._lock:
@@ -1230,6 +1268,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/custom-nodes":
             self._send_json({"customNodes": _read_custom_nodes()})
             return
+        if path == "/api/sample-projects":
+            self._send_json({"samples": _sample_project_items()})
+            return
         if path == "/api/health":
             self._send_json({"ok": True, "lwrclpy": self.runtime.ros.status()})
             return
@@ -1274,6 +1315,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/custom-nodes/delete",
             "/api/custom-nodes/import",
             "/api/open-mcap-file",
+            "/api/sample-project",
         }:
             self.send_error(404)
             return
@@ -1290,6 +1332,8 @@ class Handler(BaseHTTPRequestHandler):
                 result["customNodes"] = _read_custom_nodes()
             elif path == "/api/open-mcap-file":
                 result = _open_mcap_file(payload.get("path"))
+            elif path == "/api/sample-project":
+                result = _read_sample_project(payload.get("path"))
             elif path == "/api/run":
                 signature = self._payload_signature(payload)
                 if self.__class__._ready_signature != signature:
@@ -1338,8 +1382,12 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/force-stop":
                 runner_status = self.runner.stop()
                 result = self.runtime.stop(force=True, lock_timeout=0.2)
-                result["runner"] = runner_status.get("run", {}) if isinstance(runner_status, dict) else {}
                 result["orphanProcesses"] = cleanup_framework_processes(force=True)
+                # Killing worker processes can unblock a runner thread that was
+                # previously stuck in runtime cleanup. Re-check after force
+                # cleanup so the UI does not keep a stale timeout state.
+                runner_status = self.runner.stop()
+                result["runner"] = runner_status.get("run", {}) if isinstance(runner_status, dict) else {}
             else:
                 runner_status = self.runner.stop()
                 requested_force = bool(payload.get("force", True))

@@ -77,6 +77,8 @@ def _dds_format_label(data_type: str, encoding: str) -> str:
 
 
 def _field(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(key)
     field = getattr(value, key, None)
     if callable(field):
         try:
@@ -155,6 +157,8 @@ class DdsTap:
         self.preview_encoding = str(config.get("previewEncoding") or "raw").lower()
         self.preview_max_side = max(0, int(config.get("previewMaxSide") or PREVIEW_MAX_SIDE))
         self.field_path = str(config.get("fieldPath") or "data")
+        self.text_mode = "append" if str(config.get("textMode") or "replace") == "append" else "replace"
+        self.max_chars = max(1, int(config.get("maxChars") or 20000))
         self.sample_limit = max(8, min(int(config.get("sampleLimit") or 10000), 100000))
         self.graph_window_sec = max(0.1, float(config.get("graphWindowSec") or 10.0))
         self.graph_display_limit = max(64, min(int(config.get("graphDisplayLimit") or 600), 2000))
@@ -165,6 +169,8 @@ class DdsTap:
         self._graph_recent_points: list[dict[str, float]] = []
         self._graph_reset_key = f"{os.getpid()}:{time.time_ns()}"
         self._graph_transfer_limit = max(256, min(self.sample_limit, 2048))
+        self._text = ""
+        self._text_seq = 0
         self._latest_msg: Any = None
         self._latest_seq = 0
         self._written_seq = 0
@@ -197,6 +203,9 @@ class DdsTap:
                 value = _extract_number(msg, self.field_path)
                 if value is not None:
                     self._record_graph_value(now, value)
+                return
+            if self.mode == "text":
+                self._record_text_value(now, _extract_text(msg))
                 return
             with self._lock:
                 self._times.append(now)
@@ -231,7 +240,7 @@ class DdsTap:
         next_at = 0.0
         next_frame_at = 0.0
         status_hz = self.display_hz
-        status_period = (1.0 / status_hz) if self.mode in {"graph", "hz"} else 0.25
+        status_period = (1.0 / status_hz) if self.mode in {"graph", "hz", "text"} else 0.25
         while RUNNING:
             try:
                 now = time.time() if self.mode == "graph" else time.perf_counter()
@@ -289,6 +298,12 @@ class DdsTap:
             payload["points"] = points
             if points:
                 payload["lastSampleAgeSec"] = max(0.0, time.time() - points[-1]["t"])
+        if self.mode == "text":
+            with self._lock:
+                payload["text"] = self._text
+                payload["textSeq"] = self._text_seq
+            payload["textMode"] = self.text_mode
+            payload["maxChars"] = self.max_chars
         _write_json(self.status_path, payload)
 
     def _record_graph_value(self, timestamp: float, value: float) -> None:
@@ -299,6 +314,19 @@ class DdsTap:
             self._graph_recent_points.append({"seq": self._latest_seq, "t": timestamp, "y": value})
             if len(self._graph_recent_points) > self._graph_transfer_limit:
                 self._graph_recent_points = self._graph_recent_points[-self._graph_transfer_limit:]
+
+    def _record_text_value(self, timestamp: float, value: str) -> None:
+        with self._lock:
+            self._latest_seq += 1
+            self._text_seq = self._latest_seq
+            self._times.append(timestamp)
+            del self._times[:-10000]
+            if self.text_mode == "append":
+                self._text += value
+            else:
+                self._text = value
+            if len(self._text) > self.max_chars:
+                self._text = self._text[-self.max_chars:]
 
     def _record_error(self, stage: str, exc: BaseException) -> None:
         self._last_error = f"{stage}: {exc}"
@@ -536,6 +564,21 @@ def _extract_number(value: Any, path: str) -> float | None:
         return float(current)
     except Exception:
         return None
+
+
+def _extract_text(value: Any) -> str:
+    data = _field(value, "data")
+    if data is not None:
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            try:
+                return bytes(data).decode("utf-8", errors="replace")
+            except Exception:
+                return str(bytes(data))
+        return str(data)
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        return str(value)
 
 
 def _bmp_bytes(width: int, height: int, rgb: Any) -> bytes:

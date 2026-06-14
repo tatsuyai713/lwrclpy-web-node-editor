@@ -14,3 +14,4 @@ dist/
 build/
 .spec
 *.pt
+*.pth

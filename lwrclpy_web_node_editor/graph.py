@@ -77,6 +77,189 @@ LWRCLPY_TYPE_TREE = discover_lwrclpy_types()
 GUI_DISPLAY_HZ = 30.0
 LWRCLPY_INSTALL_MARKER = "github-latest-wheel"
 
+IMAGE_CROP_RESIZE_IMPORT_CODE = r'''
+import cv2
+import numpy as np
+
+
+def ros_image_to_bgr(img):
+    data = img.get("data") or []
+    fmt = str(img.get("format") or "").lower()
+    if fmt or not img.get("height"):
+        arr = np.frombuffer(data, dtype=np.uint8)
+        if arr.size <= 0:
+            return None
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    h = int(img.get("height") or 0)
+    w = int(img.get("width") or 0)
+    enc = str(img.get("encoding") or "rgb8").lower()
+    if h <= 0 or w <= 0:
+        return None
+    channels = 1 if enc == "mono8" else (4 if enc in {"rgba8", "bgra8"} else 3)
+    arr = np.frombuffer(data, dtype=np.uint8)
+    needed = h * w * channels
+    if arr.size < needed:
+        return None
+    arr = arr[:needed].reshape((h, w, channels))
+    if enc == "rgb8":
+        return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+    if enc == "rgba8":
+        return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+    if enc == "bgra8":
+        return cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+    if enc == "mono8":
+        return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+    return arr.copy()
+
+
+def bgr_to_ros_image(bgr):
+    if bgr is None:
+        return None
+    if len(bgr.shape) == 2:
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_GRAY2RGB)
+    else:
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
+    h, w = rgb.shape[:2]
+    return {
+        "height": int(h),
+        "width": int(w),
+        "encoding": "rgb8",
+        "is_bigendian": 0,
+        "step": int(w * 3),
+        "data": rgb.tobytes(),
+    }
+
+
+def _positive_int(value, default=0):
+    try:
+        return max(0, int(float(value)))
+    except Exception:
+        return default
+
+
+def crop_resize_image(img, params):
+    bgr = ros_image_to_bgr(img)
+    if bgr is None:
+        return None
+    h, w = bgr.shape[:2]
+    out = bgr
+    ch, cw = h, w
+    if params.get("cropEnabled", False):
+        x = min(_positive_int(params.get("cropX")), max(0, w - 1))
+        y = min(_positive_int(params.get("cropY")), max(0, h - 1))
+        cw = _positive_int(params.get("cropWidth"))
+        ch = _positive_int(params.get("cropHeight"))
+        if cw <= 0:
+            cw = w - x
+        if ch <= 0:
+            ch = h - y
+        cw = max(1, min(cw, w))
+        ch = max(1, min(ch, h))
+        if params.get("cropCenter", False):
+            x = max(0, (w - cw) // 2)
+            y = max(0, (h - ch) // 2)
+        else:
+            x = min(x, max(0, w - cw))
+            y = min(y, max(0, h - ch))
+        out = bgr[y:y + ch, x:x + cw]
+    target_w = _positive_int(params.get("targetWidth"))
+    target_h = _positive_int(params.get("targetHeight"))
+    if params.get("resizeEnabled", False):
+        if params.get("keepAspect", True) and target_w > 0:
+            target_h = max(1, round(target_w * ch / cw))
+        if target_w > 0 and target_h > 0:
+            interpolation = cv2.INTER_AREA if target_w < cw or target_h < ch else cv2.INTER_LINEAR
+            out = cv2.resize(out, (target_w, target_h), interpolation=interpolation)
+    return bgr_to_ros_image(out)
+'''.strip()
+
+IMAGE_CROP_RESIZE_CALLBACK_CODE = '''
+out = crop_resize_image(msg, params)
+if out:
+    publish("out1", out)
+'''.strip()
+
+LLM_TEXT_IMPORT_CODE = r'''
+import json
+import os
+import urllib.error
+import urllib.request
+
+
+def _text_from_msg(msg):
+    if isinstance(msg, dict):
+        return str(msg.get("data") or "")
+    return str(getattr(msg, "data", msg) or "")
+
+
+def _post_json(url, payload, headers=None, timeout=60.0):
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers={"content-type": "application/json", **(headers or {})}, method="POST")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _chat_messages(system_prompt, prompt):
+    messages = []
+    if str(system_prompt or "").strip():
+        messages.append({"role": "system", "content": str(system_prompt)})
+    messages.append({"role": "user", "content": str(prompt)})
+    return messages
+
+
+def run_llm(prompt, params):
+    provider = str(params.get("provider") or "ollama").lower()
+    model = str(params.get("model") or ("llama3.2" if provider == "ollama" else "gpt-4o-mini"))
+    system_prompt = str(params.get("systemPrompt") or "")
+    temperature = float(params.get("temperature", 0.2) or 0.0)
+    max_tokens = int(float(params.get("maxTokens", 512) or 512))
+    timeout = max(1.0, float(params.get("timeoutSec", 60) or 60))
+    api_base = str(params.get("apiBase") or "").rstrip("/")
+    if provider == "ollama":
+        api_base = api_base or "http://127.0.0.1:11434"
+        payload = {
+            "model": model,
+            "messages": _chat_messages(system_prompt, prompt),
+            "stream": False,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        result = _post_json(api_base + "/api/chat", payload, timeout=timeout)
+        return str((result.get("message") or {}).get("content") or "")
+    if provider in {"openai", "openai_compatible", "lmstudio"}:
+        api_base = api_base or ("http://127.0.0.1:1234/v1" if provider == "lmstudio" else "https://api.openai.com/v1")
+        api_key_env = str(params.get("apiKeyEnv") or ("OPENAI_API_KEY" if provider == "openai" else ""))
+        headers = {}
+        if api_key_env:
+            api_key = os.environ.get(api_key_env, "")
+            if api_key:
+                headers["authorization"] = "Bearer " + api_key
+        payload = {
+            "model": model,
+            "messages": _chat_messages(system_prompt, prompt),
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        result = _post_json(api_base + "/chat/completions", payload, headers=headers, timeout=timeout)
+        choices = result.get("choices") or []
+        if choices:
+            return str((choices[0].get("message") or {}).get("content") or "")
+        return ""
+    raise RuntimeError("Unsupported LLM provider: " + provider)
+'''.strip()
+
+LLM_TEXT_CALLBACK_CODE = '''
+prompt = _text_from_msg(msg)
+if prompt:
+    try:
+        response = run_llm(prompt, params)
+    except Exception as exc:
+        log("LLM error:", exc)
+        response = ""
+    if response:
+        publish("response", {"data": response})
+'''.strip()
+
 
 def lwrclpy_install_marker() -> str:
     wheel = local_lwrclpy_wheel()
@@ -479,7 +662,7 @@ class CustomLwrclNodeInstance:
             if not self.view:
                 self.view = {"kind": "text", "status": self._background_starting_status()}
             return True
-        if tool in {"function_generator", "image_file_input", "video_file_input", "image_view", "topic_hz_monitor", "graph_view", "image_file_save", "mcap_record"}:
+        if tool in {"function_generator", "image_file_input", "video_file_input", "image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save", "mcap_record"}:
             self.last_outputs.clear()
             self.view = {"kind": "text", "status": "DDS topic is required; node execution is isolated in worker processes"}
             return True
@@ -530,6 +713,9 @@ class CustomLwrclNodeInstance:
         if tool == "image_view":
             self._execute_image_view_once()
             return True
+        if tool == "string_view":
+            self._execute_string_view_once()
+            return True
         if tool == "image_file_save":
             image = self.take("in1", None) or self.last_inputs.get("in1")
             path = self._save_image(image)
@@ -548,7 +734,7 @@ class CustomLwrclNodeInstance:
             return True
         if tool in {"video_file_input", "function_generator"}:
             return bool(self.publishers)
-        if tool in {"image_view", "topic_hz_monitor", "graph_view", "image_file_save"} and self._uses_dds_tap_worker():
+        if tool in {"image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save"} and self._uses_dds_tap_worker():
             return True
         if tool == "mcap_record" and self._uses_mcap_record_worker():
             return True
@@ -575,6 +761,8 @@ class CustomLwrclNodeInstance:
             self._execute_source_worker_status_once()
         elif tool == "image_view":
             self._execute_image_view_worker_once()
+        elif tool == "string_view":
+            self._execute_string_view_worker_once()
         elif tool == "topic_hz_monitor":
             self._execute_topic_hz_monitor_worker_once()
         elif tool == "graph_view":
@@ -617,7 +805,7 @@ class CustomLwrclNodeInstance:
         )
 
     def _uses_dds_tap_worker(self) -> bool:
-        return self.config.tool_type in {"image_view", "topic_hz_monitor", "graph_view", "image_file_save"} and any(port.topics for port in self.config.inputs)
+        return self.config.tool_type in {"image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save"} and any(port.topics for port in self.config.inputs)
 
     def _uses_mcap_record_worker(self) -> bool:
         return self.config.tool_type == "mcap_record" and any(port.topics for port in self.config.inputs)
@@ -783,7 +971,7 @@ class CustomLwrclNodeInstance:
     def _dds_tap_worker_signature(self) -> tuple[Any, ...]:
         input_port = next((port for port in self.config.inputs if port.topics), None)
         return (
-            "dds-tap-v15",
+            "dds-tap-v16",
             self.config.id,
             self.config.tool_type,
             input_port.data_type if input_port else "",
@@ -791,6 +979,9 @@ class CustomLwrclNodeInstance:
             float(self.config.params.get("windowSec") or 5.0),
             float(self.config.params.get("xAxisSeconds") or 10.0),
             int(self.config.params.get("sampleLimit") or 10000),
+            str(self.config.params.get("mode") or "replace"),
+            int(float(self.config.params.get("maxChars") or 20000)),
+            str(self.config.params.get("clearToken") or ""),
             bool(self.config.params.get("_externalDdsCompatible")),
             "preview:bmp:max640" if self.config.tool_type == "image_view" else "preview:jpeg",
             self._dds_tap_transport(),
@@ -809,6 +1000,8 @@ class CustomLwrclNodeInstance:
             "displayHz": GUI_DISPLAY_HZ,
             "fieldPath": str(self.config.params.get("fieldPath") or "data"),
             "sampleLimit": int(self.config.params.get("sampleLimit") or 10000),
+            "textMode": str(self.config.params.get("mode") or "replace"),
+            "maxChars": int(float(self.config.params.get("maxChars") or 20000)),
             "graphWindowSec": max(0.1, float(self.config.params.get("xAxisSeconds") or 10.0)),
             "graphDisplayLimit": 600,
             "outputDir": str(Path.cwd() / "saved_images"),
@@ -823,6 +1016,8 @@ class CustomLwrclNodeInstance:
     def _dds_tap_mode(self) -> str:
         if self.config.tool_type == "image_view":
             return "image"
+        if self.config.tool_type == "string_view":
+            return "text"
         if self.config.tool_type == "graph_view":
             return "graph"
         if self.config.tool_type == "image_file_save":
@@ -1123,6 +1318,12 @@ class CustomLwrclNodeInstance:
                         self._execute_image_view_worker_once()
                     else:
                         self._execute_image_view_once()
+                elif tool == "string_view":
+                    period = 1.0 / GUI_DISPLAY_HZ
+                    if self._uses_dds_tap_worker():
+                        self._execute_string_view_worker_once()
+                    else:
+                        self._execute_string_view_once()
                 elif tool == "topic_hz_monitor":
                     period = 1.0 / GUI_DISPLAY_HZ
                     if self._uses_dds_tap_worker():
@@ -1295,6 +1496,72 @@ class CustomLwrclNodeInstance:
             "kind": "image",
             "frameRef": frame_ref,
             "status": f"{width} x {height} {dds_format}" if width and height else dds_format,
+        }
+
+    def _string_view_params(self) -> tuple[str, int]:
+        mode = str(self.config.params.get("mode") or "replace")
+        if mode not in {"replace", "append"}:
+            mode = "replace"
+        try:
+            max_chars = max(1, int(float(self.config.params.get("maxChars") or 20000)))
+        except Exception:
+            max_chars = 20000
+        return mode, max_chars
+
+    def _message_text(self, value: Any) -> str:
+        if isinstance(value, dict):
+            if "data" in value:
+                return str(value.get("data") or "")
+            return json.dumps(value, ensure_ascii=False, default=str)
+        data = getattr(value, "data", None)
+        if data is not None:
+            return str(data)
+        return "" if value is None else str(value)
+
+    def _execute_string_view_once(self) -> None:
+        mode, max_chars = self._string_view_params()
+        updated = False
+        if mode == "append":
+            text = str(self.state.get("string_view_text") or "")
+            while self.has_input("in1"):
+                chunk = self._message_text(self.take("in1"))
+                if chunk:
+                    text += chunk
+                    updated = True
+            if len(text) > max_chars:
+                text = text[-max_chars:]
+            self.state["string_view_text"] = text
+        else:
+            value, version = self.latest_with_version("in1")
+            text = str(self.state.get("string_view_text") or "")
+            if value is not None and version != self.state.get("string_view_last_version"):
+                text = self._message_text(value)
+                if len(text) > max_chars:
+                    text = text[-max_chars:]
+                self.state["string_view_text"] = text
+                self.state["string_view_last_version"] = version
+                updated = True
+        text = str(self.state.get("string_view_text") or "")
+        if updated or not self.view:
+            status = f"{len(text)} chars / {mode}"
+            self.view = {"kind": "string", "text": text, "status": status}
+
+    def _execute_string_view_worker_once(self) -> None:
+        status = self._read_dds_tap_status()
+        if not status:
+            self.view = {"kind": "string", "text": "", "status": "DDS tap worker starting"}
+            return
+        if status.get("error"):
+            self.view = {"kind": "string", "text": "", "status": str(status.get("error"))}
+            return
+        text = str(status.get("text") or "")
+        mode = str(status.get("textMode") or self.config.params.get("mode") or "replace")
+        seq = int(status.get("textSeq") or status.get("frameSeq") or 0)
+        count = int(status.get("count") or 0)
+        self.view = {
+            "kind": "string",
+            "text": text,
+            "status": f"{len(text)} chars / {mode} / {count} msgs" if seq or count else "No text",
         }
 
     def _read_dds_tap_status(self) -> dict[str, Any] | None:
@@ -2267,7 +2534,11 @@ class GraphRuntime:
         response_nodes: dict[str, Any] = {}
         for config in configs:
             instance = self._instance_for(config)
-            ok = self._ensure_node_environment(config, instance)
+            ok = True
+            if self._config_needs_node_environment(config):
+                ok = self._ensure_node_environment(config, instance)
+            else:
+                instance.env_status = "built-in background" if self._config_runs_in_background(config) else "built-in"
             response_nodes[config.id] = {
                 "meta": {"environment": instance.env_status, "logs": instance.logs[-20:]},
                 "values": {},
@@ -2316,7 +2587,11 @@ class GraphRuntime:
         for config in configs:
             instance = self._instance_for(config)
             self._apply_runtime_param_overrides(instance)
-            setup_ok = self._ensure_node_environment(config, instance)
+            setup_ok = True
+            if self._config_needs_node_environment(config):
+                setup_ok = self._ensure_node_environment(config, instance)
+            else:
+                instance.env_status = "built-in background" if self._config_runs_in_background(config) else "built-in"
             response_nodes[config.id] = {"meta": {"environment": instance.env_status, "logs": instance.logs[-20:]}, "values": {}, "view": instance.view}
             if not setup_ok:
                 return {
@@ -2324,7 +2599,7 @@ class GraphRuntime:
                     "lwrclpy": self.runtime.status(instance.env_status),
                     "setup": {"complete": False},
                 }
-            if not config.tool_type:
+            if self._config_needs_node_environment(config):
                 if instance.env_python_bin is None:
                     instance.env_status = "python venv missing"
                     return {
@@ -2355,6 +2630,21 @@ class GraphRuntime:
             "lwrclpy": self.runtime.status(),
             "setup": {"complete": True},
         }
+
+    def _config_needs_node_environment(self, config: CustomLwrclNodeConfig) -> bool:
+        return not config.tool_type or config.tool_type in {"llm_text"}
+
+    def _config_runs_in_background(self, config: CustomLwrclNodeConfig) -> bool:
+        tool_type = config.tool_type
+        if tool_type in {"mcap_file_input", "image_file_input"}:
+            return True
+        if tool_type == "mcap_record":
+            return True
+        if tool_type in {"video_file_input", "function_generator"}:
+            return bool(config.outputs)
+        if tool_type in {"image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save"}:
+            return any(port.topic or port.topics for port in config.inputs)
+        return False
 
     def _instance_for(self, config: CustomLwrclNodeConfig) -> CustomLwrclNodeInstance:
         instance = self.instances.get(config.id)
@@ -2834,6 +3124,7 @@ class GraphRuntime:
             return direct
         uv_name = "uv.exe" if sys.platform.startswith("win") else "uv"
         candidates = [
+            Path.cwd() / ".venv" / ("Scripts" if sys.platform.startswith("win") else "bin") / uv_name,
             Path(sys.executable).parent / uv_name,           # next to executable (venv or frozen)
             Path(sys.executable).parent / "_internal" / uv_name,  # PyInstaller 6 onedir layout
         ]
@@ -2847,7 +3138,7 @@ class GraphRuntime:
 
     def _parse_node(self, node: dict[str, Any]) -> CustomLwrclNodeConfig:
         tool_type = str(node.get("toolType", ""))
-        return CustomLwrclNodeConfig(
+        config = CustomLwrclNodeConfig(
             id=str(node.get("id")),
             name=str(node.get("name") or node.get("id")),
             x=int(node.get("x", 0)),
@@ -2866,11 +3157,48 @@ class GraphRuntime:
             tool_type=tool_type,
             params=dict(node.get("params", {}) if isinstance(node.get("params", {}), dict) else {}),
         )
+        if tool_type == "image_crop_resize":
+            config.import_code = IMAGE_CROP_RESIZE_IMPORT_CODE
+            config.loop_code = ""
+            config.timers = []
+            config.timer_enabled = False
+            config.inputs = [PortConfig(
+                id="in1",
+                name="image",
+                data_type="sensor_msgs/msg/Image",
+                receive_mode="callback",
+                callback_code=IMAGE_CROP_RESIZE_CALLBACK_CODE,
+            )]
+            config.outputs = [PortConfig(
+                id="out1",
+                name="image",
+                data_type="sensor_msgs/msg/Image",
+            )]
+        if tool_type == "llm_text":
+            config.import_code = LLM_TEXT_IMPORT_CODE
+            config.loop_code = ""
+            config.timers = []
+            config.timer_enabled = False
+            config.inputs = [PortConfig(
+                id="prompt",
+                name="prompt",
+                data_type="std_msgs/msg/String",
+                receive_mode="callback",
+                callback_code=LLM_TEXT_CALLBACK_CODE,
+            )]
+            config.outputs = [PortConfig(
+                id="response",
+                name="response",
+                data_type="std_msgs/msg/String",
+            )]
+        return config
 
     def _parse_port(self, port: dict[str, Any], tool_type: str = "") -> PortConfig:
         data_type = str(port.get("dataType", "std_msgs/msg/String"))
         if tool_type == "graph_view" and not data_type:
             data_type = "std_msgs/msg/Float32"
+        if tool_type == "string_view" and not data_type:
+            data_type = "std_msgs/msg/String"
         if tool_type == "mcap_record" and not port.get("dataType"):
             data_type = ""
         return PortConfig(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import keyword
 import os
 import sys
 import builtins
@@ -229,6 +230,7 @@ class LwrclpyWorkerNode:
 
     def _globals(self) -> dict[str, Any]:
         if self._globals_cache is not None:
+            self._sync_param_globals(self._globals_cache)
             return self._globals_cache
         if not hasattr(builtins, "__orig_import__"):
             builtins.__orig_import__ = builtins.__import__
@@ -237,17 +239,58 @@ class LwrclpyWorkerNode:
             # Keep print routed to node log while preserving full builtins/import behavior.
             "print": self.log,
         }
+        self._sync_param_globals(globals_dict)
         import_code = self.node_config.get("importCode", "").strip()
         if import_code:
             try:
                 exec(import_code, globals_dict, globals_dict)
             except Exception as exc:
                 self.log(f"import setup error: {exc}")
+        self._sync_param_globals(globals_dict)
         self._globals_cache = globals_dict
         return globals_dict
 
     def _locals(self, extra: dict[str, Any]) -> dict[str, Any]:
-        return {"node": self.node, "params": self.node_config.get("params", {}), "state": self.state, "publish": self.publish, "log": self.log, **extra}
+        params = self.node_config.get("params", {})
+        return {"node": self.node, "params": params, "state": self.state, "publish": self.publish, "log": self.log, **self._param_globals(params), **extra}
+
+    def _sync_param_globals(self, globals_dict: dict[str, Any]) -> None:
+        previous = globals_dict.get("__lwrclpy_param_names__", set())
+        if isinstance(previous, set):
+            for name in previous:
+                globals_dict.pop(name, None)
+        param_globals = self._param_globals(self.node_config.get("params", {}))
+        globals_dict.update(param_globals)
+        globals_dict["__lwrclpy_param_names__"] = set(param_globals)
+
+    def _param_globals(self, params: Any) -> dict[str, Any]:
+        if not isinstance(params, dict):
+            return {}
+        reserved = {
+            "node",
+            "params",
+            "state",
+            "publish",
+            "log",
+            "input_id",
+            "msg",
+            "request",
+            "response",
+            "inputs",
+            "outputs",
+            "now",
+            "period",
+            "timer_id",
+            "timer_name",
+            "latest",
+            "take",
+            "has_input",
+        }
+        result: dict[str, Any] = {}
+        for key, value in params.items():
+            if isinstance(key, str) and key.isidentifier() and not keyword.iskeyword(key) and key not in reserved:
+                result[key] = value
+        return result
 
     def _input_queue_limit(self, input_port: dict[str, Any]) -> int:
         data_type = str(input_port.get("dataType") or "").replace(".", "/")

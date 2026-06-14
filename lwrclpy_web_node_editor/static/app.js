@@ -40,6 +40,7 @@ const state = {
   suppressHistory: false,
   projectFileHandle: null,
   projectFileName: 'lwrclpy_web_node_project.json',
+  projectIsSample: false,
   customNodes: [],
   lwrclpyReleases: [],
   pythonVersions: [],
@@ -48,6 +49,7 @@ const state = {
   ready: false,
   readyInFlight: false,
   readySignature: '',
+  collapsedPaletteGroups: {},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -80,6 +82,8 @@ const DEFAULT_IMPORT_CODE = `# Node-level imports run after this node's venv is 
 # import cv2
 # import numpy as np
 `;
+const DEFAULT_NODE_WIDTH = 320;
+const DEFAULT_NODE_MIN_HEIGHT = 88;
 
 const INTERFACE_NODE_TEMPLATES = [
   {
@@ -143,6 +147,30 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    category: 'Image Processing',
+    label: 'Crop / Resize',
+    toolType: 'image_crop_resize',
+    node: {
+      name: 'image_crop_resize',
+      inputs: [{ id: 'in1', name: 'image', dataType: VIDEO_RAW_IMAGE_TYPE, receiveMode: 'callback', callbackCode: '' }],
+      outputs: [{ id: 'out1', name: 'image', dataType: VIDEO_RAW_IMAGE_TYPE }],
+      params: { cropEnabled: false, cropX: 0, cropY: 0, cropWidth: 0, cropHeight: 0, cropCenter: false, resizeEnabled: false, targetWidth: 0, targetHeight: 0, keepAspect: true },
+      loopCode: '',
+    },
+  },
+  {
+    category: 'AI',
+    label: 'LLM Text',
+    toolType: 'llm_text',
+    node: {
+      name: 'llm_text',
+      inputs: [{ id: 'prompt', name: 'prompt', dataType: 'std_msgs/msg/String', receiveMode: 'callback', callbackCode: '' }],
+      outputs: [{ id: 'response', name: 'response', dataType: 'std_msgs/msg/String' }],
+      params: { provider: 'ollama', model: 'llama3.2', apiBase: '', apiKeyEnv: 'OPENAI_API_KEY', systemPrompt: '', temperature: 0.2, maxTokens: 512, timeoutSec: 60 },
+      loopCode: '',
+    },
+  },
+  {
     category: 'Recording',
     label: 'MCAP Record',
     toolType: 'mcap_record',
@@ -195,6 +223,18 @@ const INTERFACE_NODE_TEMPLATES = [
       inputs: [{ id: 'in1', name: 'image', dataType: 'sensor_msgs/msg/Image', receiveMode: 'manual', callbackCode: '' }],
       outputs: [],
       params: {},
+      loopCode: '',
+    },
+  },
+  {
+    category: 'Views',
+    label: 'String Viewer',
+    toolType: 'string_view',
+    node: {
+      name: 'string_view',
+      inputs: [{ id: 'in1', name: 'text', dataType: 'std_msgs/msg/String', receiveMode: 'manual', callbackCode: '' }],
+      outputs: [],
+      params: { mode: 'replace', maxChars: 20000 },
       loopCode: '',
     },
   },
@@ -261,6 +301,7 @@ function bindToolbar() {
   $('run-duration-model').onclick = runForDuration;
   $('save-project').onclick = () => saveProject(false);
   $('load-project').onchange = loadProject;
+  $('load-sample-project').onclick = openSampleProjectDialog;
   $('export-ros2-package').onclick = exportRos2Package;
   $('view-editor').onclick = () => setActiveView('editor');
   $('view-custom-nodes').onclick = () => setActiveView('custom-nodes');
@@ -403,10 +444,12 @@ function renderInterfaceNodeList() {
   groups.forEach((items, category) => {
     const group = document.createElement('section');
     group.className = 'interface-node-group';
-    const title = document.createElement('h3');
-    title.className = 'interface-node-group-title';
-    title.textContent = category;
-    group.appendChild(title);
+    const key = paletteGroupKey('builtin', category);
+    const collapsed = isPaletteGroupCollapsed(key);
+    group.classList.toggle('collapsed', collapsed);
+    group.appendChild(createPaletteGroupHeader(category, items.length, key, renderInterfaceNodeList));
+    const body = document.createElement('div');
+    body.className = 'interface-node-group-body';
     items.forEach(({ template, index }) => {
       const button = document.createElement('button');
       button.className = 'interface-node-item';
@@ -424,10 +467,32 @@ function renderInterfaceNodeList() {
         renderAll();
         scheduleRun();
       };
-      group.appendChild(button);
+      body.appendChild(button);
     });
+    group.appendChild(body);
     list.appendChild(group);
   });
+}
+
+function paletteGroupKey(kind, category) {
+  return `${kind}:${String(category || 'Other').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+}
+
+function createPaletteGroupHeader(category, count, key, rerender) {
+  const title = document.createElement('button');
+  title.type = 'button';
+  title.className = 'interface-node-group-title';
+  title.setAttribute('aria-expanded', String(!isPaletteGroupCollapsed(key)));
+  title.innerHTML = `<span>${escapeHtml(category)}</span><small>${count}</small>`;
+  title.onclick = () => {
+    state.collapsedPaletteGroups[key] = !isPaletteGroupCollapsed(key);
+    rerender();
+  };
+  return title;
+}
+
+function isPaletteGroupCollapsed(key) {
+  return state.collapsedPaletteGroups[key] !== false;
 }
 
 function customNodeTemplate(item) {
@@ -445,12 +510,30 @@ function renderCustomNodePalette() {
   if (!list) return;
   list.innerHTML = '';
   if (!state.customNodes.length) {
+    const group = document.createElement('section');
+    group.className = 'interface-node-group';
+    const key = paletteGroupKey('custom', 'Custom Nodes');
+    const collapsed = isPaletteGroupCollapsed(key);
+    group.classList.toggle('collapsed', collapsed);
+    group.appendChild(createPaletteGroupHeader('Custom Nodes', 0, key, renderCustomNodePalette));
+    const body = document.createElement('div');
+    body.className = 'interface-node-group-body';
     const empty = document.createElement('div');
     empty.className = 'hint';
     empty.textContent = 'No saved custom nodes.';
-    list.appendChild(empty);
+    body.appendChild(empty);
+    group.appendChild(body);
+    list.appendChild(group);
     return;
   }
+  const group = document.createElement('section');
+  group.className = 'interface-node-group';
+  const key = paletteGroupKey('custom', 'Custom Nodes');
+  const collapsed = isPaletteGroupCollapsed(key);
+  group.classList.toggle('collapsed', collapsed);
+  group.appendChild(createPaletteGroupHeader('Custom Nodes', state.customNodes.length, key, renderCustomNodePalette));
+  const body = document.createElement('div');
+  body.className = 'interface-node-group-body';
   state.customNodes.forEach((item) => {
     const button = document.createElement('button');
     button.className = 'interface-node-item';
@@ -468,8 +551,10 @@ function renderCustomNodePalette() {
       renderAll();
       scheduleRun();
     };
-    list.appendChild(button);
+    body.appendChild(button);
   });
+  group.appendChild(body);
+  list.appendChild(group);
 }
 
 function customNodeSummary(node) {
@@ -1214,10 +1299,20 @@ function renderNodes() {
     el.dataset.id = node.id;
     el.style.left = `${node.x}px`;
     el.style.top = `${node.y}px`;
+    const nodeWidth = nodeWidthValue(node);
+    const nodeHeight = nodeHeightValue(node);
+    if (nodeWidth > DEFAULT_NODE_WIDTH) {
+      el.style.width = `${nodeWidth}px`;
+      el.classList.add('resized');
+    }
+    if (nodeHeight > DEFAULT_NODE_MIN_HEIGHT) {
+      el.style.height = `${nodeHeight}px`;
+      el.classList.add('resized');
+    }
     const runtimeSummary = nodeRuntimeSummary(node);
     el.innerHTML = `
       <div class="node-title">
-        <div><strong>${escapeHtml(node.name)}</strong><small>${escapeHtml(nodeKindLabel(node))}${runtimeSummary ? ` / ${escapeHtml(runtimeSummary)}` : ''}</small></div>
+        <div class="node-title-text"><strong data-node-title-name title="Double-click to rename">${escapeHtml(node.name)}</strong><small>${escapeHtml(nodeKindLabel(node))}${runtimeSummary ? ` / ${escapeHtml(runtimeSummary)}` : ''}</small></div>
         <button class="delete" title="Delete">x</button>
       </div>
       <div class="ports">
@@ -1233,7 +1328,8 @@ function renderNodes() {
           <button data-action="loop">Main Loop Code</button>
           ${timerActionButtons(node)}
           ${node.inputs.filter((input) => (input.receiveMode || 'callback') === 'callback').map((input) => `<button data-callback-input="${escapeAttr(input.id)}">Callback: ${escapeHtml(input.name)}</button>`).join('')}
-        </div>`}`;
+        </div>`}
+      ${resizeHandlesHtml()}`;
     root.appendChild(el);
     el.onclick = (ev) => selectNode(ev, node.id);
     el.querySelector('.delete').onclick = (ev) => {
@@ -1281,13 +1377,30 @@ function renderNodes() {
       };
     });
     bindToolActions(el, node);
+    bindNodeTitleEdit(el, node);
     makeNodeDraggable(el, node);
+    makeNodeResizable(el, node);
     renderPorts(el.querySelector('.inputs'), node, node.inputs, 'input');
     renderPorts(el.querySelector('.outputs'), node, node.outputs, 'output');
     // Restore canvas views immediately after node element is added to DOM
     const viewEl = el.querySelector('[data-node-view]');
     if (viewEl) patchNodeViewEl(viewEl, state.nodeViews[node.id]);
   });
+}
+
+function nodeWidthValue(node) {
+  return Math.max(DEFAULT_NODE_WIDTH, Math.round(Number(node.width || DEFAULT_NODE_WIDTH)));
+}
+
+function nodeHeightValue(node) {
+  return Math.max(DEFAULT_NODE_MIN_HEIGHT, Math.round(Number(node.height || DEFAULT_NODE_MIN_HEIGHT)));
+}
+
+function resizeHandlesHtml() {
+  return `<div class="resize-handle nw" data-resize-corner="nw"></div>
+      <div class="resize-handle ne" data-resize-corner="ne"></div>
+      <div class="resize-handle sw" data-resize-corner="sw"></div>
+      <div class="resize-handle se" data-resize-corner="se"></div>`;
 }
 
 function nodeKindLabel(node) {
@@ -1434,6 +1547,56 @@ function toolActionHtml(node) {
       <div class="tool-summary">${escapeHtml(summary)}</div>
     </div>`;
   }
+  if (node.toolType === 'image_crop_resize') {
+    const p = imageCropResizeDefaults(node.params || {});
+    const positionDisabled = p.cropCenter ? 'disabled' : '';
+    const heightDisabled = p.keepAspect ? 'disabled' : '';
+    return `<div class="node-actions tool-actions image-process-actions">
+      <label class="tool-check"><input data-tool-crop-enabled type="checkbox" ${p.cropEnabled ? 'checked' : ''}> Crop</label>
+      ${p.cropEnabled ? `
+        <label class="tool-field"><span>Crop X</span><input data-tool-crop-resize="cropX" type="number" min="0" step="1" value="${escapeAttr(p.cropX)}" ${positionDisabled}></label>
+        <label class="tool-field"><span>Crop Y</span><input data-tool-crop-resize="cropY" type="number" min="0" step="1" value="${escapeAttr(p.cropY)}" ${positionDisabled}></label>
+        <label class="tool-field"><span>Crop W</span><input data-tool-crop-resize="cropWidth" type="number" min="0" step="1" value="${escapeAttr(p.cropWidth)}"></label>
+        <label class="tool-field"><span>Crop H</span><input data-tool-crop-resize="cropHeight" type="number" min="0" step="1" value="${escapeAttr(p.cropHeight)}"></label>
+        <label class="tool-check"><input data-tool-crop-resize-center type="checkbox" ${p.cropCenter ? 'checked' : ''}> Center Crop</label>` : ''}
+      <label class="tool-check"><input data-tool-resize-enabled type="checkbox" ${p.resizeEnabled ? 'checked' : ''}> Resize</label>
+      ${p.resizeEnabled ? `
+        <label class="tool-field"><span>Resize W</span><input data-tool-crop-resize="targetWidth" type="number" min="0" step="1" value="${escapeAttr(p.targetWidth)}"></label>
+        <label class="tool-field"><span>Resize H</span><input data-tool-crop-resize="targetHeight" type="number" min="0" step="1" value="${escapeAttr(p.targetHeight)}" ${heightDisabled}></label>
+        <label class="tool-check"><input data-tool-crop-resize-aspect type="checkbox" ${p.keepAspect ? 'checked' : ''}> Keep Aspect</label>` : ''}
+    </div>`;
+  }
+  if (node.toolType === 'llm_text') {
+    const p = llmTextDefaults(node.params || {});
+    return `<div class="node-actions tool-actions llm-actions">
+      <label class="tool-field"><span>Provider</span><select data-tool-llm="provider">
+        <option value="ollama" ${p.provider === 'ollama' ? 'selected' : ''}>Ollama</option>
+        <option value="openai" ${p.provider === 'openai' ? 'selected' : ''}>OpenAI</option>
+        <option value="openai_compatible" ${p.provider === 'openai_compatible' ? 'selected' : ''}>OpenAI Compatible</option>
+        <option value="lmstudio" ${p.provider === 'lmstudio' ? 'selected' : ''}>LM Studio</option>
+      </select></label>
+      <label class="tool-field"><span>Model</span><input data-tool-llm="model" type="text" value="${escapeAttr(p.model)}" placeholder="llama3.2"></label>
+      <label class="tool-field tool-field-wide"><span>Base</span><input data-tool-llm="apiBase" type="text" value="${escapeAttr(p.apiBase)}" placeholder="provider default"></label>
+      <label class="tool-field"><span>Key Env</span><input data-tool-llm="apiKeyEnv" type="text" value="${escapeAttr(p.apiKeyEnv)}" placeholder="OPENAI_API_KEY"></label>
+      <label class="tool-field"><span>Temp</span><input data-tool-llm="temperature" type="number" min="0" max="2" step="0.1" value="${escapeAttr(p.temperature)}"></label>
+      <label class="tool-field"><span>Tokens</span><input data-tool-llm="maxTokens" type="number" min="1" step="1" value="${escapeAttr(p.maxTokens)}"></label>
+      <label class="tool-field"><span>Timeout</span><input data-tool-llm="timeoutSec" type="number" min="1" step="1" value="${escapeAttr(p.timeoutSec)}"></label>
+      <label class="tool-field tool-field-wide tool-field-textarea"><span>System</span><textarea data-tool-llm="systemPrompt" rows="2" placeholder="optional">${escapeHtml(p.systemPrompt)}</textarea></label>
+      <div class="tool-summary">${escapeHtml(llmTextSummary(p))}</div>
+    </div>`;
+  }
+  if (node.toolType === 'string_view') {
+    const p = stringViewDefaults(node.params || {});
+    return `<div class="node-actions tool-actions string-view-actions">
+      <label class="tool-field"><span>Mode</span><select data-tool-string-view="mode">
+        <option value="replace" ${p.mode === 'replace' ? 'selected' : ''}>Replace</option>
+        <option value="append" ${p.mode === 'append' ? 'selected' : ''}>Append</option>
+      </select></label>
+      <label class="tool-field"><span>Max</span><input data-tool-string-view="maxChars" type="number" min="1" step="1000" value="${escapeAttr(p.maxChars)}"></label>
+      <button data-action="clear-string-view">Clear</button>
+      <div class="tool-summary">${escapeHtml(stringViewSummary(p))}</div>
+    </div>`;
+  }
   if (node.toolType === 'function_generator') {
     return functionGeneratorHtml(node);
   }
@@ -1453,6 +1616,61 @@ function functionGeneratorHtml(node) {
     <button data-action="signal-settings">Signal Settings</button>
     <div class="tool-summary">${escapeHtml(signalSummary(p))}</div>
   </div>`;
+}
+
+function imageCropResizeDefaults(params) {
+  return {
+    cropEnabled: Boolean(params.cropEnabled),
+    cropX: Math.max(0, Math.floor(Number(params.cropX || 0))),
+    cropY: Math.max(0, Math.floor(Number(params.cropY || 0))),
+    cropWidth: Math.max(0, Math.floor(Number(params.cropWidth || 0))),
+    cropHeight: Math.max(0, Math.floor(Number(params.cropHeight || 0))),
+    cropCenter: Boolean(params.cropCenter),
+    resizeEnabled: Boolean(params.resizeEnabled),
+    targetWidth: Math.max(0, Math.floor(Number(params.targetWidth || 0))),
+    targetHeight: Math.max(0, Math.floor(Number(params.targetHeight || 0))),
+    keepAspect: params.keepAspect !== false,
+  };
+}
+
+function imageCropResizeAspectHeight(params) {
+  const p = imageCropResizeDefaults(params || {});
+  if (!p.keepAspect || p.targetWidth <= 0) return p.targetHeight;
+  const sourceW = p.cropWidth > 0 ? p.cropWidth : Number(params.sourceWidth || 0);
+  const sourceH = p.cropHeight > 0 ? p.cropHeight : Number(params.sourceHeight || 0);
+  if (sourceW > 0 && sourceH > 0) return Math.max(1, Math.round(p.targetWidth * sourceH / sourceW));
+  return p.targetHeight;
+}
+
+function llmTextDefaults(params) {
+  const provider = ['ollama', 'openai', 'openai_compatible', 'lmstudio'].includes(params.provider) ? params.provider : 'ollama';
+  return {
+    provider,
+    model: String(params.model || (provider === 'openai' ? 'gpt-4.1-mini' : 'llama3.2')),
+    apiBase: String(params.apiBase || ''),
+    apiKeyEnv: String(params.apiKeyEnv || 'OPENAI_API_KEY'),
+    systemPrompt: String(params.systemPrompt || ''),
+    temperature: Math.max(0, Math.min(2, Number(params.temperature ?? 0.2))),
+    maxTokens: Math.max(1, Math.floor(Number(params.maxTokens || 512))),
+    timeoutSec: Math.max(1, Math.floor(Number(params.timeoutSec || 60))),
+  };
+}
+
+function llmTextSummary(p) {
+  const base = p.apiBase ? ` / ${p.apiBase}` : '';
+  const key = p.provider === 'openai' || p.provider === 'openai_compatible' ? ` / key ${p.apiKeyEnv || 'unset'}` : '';
+  return `${p.provider} / ${p.model}${base}${key}`;
+}
+
+function stringViewDefaults(params) {
+  return {
+    mode: params.mode === 'append' ? 'append' : 'replace',
+    maxChars: Math.max(1, Math.floor(Number(params.maxChars || 20000))),
+  };
+}
+
+function stringViewSummary(p) {
+  return p.mode === 'append' ? `Append incoming text / keep last ${p.maxChars} chars` : 'Replace with latest message';
 }
 
 function signalSummary(p) {
@@ -1480,7 +1698,7 @@ function formatDuration(seconds) {
 }
 
 function viewNodeHtml(node) {
-  if (!['image_file_input', 'video_file_input', 'mcap_file_input', 'mcap_record', 'function_generator', 'image_view', 'image_file_save', 'graph_view', 'topic_hz_monitor'].includes(node.toolType)) return '';
+  if (!['image_file_input', 'video_file_input', 'mcap_file_input', 'mcap_record', 'function_generator', 'image_view', 'string_view', 'image_file_save', 'graph_view', 'topic_hz_monitor'].includes(node.toolType)) return '';
   const viewClass = node.toolType === 'video_file_input' ? ' node-view-video' : '';
   return `<div class="node-view${viewClass}" data-node-view="${escapeAttr(node.id)}">${renderViewContent(state.nodeViews[node.id])}</div>`;
 }
@@ -1676,6 +1894,92 @@ function bindToolActions(el, node) {
       scheduleRun();
     };
   }
+  const cropResizeInputs = el.querySelectorAll('[data-tool-crop-resize]');
+  const cropResizeAspect = el.querySelector('[data-tool-crop-resize-aspect]');
+  const cropResizeCenter = el.querySelector('[data-tool-crop-resize-center]');
+  const cropEnabled = el.querySelector('[data-tool-crop-enabled]');
+  const resizeEnabled = el.querySelector('[data-tool-resize-enabled]');
+  if (cropResizeInputs.length || cropResizeAspect || cropResizeCenter || cropEnabled || resizeEnabled) {
+    const applyCropResizeParams = () => {
+      const next = imageCropResizeDefaults(node.params || {});
+      cropResizeInputs.forEach((input) => {
+        const key = input.dataset.toolCropResize;
+        next[key] = Math.max(0, Math.floor(Number(input.value || 0)));
+      });
+      next.cropEnabled = cropEnabled ? cropEnabled.checked : next.cropEnabled;
+      next.resizeEnabled = resizeEnabled ? resizeEnabled.checked : next.resizeEnabled;
+      next.keepAspect = cropResizeAspect ? cropResizeAspect.checked : next.keepAspect;
+      next.cropCenter = cropResizeCenter ? cropResizeCenter.checked : next.cropCenter;
+      if (next.resizeEnabled && next.keepAspect) next.targetHeight = imageCropResizeAspectHeight(next);
+      node.params = { ...(node.params || {}), ...next };
+      renderAll();
+      commitHistory();
+      scheduleRun();
+    };
+    cropResizeInputs.forEach((input) => {
+      input.onchange = applyCropResizeParams;
+    });
+    if (cropResizeAspect) cropResizeAspect.onchange = applyCropResizeParams;
+    if (cropResizeCenter) cropResizeCenter.onchange = applyCropResizeParams;
+    if (cropEnabled) cropEnabled.onchange = applyCropResizeParams;
+    if (resizeEnabled) resizeEnabled.onchange = applyCropResizeParams;
+  }
+  const llmInputs = el.querySelectorAll('[data-tool-llm]');
+  if (llmInputs.length) {
+    const applyLlmParams = () => {
+      const next = llmTextDefaults(node.params || {});
+      llmInputs.forEach((input) => {
+        const key = input.dataset.toolLlm;
+        if (key === 'temperature') {
+          next[key] = Math.max(0, Math.min(2, Number(input.value || 0)));
+        } else if (key === 'maxTokens' || key === 'timeoutSec') {
+          next[key] = Math.max(1, Math.floor(Number(input.value || 1)));
+        } else {
+          next[key] = String(input.value || '').trim();
+        }
+      });
+      node.params = { ...(node.params || {}), ...next };
+      renderAll();
+      commitHistory();
+      scheduleRun();
+    };
+    llmInputs.forEach((input) => {
+      input.onchange = applyLlmParams;
+    });
+  }
+  const stringViewInputs = el.querySelectorAll('[data-tool-string-view]');
+  if (stringViewInputs.length) {
+    const applyStringViewParams = () => {
+      const next = stringViewDefaults(node.params || {});
+      stringViewInputs.forEach((input) => {
+        const key = input.dataset.toolStringView;
+        if (key === 'maxChars') {
+          next.maxChars = Math.max(1, Math.floor(Number(input.value || 20000)));
+        } else {
+          next[key] = String(input.value || '').trim();
+        }
+      });
+      node.params = { ...(node.params || {}), ...next };
+      renderAll();
+      commitHistory();
+      scheduleRun();
+    };
+    stringViewInputs.forEach((input) => {
+      input.onchange = applyStringViewParams;
+    });
+  }
+  const clearStringView = el.querySelector('[data-action="clear-string-view"]');
+  if (clearStringView) {
+    clearStringView.onclick = (ev) => {
+      ev.stopPropagation();
+      node.params = { ...(node.params || {}), clearToken: Date.now() };
+      state.nodeViews[node.id] = { kind: 'string', text: '', status: 'Cleared' };
+      updateNodeViews({ [node.id]: { view: state.nodeViews[node.id] } });
+      renderAll();
+      commitHistory();
+      scheduleRun();
+    };
+  }
   const signalSettings = el.querySelector('[data-action="signal-settings"]');
   if (signalSettings) {
     signalSettings.onclick = (ev) => {
@@ -1830,9 +2134,53 @@ function startPan(ev) {
   window.addEventListener('pointerup', up);
 }
 
+function bindNodeTitleEdit(el, node) {
+  const label = el.querySelector('[data-node-title-name]');
+  if (!label) return;
+  label.ondblclick = (ev) => {
+    ev.stopPropagation();
+    ev.preventDefault();
+    startNodeTitleEdit(el, node);
+  };
+}
+
+function startNodeTitleEdit(el, node) {
+  const label = el.querySelector('[data-node-title-name]');
+  if (!label || el.querySelector('.node-title-input')) return;
+  const input = document.createElement('input');
+  input.className = 'node-title-input';
+  input.value = node.name || '';
+  input.setAttribute('aria-label', 'Node title');
+  label.replaceWith(input);
+  input.focus();
+  input.select();
+  input.onpointerdown = (ev) => ev.stopPropagation();
+  input.onclick = (ev) => ev.stopPropagation();
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    const next = input.value.trim();
+    if (commit && next && next !== node.name) {
+      node.name = next;
+      invalidateReady();
+      renderAll();
+      scheduleRun();
+      return;
+    }
+    renderAll();
+  };
+  input.onkeydown = (ev) => {
+    if (ev.key === 'Enter') finish(true);
+    if (ev.key === 'Escape') finish(false);
+  };
+  input.onblur = () => finish(true);
+}
+
 function makeNodeDraggable(el, node) {
   const title = el.querySelector('.node-title');
   title.addEventListener('pointerdown', (ev) => {
+    if (ev.target.closest('.node-title-input')) return;
     ev.stopPropagation();
     state.selectedNode = node.id;
     state.selectedLink = null;
@@ -1852,6 +2200,58 @@ function makeNodeDraggable(el, node) {
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+  });
+}
+
+function makeNodeResizable(el, node) {
+  el.querySelectorAll('[data-resize-corner]').forEach((handle) => {
+    handle.addEventListener('pointerdown', (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      state.selectedNode = node.id;
+      state.selectedLink = null;
+      renderSelection();
+      const corner = handle.dataset.resizeCorner || 'se';
+      const start = {
+        x: ev.clientX,
+        y: ev.clientY,
+        nx: Number(node.x || 0),
+        ny: Number(node.y || 0),
+        width: Math.max(nodeWidthValue(node), el.offsetWidth),
+        height: Math.max(nodeHeightValue(node), el.offsetHeight),
+      };
+      document.body.classList.add('resizing-node');
+      handle.setPointerCapture?.(ev.pointerId);
+      const move = (e) => {
+        const dx = (e.clientX - start.x) / state.view.scale;
+        const dy = (e.clientY - start.y) / state.view.scale;
+        const left = corner.includes('w');
+        const top = corner.includes('n');
+        const rawWidth = left ? start.width - dx : start.width + dx;
+        const rawHeight = top ? start.height - dy : start.height + dy;
+        const nextWidth = Math.max(DEFAULT_NODE_WIDTH, Math.round(rawWidth));
+        const nextHeight = Math.max(DEFAULT_NODE_MIN_HEIGHT, Math.round(rawHeight));
+        node.width = nextWidth;
+        node.height = nextHeight;
+        if (left) node.x = Math.round(start.nx + start.width - nextWidth);
+        if (top) node.y = Math.round(start.ny + start.height - nextHeight);
+        el.style.left = `${node.x}px`;
+        el.style.top = `${node.y}px`;
+        el.style.width = `${nextWidth}px`;
+        el.style.height = `${nextHeight}px`;
+        el.classList.add('resized');
+        renderLinks();
+      };
+      const up = (e) => {
+        handle.releasePointerCapture?.(e.pointerId);
+        document.body.classList.remove('resizing-node');
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        commitHistory();
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
   });
 }
 
@@ -2033,8 +2433,8 @@ function fitView() {
   }
   const minX = Math.min(...state.nodes.map((n) => n.x));
   const minY = Math.min(...state.nodes.map((n) => n.y));
-  const maxX = Math.max(...state.nodes.map((n) => n.x)) + 320;
-  const maxY = Math.max(...state.nodes.map((n) => n.y)) + 240;
+  const maxX = Math.max(...state.nodes.map((n) => n.x + nodeWidthValue(n)));
+  const maxY = Math.max(...state.nodes.map((n) => n.y + nodeHeightValue(n)));
   const r = workspace().getBoundingClientRect();
   state.view.scale = clamp(Math.min(1.1, r.width / (maxX - minX + 120), r.height / (maxY - minY + 120)), 0.35, 1.8);
   state.view.x = Math.round((r.width - (maxX + minX) * state.view.scale) / 2);
@@ -2875,6 +3275,11 @@ function renderViewContent(view) {
   if (view.kind === 'image' && (view.dataUrl || view.raw || view.frameRef)) {
     return `<figure class="image-view"><canvas class="image-canvas"></canvas><figcaption>${escapeHtml(view.status || '')}</figcaption></figure>`;
   }
+  if (view.kind === 'string') {
+    const text = view.text || '';
+    const status = view.status || (text ? `${text.length} chars` : 'No text');
+    return `<div class="string-view"><pre>${escapeHtml(text)}</pre><span>${escapeHtml(status)}</span></div>`;
+  }
   if (view.kind === 'plot') {
     return renderPlot(view.series || [], view.status || '', view);
   }
@@ -3539,6 +3944,9 @@ async function clearGraph() {
   state.links = [];
   state.selectedNode = null;
   state.selectedLink = null;
+  state.projectFileHandle = null;
+  state.projectFileName = 'lwrclpy_web_node_project.json';
+  state.projectIsSample = false;
   renderAll();
   setExecutionStatus('idle', 'Graph cleared');
 }
@@ -3658,11 +4066,12 @@ function redoProject() {
 
 async function saveProject(saveAs = false) {
   const text = JSON.stringify(projectConfig(), null, 2);
+  const forceSaveAs = saveAs || state.projectIsSample;
   if (window.showSaveFilePicker) {
     try {
-      if (saveAs || !state.projectFileHandle) {
+      if (forceSaveAs || !state.projectFileHandle) {
         state.projectFileHandle = await window.showSaveFilePicker({
-          suggestedName: state.projectFileName || 'lwrclpy_web_node_project.json',
+          suggestedName: suggestedProjectSaveName(),
           types: [{ description: 'lwrclpy Web Node Editor Project', accept: { 'application/json': ['.json'] } }],
         });
       }
@@ -3670,6 +4079,7 @@ async function saveProject(saveAs = false) {
       await writable.write(text);
       await writable.close();
       state.projectFileName = state.projectFileHandle.name || state.projectFileName;
+      state.projectIsSample = false;
       setExecutionStatus('idle', `Saved ${state.projectFileName}`);
       return;
     } catch (err) {
@@ -3678,16 +4088,105 @@ async function saveProject(saveAs = false) {
       return;
     }
   }
-  downloadText(state.projectFileName || 'lwrclpy_web_node_project.json', text, 'application/json');
-  setExecutionStatus('idle', `Downloaded ${state.projectFileName || 'project JSON'}`);
+  const downloadName = suggestedProjectSaveName();
+  downloadText(downloadName, text, 'application/json');
+  state.projectFileName = downloadName;
+  state.projectIsSample = false;
+  setExecutionStatus('idle', `Downloaded ${downloadName}`);
+}
+
+function suggestedProjectSaveName() {
+  const name = String(state.projectFileName || 'lwrclpy_web_node_project.json').split(/[\\/]/).filter(Boolean).pop() || 'lwrclpy_web_node_project.json';
+  if (!state.projectIsSample) return name;
+  return name.startsWith('copy_') ? name : `copy_${name}`;
 }
 
 async function loadProject(event) {
   const file = event.target.files[0];
   event.target.value = '';
   if (!file) return;
+  try {
+    await applyProjectPayload(JSON.parse(await file.text()), file.name || 'lwrclpy_web_node_project.json', { sample: false });
+    setExecutionStatus('idle', `Loaded ${state.projectFileName}`);
+  } catch (err) {
+    setExecutionStatus('error', `Load failed: ${err.message}`);
+  }
+}
+
+async function openSampleProjectDialog() {
+  try {
+    const data = await fetch('/api/sample-projects').then((res) => res.json());
+    const samples = Array.isArray(data.samples) ? data.samples : [];
+    if (!samples.length) {
+      setExecutionStatus('error', 'No sample projects found');
+      return;
+    }
+    let dialog = $('sample-project-dialog');
+    if (!dialog) {
+      dialog = document.createElement('dialog');
+      dialog.id = 'sample-project-dialog';
+      dialog.innerHTML = `
+        <form method="dialog">
+          <header class="dialog-header">
+            <h2>Load Sample Project</h2>
+            <button type="button" class="icon-button" data-close-sample-dialog>x</button>
+          </header>
+          <div class="dialog-body">
+            <label class="field">
+              <span>Sample</span>
+              <select id="sample-project-select"></select>
+            </label>
+            <p id="sample-project-detail" class="hint"></p>
+          </div>
+          <footer class="dialog-footer">
+            <button type="button" data-cancel-sample-dialog>Cancel</button>
+            <button type="button" id="sample-project-load">Load</button>
+          </footer>
+        </form>`;
+      document.body.appendChild(dialog);
+      dialog.querySelector('[data-close-sample-dialog]').onclick = () => dialog.close();
+      dialog.querySelector('[data-cancel-sample-dialog]').onclick = () => dialog.close();
+    }
+    const select = $('sample-project-select');
+    select.innerHTML = samples.map((item) => {
+      const category = item.category ? `${item.category}/` : '';
+      return `<option value="${escapeAttr(item.path)}">${escapeHtml(category + item.name)}</option>`;
+    }).join('');
+    const detail = $('sample-project-detail');
+    const updateDetail = () => {
+      const item = samples.find((sample) => sample.path === select.value);
+      detail.textContent = item ? item.path : '';
+    };
+    select.onchange = updateDetail;
+    updateDetail();
+    $('sample-project-load').onclick = async () => {
+      const selectedPath = select.value;
+      dialog.close();
+      await loadSampleProject(selectedPath);
+    };
+    dialog.showModal();
+  } catch (err) {
+    setExecutionStatus('error', `Sample list failed: ${err.message}`);
+  }
+}
+
+async function loadSampleProject(path) {
+  try {
+    const data = await fetch('/api/sample-project', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }).then((res) => res.json());
+    if (data.error) throw new Error(data.error);
+    await applyProjectPayload(data.project || {}, data.path || path || 'sample_project.json', { sample: true });
+    setExecutionStatus('idle', `Loaded sample ${data.path || path}`);
+  } catch (err) {
+    setExecutionStatus('error', `Sample load failed: ${err.message}`);
+  }
+}
+
+async function applyProjectPayload(imported, fileName = 'lwrclpy_web_node_project.json', options = {}) {
   await resetGraphRuntimeState({ stopServer: true });
-  const imported = JSON.parse(await file.text());
   state.suppressHistory = true;
   state.nodes = (imported.nodes || []).map(normalizeImportedNode);
   state.links = (imported.links || []).map((link) => ({ id: link.id || `l${Date.now()}${Math.random()}`, ...link }));
@@ -3698,7 +4197,8 @@ async function loadProject(event) {
   state.selectedNode = null;
   state.selectedLink = null;
   state.projectFileHandle = null;
-  state.projectFileName = file.name || 'lwrclpy_web_node_project.json';
+  state.projectFileName = String(fileName || 'lwrclpy_web_node_project.json').split(/[\\/]/).filter(Boolean).pop() || 'lwrclpy_web_node_project.json';
+  state.projectIsSample = Boolean(options.sample);
   renderAll();
   state.suppressHistory = false;
   resetHistory();
@@ -4056,6 +4556,7 @@ if __name__ == '__main__':
 
 function renderRos2RuntimePy() {
   return `import importlib
+import keyword
 import sys
 import time
 
@@ -4200,6 +4701,7 @@ class ExportedNode:
 
   def _globals(self):
     if self._globals_cache is not None:
+      self._sync_param_globals(self._globals_cache)
       return self._globals_cache
     globals_dict = {
       '__builtins__': {
@@ -4225,14 +4727,41 @@ class ExportedNode:
         'sum': sum,
       }
     }
+    self._sync_param_globals(globals_dict)
     import_code = self.node_config.get('importCode', '').strip()
     if import_code:
       exec(import_code, globals_dict, globals_dict)
+    self._sync_param_globals(globals_dict)
     self._globals_cache = globals_dict
     return globals_dict
 
   def _locals(self, extra):
-    return {'node': self.node, 'params': self.node_config.get('params', {}), 'state': self.state, 'publish': self.publish, 'log': self.log, **extra}
+    params = self.node_config.get('params', {})
+    return {'node': self.node, 'params': params, 'state': self.state, 'publish': self.publish, 'log': self.log, **self._param_globals(params), **extra}
+
+  def _sync_param_globals(self, globals_dict):
+    previous = globals_dict.get('__lwrclpy_param_names__', set())
+    if isinstance(previous, set):
+      for name in previous:
+        globals_dict.pop(name, None)
+    param_globals = self._param_globals(self.node_config.get('params', {}))
+    globals_dict.update(param_globals)
+    globals_dict['__lwrclpy_param_names__'] = set(param_globals)
+
+  def _param_globals(self, params):
+    if not isinstance(params, dict):
+      return {}
+    reserved = {
+      'node', 'params', 'state', 'publish', 'log',
+      'input_id', 'msg', 'request', 'response',
+      'inputs', 'outputs', 'now', 'period',
+      'timer_id', 'timer_name', 'latest', 'take', 'has_input',
+    }
+    return {
+      key: value
+      for key, value in params.items()
+      if isinstance(key, str) and key.isidentifier() and not keyword.iskeyword(key) and key not in reserved
+    }
 
   def _store_input(self, input_id, value):
     self.last_inputs[input_id] = value
@@ -4414,6 +4943,7 @@ function renderProjectPythonFile(config) {
 import importlib
 import hashlib
 import json
+import keyword
 import shutil
 import subprocess
 import sys
@@ -4600,6 +5130,7 @@ class ProjectNode:
 
     def _globals(self):
         globals_dict = {"__builtins__": {"__import__": __import__, "abs": abs, "bool": bool, "dict": dict, "enumerate": enumerate, "float": float, "getattr": getattr, "hasattr": hasattr, "int": int, "len": len, "list": list, "max": max, "min": min, "print": self.log, "range": range, "round": round, "setattr": setattr, "str": str, "sum": sum}}
+        self._sync_param_globals(globals_dict)
         import_code = self.node_config.get("importCode", "").strip()
         if import_code:
             original_path = list(sys.path)
@@ -4609,10 +5140,36 @@ class ProjectNode:
                 exec(import_code, globals_dict, globals_dict)
             finally:
                 sys.path[:] = original_path
+        self._sync_param_globals(globals_dict)
         return globals_dict
 
     def _locals(self, extra):
-        return {"params": self.node_config.get("params", {}), "state": self.state, "publish": self.publish, "log": self.log, **extra}
+        params = self.node_config.get("params", {})
+        return {"params": params, "state": self.state, "publish": self.publish, "log": self.log, **self._param_globals(params), **extra}
+
+    def _sync_param_globals(self, globals_dict):
+        previous = globals_dict.get("__lwrclpy_param_names__", set())
+        if isinstance(previous, set):
+            for name in previous:
+                globals_dict.pop(name, None)
+        param_globals = self._param_globals(self.node_config.get("params", {}))
+        globals_dict.update(param_globals)
+        globals_dict["__lwrclpy_param_names__"] = set(param_globals)
+
+    def _param_globals(self, params):
+        if not isinstance(params, dict):
+            return {}
+        reserved = {
+            "node", "params", "state", "publish", "log",
+            "input_id", "msg", "request", "response",
+            "inputs", "outputs", "now", "period",
+            "timer_id", "timer_name", "latest", "take", "has_input",
+        }
+        return {
+            key: value
+            for key, value in params.items()
+            if isinstance(key, str) and key.isidentifier() and not keyword.iskeyword(key) and key not in reserved
+        }
 
     def _store_input(self, input_id, value):
         self.last_inputs[input_id] = value
@@ -4712,6 +5269,7 @@ ${metadata.split('\n').map((line) => `# ${line}`).join('\n')}
 
 import importlib
 import json
+import keyword
 import time
 
 import rclpy
@@ -4877,7 +5435,7 @@ class ExportedNode:
             self.publish(key, value)
 
     def _globals(self):
-        return {
+        globals_dict = {
             "__builtins__": {
                 "abs": abs,
                 "bool": bool,
@@ -4899,14 +5457,42 @@ class ExportedNode:
                 "sum": sum,
             }
         }
+        self._sync_param_globals(globals_dict)
+        return globals_dict
 
     def _locals(self, extra):
+        params = self.node_config.get("params", {})
         return {
-            "params": self.node_config.get("params", {}),
+            "params": params,
             "state": self.state,
             "publish": self.publish,
             "log": self.log,
+            **self._param_globals(params),
             **extra,
+        }
+
+    def _sync_param_globals(self, globals_dict):
+        previous = globals_dict.get("__lwrclpy_param_names__", set())
+        if isinstance(previous, set):
+            for name in previous:
+                globals_dict.pop(name, None)
+        param_globals = self._param_globals(self.node_config.get("params", {}))
+        globals_dict.update(param_globals)
+        globals_dict["__lwrclpy_param_names__"] = set(param_globals)
+
+    def _param_globals(self, params):
+        if not isinstance(params, dict):
+            return {}
+        reserved = {
+            "node", "params", "state", "publish", "log",
+            "input_id", "msg", "request", "response",
+            "inputs", "outputs", "now", "period",
+            "timer_id", "timer_name", "latest", "take", "has_input",
+        }
+        return {
+            key: value
+            for key, value in params.items()
+            if isinstance(key, str) and key.isidentifier() and not keyword.iskeyword(key) and key not in reserved
         }
 
     def _store_input(self, input_id, value):
@@ -4994,6 +5580,8 @@ function normalizeImportedNode(node) {
     name: node.name || 'imported_lwrclpy_node',
     x: Number(node.x || 0),
     y: Number(node.y || 0),
+    width: Math.max(DEFAULT_NODE_WIDTH, Math.round(Number(node.width || DEFAULT_NODE_WIDTH))),
+    height: Math.max(DEFAULT_NODE_MIN_HEIGHT, Math.round(Number(node.height || DEFAULT_NODE_MIN_HEIGHT))),
     inputs: (node.inputs || []).map((port, index) => ({
       id: port.id || `in${index + 1}`,
       name: port.name || `in${index + 1}`,
@@ -5023,7 +5611,7 @@ function normalizeImportedNode(node) {
     const outputType = normalized.params.outputType || normalized.outputs?.[0]?.dataType;
     const videoType = outputType === VIDEO_COMPRESSED_IMAGE_TYPE ? VIDEO_COMPRESSED_IMAGE_TYPE : VIDEO_RAW_IMAGE_TYPE;
     if (normalized.outputs?.[0]) {
-      normalized.outputs[0].name = normalizeTopic(normalized.outputs[0].name || 'frame');
+      normalized.outputs[0].name = portDisplayName(normalized.outputs[0].name || 'frame');
       normalized.outputs[0].dataType = videoType;
     }
     normalized.params = { ...(normalized.params || {}), outputType: videoType };
@@ -5062,6 +5650,10 @@ function normalizeTopic(name) {
   if (!topic) return '/topic';
   topic = topic.replace(/^\/+/, '');
   return `/${topic}`;
+}
+
+function portDisplayName(name) {
+  return String(name || '').trim().replace(/^\/+/, '') || 'topic';
 }
 
 function safeFileName(value) {

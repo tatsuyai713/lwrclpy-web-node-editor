@@ -10,7 +10,9 @@ ROS 2本体のインストールは不要です。`lwrclpy` が提供する `rcl
 - `Image File Input` で画像を読み込み、`sensor_msgs/msg/Image` として処理できます。
 - `Video File Input` で動画ファイルを選択し、Run中に `sensor_msgs/msg/Image` として流せます。
 - `Image Viewer` で画像を表示できます。
+- `String Viewer` で `std_msgs/msg/String` の最新内容を表示したり、LLMのストリーミング断片のような文字列を追記表示できます。
 - `Graph Viewer` で `std_msgs/msg/Float32` などの数値や、メッセージ内の数値フィールドをプロットできます。
+- `LLM Text` で `std_msgs/msg/String` のpromptをOllama/OpenAI/OpenAI互換API/LM Studioへ渡し、responseをtopicとして出力できます。
 - `Topic Input` / `Topic Output` で、グラフ外部とのtopic境界を表現できます。
 - カスタムノードごとに `requirements.txt` を持たせ、実行前に `.node_envs/<node-id>` のvenvへ依存をセットアップできます。
 - プロジェクト全体をJSONとしてSave/Loadできます。
@@ -172,7 +174,7 @@ dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe --server --host 127.0.0
 
 ## サンプルプロジェクト
 
-`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/`, `deep_learning/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
+`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/`, `deep_learning/`, `llm/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
 
 - `image_video/01_image_edge_topic_graph.json`: 画像入力、グレースケール化、エッジ抽出、画像表示、エッジ強度グラフ、topic出力。
 - `image_video/02_video_motion_topic_graph.json`: 動画フレーム入力、フレーム差分によるmotion mask、overlay表示、motion scoreグラフ、topic出力。
@@ -187,6 +189,12 @@ dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe --server --host 127.0.0
 - `custom_runtime/11_manual_subscriber_timer_sampler.json`: Subscriber callbackをOFFにし、Timer callbackから `latest()` で入力を読む例。
 - `image_video/12_image_view_save_topic_output.json`: 埋め込み画像を表示、保存、topic出力境界へ接続。
 - `deep_learning/13_mac_yolo_mps_detection_segmentation.json`: Video File Inputを2つのYOLOノードへ分岐し、検出とセグメンテーションの結果を表示。
+- `deep_learning/13_ultralytics_yolo_detection_segmentation.json`: Video File InputをUltralytics YOLOの検出・インスタンスセグメンテーションノードへ分岐して表示。
+- `deep_learning/14_ultralytics_yolo_pose_depth_anything.json`: Ultralytics YOLO PoseとDepth Anything V2の深度推定を表示。
+- `deep_learning/15_cuda_ultralytics_yolo_detection_segmentation.json`: CUDA環境向けのUltralytics YOLO検出・インスタンスセグメンテーション。
+- `deep_learning/16_tensorrt_ultralytics_yolo_engine_detection.json`: TensorRT engine向けのUltralytics YOLO検出。ノードの `weights` に `.engine` ファイルを指定します。
+- `deep_learning/17_sam_midas_segmentation_depth.json`: Segment Anythingの自動マスクとMiDaS深度推定を表示。標準SAM checkpointは未配置の場合に自動取得します。
+- `llm/18_ollama_llm_string_view.json`: promptを一度publishし、OllamaのLLM応答をString Viewerとtopic outputへ表示・出力します。Ollamaと `llama3.2` などのローカルモデルが必要です。
 
 詳しい分類は `samples/README.md` を参照してください。カスタムノードを含むサンプルは、実行時にノードごとのvenvとworker processを使います。
 
@@ -236,6 +244,7 @@ Callback Codeで使える主な変数は次の通りです。
 - `response`: service入力の場合のresponseです。
 - `state`: ノードごとに保持される辞書です。前フレームや累積値を保存できます。
 - `params`: ノードのパラメータ辞書です。
+- GUIで設定したパラメータ名が有効なPython識別子の場合、同名の変数としても参照できます。たとえば `pointsPerSide` は `params.get("pointsPerSide")` でも `pointsPerSide` でも使えます。`msg` や `publish` など実行スコープの予約名と衝突する名前は直接変数化されません。
 - `publish(output_id, value)`: 出力ポートへ値を出します。
 - `log(...)`: ノードログへ文字列を出します。
 
