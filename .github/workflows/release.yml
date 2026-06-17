@@ -42,6 +42,20 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      - name: Create Python virtual environment
+        if: runner.os != 'Windows'
+        run: |
+          python -m venv .ci-venv
+          echo "PYTHON_BIN=$PWD/.ci-venv/bin/python" >> "$GITHUB_ENV"
+          echo "$PWD/.ci-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Create Python virtual environment
+        if: runner.os == 'Windows'
+        run: |
+          python -m venv .ci-venv
+          "PYTHON_BIN=$env:GITHUB_WORKSPACE\.ci-venv\Scripts\python.exe" >> $env:GITHUB_ENV
+          "$env:GITHUB_WORKSPACE\.ci-venv\Scripts" >> $env:GITHUB_PATH
+
       - name: Install Linux build libraries
         if: runner.os == 'Linux'
         run: |
@@ -66,7 +80,14 @@ jobs:
             patchelf
 
       - name: Install lwrclpy
-        run: python scripts/install_lwrclpy.py
+        if: runner.os != 'Windows'
+        run: |
+          "$PYTHON_BIN" scripts/install_lwrclpy.py
+
+      - name: Install lwrclpy
+        if: runner.os == 'Windows'
+        run: |
+          & $env:PYTHON_BIN scripts\install_lwrclpy.py
 
       - name: Build Linux standalone app
         if: runner.os == 'Linux'
@@ -80,9 +101,7 @@ jobs:
 
       - name: Build Windows standalone app
         if: runner.os == 'Windows'
-        run: |
-          $env:PYTHON_BIN = (Get-Command python).Source
-          powershell -ExecutionPolicy Bypass -File scripts\build_windows_standalone.ps1
+        run: powershell -ExecutionPolicy Bypass -File scripts\build_windows_standalone.ps1
 
       - name: Package Linux app
         if: runner.os == 'Linux'
