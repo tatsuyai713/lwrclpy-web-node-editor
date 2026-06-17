@@ -42,6 +42,45 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      - name: Import macOS Developer ID certificate
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          if [[ -z "$MACOS_CERTIFICATE_P12_BASE64" ]]; then
+            echo "MACOS_CERTIFICATE_P12_BASE64 is not set; macOS app will be ad-hoc signed."
+            exit 0
+          fi
+          if [[ -z "$MACOS_CERTIFICATE_PASSWORD" ]]; then
+            echo "MACOS_CERTIFICATE_PASSWORD is required when MACOS_CERTIFICATE_P12_BASE64 is set." >&2
+            exit 1
+          fi
+
+          keychain_password="${MACOS_KEYCHAIN_PASSWORD:-$(openssl rand -hex 24)}"
+          keychain_path="$RUNNER_TEMP/build-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+
+          if ! printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate_path" 2>/dev/null; then
+            printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 -D > "$certificate_path"
+          fi
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | sed 's/[" ]//g')
+          security default-keychain -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+
+          identity="$(security find-identity -v -p codesigning "$keychain_path" | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
+          if [[ -z "$identity" ]]; then
+            echo "Developer ID Application identity not found in imported certificate." >&2
+            security find-identity -v -p codesigning "$keychain_path"
+            exit 1
+          fi
+          echo "MAC_CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
       - name: Create Python virtual environment
         if: runner.os != 'Windows'
         run: |
@@ -95,9 +134,38 @@ jobs:
 
       - name: Build macOS standalone app
         if: runner.os == 'macOS'
-        env:
-          MAC_CODESIGN_IDENTITY: "-"
         run: scripts/build_macos_standalone.sh
+
+      - name: Notarize macOS app
+        if: runner.os == 'macOS'
+        env:
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+        run: |
+          if [[ -z "${MAC_CODESIGN_IDENTITY:-}" || "$MAC_CODESIGN_IDENTITY" == "-" ]]; then
+            echo "Skipping notarization because the app is not Developer ID signed."
+            exit 0
+          fi
+          if [[ -z "$MACOS_NOTARY_KEY_ID" || -z "$MACOS_NOTARY_ISSUER_ID" || -z "$MACOS_NOTARY_KEY" ]]; then
+            echo "Skipping notarization because notary secrets are not fully configured."
+            exit 0
+          fi
+
+          notary_key_path="$RUNNER_TEMP/AuthKey_${MACOS_NOTARY_KEY_ID}.p8"
+          notary_zip_path="$RUNNER_TEMP/lwrclpy-web-node-editor-notary.zip"
+          printf '%s' "$MACOS_NOTARY_KEY" > "$notary_key_path"
+          perl -0pi -e 's/\\n/\n/g' "$notary_key_path"
+          xcrun notarytool store-credentials lwrclpy-web-node-editor-notary \
+            --key "$notary_key_path" \
+            --key-id "$MACOS_NOTARY_KEY_ID" \
+            --issuer "$MACOS_NOTARY_ISSUER_ID"
+          ditto -c -k --keepParent dist/lwrclpy-web-node-editor.app "$notary_zip_path"
+          xcrun notarytool submit "$notary_zip_path" \
+            --keychain-profile lwrclpy-web-node-editor-notary \
+            --wait
+          xcrun stapler staple dist/lwrclpy-web-node-editor.app
+          xcrun stapler validate dist/lwrclpy-web-node-editor.app
 
       - name: Build Windows standalone app
         if: runner.os == 'Windows'

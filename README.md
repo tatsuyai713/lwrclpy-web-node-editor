@@ -117,6 +117,23 @@ scripts/build_macos_standalone.sh
 
 必要な場合は `MAC_CODESIGN_ENTITLEMENTS=/path/to/entitlements.plist` も指定できます。
 
+GitHub Releaseなどで他のMacへ配布し、ダブルクリックで起動できる状態にするには、Apple Developer Programの `Developer ID Application` 証明書で署名し、Appleのnotarizationを通す必要があります。証明書なしのCIビルドはad-hoc署名になるため、Gatekeeperにより「開発元を検証できない」「壊れているため開けない」などとしてブロックされることがあります。
+
+Release CIでmacOSアプリを署名・notarizeする場合は、GitHub Secretsに次を設定します。
+
+- `MACOS_CERTIFICATE_P12_BASE64`: Developer ID Application証明書を書き出した `.p12` をbase64化した文字列。
+- `MACOS_CERTIFICATE_PASSWORD`: `.p12` の書き出しパスワード。
+- `MACOS_KEYCHAIN_PASSWORD`: CI一時keychain用パスワード。未設定ならCI内で自動生成されます。
+- `MACOS_NOTARY_KEY_ID`: App Store Connect API keyのKey ID。
+- `MACOS_NOTARY_ISSUER_ID`: App Store Connect API keyのIssuer ID。
+- `MACOS_NOTARY_KEY`: App Store Connect API keyの `.p8` ファイル本文。
+
+開発中に自分のMacだけで未notarizeのRelease zipを試す場合は、展開後に次でquarantine属性を外せます。ただし一般配布ではnotarizationを使ってください。
+
+```bash
+xattr -dr com.apple.quarantine dist/lwrclpy-web-node-editor.app
+```
+
 生成物の起動例:
 
 ```bash
