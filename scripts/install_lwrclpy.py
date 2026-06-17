@@ -41,6 +41,13 @@ def main() -> int:
                 candidates.append(asset)
             elif "aarch64" in name and machine in {"aarch64", "arm64"}:
                 candidates.append(asset)
+        elif system == "windows" and ("win" in name or "windows" in name):
+            if "amd64" in name or "x86_64" in name:
+                if machine in {"amd64", "x86_64"}:
+                    candidates.append(asset)
+            elif "arm64" in name or "aarch64" in name:
+                if machine in {"arm64", "aarch64"}:
+                    candidates.append(asset)
     if not candidates:
         print(f"No lwrclpy wheel found for Python {py_tag} on {platform.platform()}", file=sys.stderr)
         return 1
@@ -151,6 +158,13 @@ def install_to_target(target_dir: "Path | str") -> int:
                 candidates.append(asset)
             elif "aarch64" in name and machine in {"aarch64", "arm64"}:
                 candidates.append(asset)
+        elif system == "windows" and ("win" in name or "windows" in name):
+            if "amd64" in name or "x86_64" in name:
+                if machine in {"amd64", "x86_64"}:
+                    candidates.append(asset)
+            elif "arm64" in name or "aarch64" in name:
+                if machine in {"arm64", "aarch64"}:
+                    candidates.append(asset)
     if not candidates:
         print(f"No lwrclpy wheel found for Python {py_tag} on {platform.platform()}", file=sys.stderr)
         return 1

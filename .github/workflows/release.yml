@@ -1,0 +1,134 @@
+name: Release standalone apps
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact_label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact_label: ubuntu-x86_64
+            archive_name: lwrclpy-web-node-editor-ubuntu-x86_64.tar.gz
+            archive_path: dist/lwrclpy-web-node-editor-ubuntu-x86_64.tar.gz
+          - os: windows-2022
+            artifact_label: windows-x86_64
+            archive_name: lwrclpy-web-node-editor-windows-x86_64.zip
+            archive_path: dist/lwrclpy-web-node-editor-windows-x86_64.zip
+          - os: macos-14
+            artifact_label: macos-arm64
+            archive_name: lwrclpy-web-node-editor-macos-arm64.zip
+            archive_path: dist/lwrclpy-web-node-editor-macos-arm64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Linux build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            file \
+            libegl1 \
+            libgl1 \
+            libopengl0 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-shape0 \
+            libxcb-xinerama0 \
+            libxcb-xinput0 \
+            libxcb-xfixes0 \
+            libxcb1 \
+            patchelf
+
+      - name: Install lwrclpy
+        run: python scripts/install_lwrclpy.py
+
+      - name: Build Linux standalone app
+        if: runner.os == 'Linux'
+        run: scripts/build_linux_standalone.sh
+
+      - name: Build macOS standalone app
+        if: runner.os == 'macOS'
+        env:
+          MAC_CODESIGN_IDENTITY: "-"
+        run: scripts/build_macos_standalone.sh
+
+      - name: Build Windows standalone app
+        if: runner.os == 'Windows'
+        run: |
+          $env:PYTHON_BIN = (Get-Command python).Source
+          powershell -ExecutionPolicy Bypass -File scripts\build_windows_standalone.ps1
+
+      - name: Package Linux app
+        if: runner.os == 'Linux'
+        run: |
+          assets=(
+            lwrclpy-web-node-editor
+            lwrclpy-web-node-editor.AppDir
+            lwrclpy-web-node-editor-x86_64.run
+          )
+          for optional_asset in \
+            lwrclpy-web-node-editor-x86_64.AppImage \
+            lwrclpy-web-node-editor-x86_64.AppImage.runtime; do
+            if [[ -e "dist/$optional_asset" ]]; then
+              assets+=("$optional_asset")
+            fi
+          done
+          tar -C dist -czf "${{ matrix.archive_path }}" "${assets[@]}"
+
+      - name: Package macOS app
+        if: runner.os == 'macOS'
+        run: |
+          ditto -c -k --keepParent dist/lwrclpy-web-node-editor.app "${{ matrix.archive_path }}"
+
+      - name: Package Windows app
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist\lwrclpy-web-node-editor -DestinationPath "${{ matrix.archive_path }}" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_label }}
+          path: ${{ matrix.archive_path }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    runs-on: ubuntu-22.04
+    needs: build
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/**/*
+          generate_release_notes: true

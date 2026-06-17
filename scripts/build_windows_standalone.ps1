@@ -11,7 +11,7 @@ if (-not (Test-Path $PythonBin)) {
 }
 
 & $PythonBin -m pip install --upgrade pip
-& $PythonBin -m pip install pyinstaller pyside6 opencv-python-headless pillow
+& $PythonBin -m pip install --prefer-binary --progress-bar off -r requirements.txt pyinstaller PySide6
 
 $UvCandidates = @(
   (Join-Path (Split-Path $PythonBin -Parent) "uv.exe"),
