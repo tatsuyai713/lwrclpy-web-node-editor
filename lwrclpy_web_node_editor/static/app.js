@@ -1,8 +1,8 @@
-const UI_DISPLAY_FPS = 30;
-const UI_DISPLAY_FRAME_MS = 1000 / UI_DISPLAY_FPS;
-const UI_STATUS_FPS = 30;
-const UI_STATUS_POLL_MS = 1000 / UI_STATUS_FPS;
 const GRAPH_RUN_HZ = 60;
+const UI_DISPLAY_FPS = GRAPH_RUN_HZ;
+const UI_DISPLAY_FRAME_MS = 1000 / UI_DISPLAY_FPS;
+const UI_STATUS_FPS = 10;
+const UI_STATUS_POLL_MS = 1000 / UI_STATUS_FPS;
 const VIDEO_RAW_IMAGE_TYPE = 'sensor_msgs/msg/Image';
 const VIDEO_COMPRESSED_IMAGE_TYPE = 'sensor_msgs/msg/CompressedImage';
 const FRAME_FETCH_TIMEOUT_MS = 1200;
@@ -2449,7 +2449,7 @@ async function runGraph() {
   const startedAt = performance.now();
   state.lastRunAt = startedAt;
   if (!state.autoTimer) setExecutionStatus('tick', 'Running one tick');
-  const payload = graphRunPayload();
+  const payload = { ...graphRunPayload(), runHz: runLoopHz() };
   try {
     const data = await fetch('/api/run', {
       method: 'POST',
@@ -2536,7 +2536,7 @@ async function readyRun() {
   $('ready-model').classList.add('active');
   setExecutionStatus('preparing', 'Preparing node environments');
   try {
-    const payload = graphRunPayload();
+    const payload = { ...graphRunPayload(), runHz: runLoopHz() };
     const data = await fetch('/api/ready', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -3527,7 +3527,7 @@ function _detectVideoNativeFps(video, callback) {
 function captureVideoFrame(node, controller, options = {}) {
   const video = controller.video;
   if (!video.videoWidth || !video.videoHeight || video.readyState < 2 || video.seeking) return;
-  const frame = imageElementToMessage(video, 360, { includeDataUrl: options.includeDataUrl !== false });
+  const frame = imageElementToMessage(video, 0, { includeDataUrl: options.includeDataUrl !== false });
   node.params = {
     ...(node.params || {}),
     fileName: controller.fileName,
@@ -3720,7 +3720,7 @@ function handleVideoEnded(controller) {
 function imageElementToMessage(source, maxSide = 640, options = {}) {
   const naturalWidth = source.videoWidth || source.naturalWidth || source.width;
   const naturalHeight = source.videoHeight || source.naturalHeight || source.height;
-  const scale = Math.min(1, maxSide / Math.max(naturalWidth, naturalHeight));
+  const scale = maxSide > 0 ? Math.min(1, maxSide / Math.max(naturalWidth, naturalHeight)) : 1;
   const width = Math.max(1, Math.round(naturalWidth * scale));
   const height = Math.max(1, Math.round(naturalHeight * scale));
   const canvas = document.createElement('canvas');
@@ -4810,7 +4810,14 @@ class ExportedNode:
     self.last_inputs[input_id] = value
     queue = self.input_queues.setdefault(input_id, [])
     queue.append(value)
-    del queue[:-100]
+    limit = 2 if self._input_type(input_id).replace('.', '/') in {'sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage'} else 100
+    del queue[:-limit]
+
+  def _input_type(self, input_id):
+    for input_port in self.node_config.get('inputs', []):
+      if input_port['id'] == input_id:
+        return input_port.get('dataType', '')
+    return ''
 
   def _output_port(self, output_id):
     for output in self.node_config.get('outputs', []):
@@ -5218,7 +5225,14 @@ class ProjectNode:
         self.last_inputs[input_id] = value
         queue = self.input_queues.setdefault(input_id, [])
         queue.append(value)
-        del queue[:-100]
+        limit = 2 if self._input_type(input_id).replace('.', '/') in {'sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage'} else 100
+        del queue[:-limit]
+
+    def _input_type(self, input_id):
+        for input_port in self.node_config.get('inputs', []):
+            if input_port['id'] == input_id:
+                return input_port.get('dataType', '')
+        return ''
 
     def _output_port(self, output_id):
         for output in self.node_config.get("outputs", []):
@@ -5542,7 +5556,14 @@ class ExportedNode:
         self.last_inputs[input_id] = value
         queue = self.input_queues.setdefault(input_id, [])
         queue.append(value)
-        del queue[:-100]
+        limit = 2 if self._input_type(input_id).replace('.', '/') in {'sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage'} else 100
+        del queue[:-limit]
+
+    def _input_type(self, input_id):
+        for input_port in self.node_config.get('inputs', []):
+            if input_port['id'] == input_id:
+                return input_port.get('dataType', '')
+        return ''
 
     def _output_port(self, output_id):
         for output in self.node_config.get("outputs", []):

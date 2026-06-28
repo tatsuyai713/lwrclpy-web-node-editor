@@ -50,7 +50,7 @@ def topic_qos(data_type: str, depth: int = 1, reliable: bool = False) -> Any:
 
 
 def publisher_qos(data_type: str, external: bool = False) -> Any:
-    return topic_qos(data_type, depth=5 if external else 64, reliable=not external)
+    return topic_qos(data_type, depth=5, reliable=False)
 
 
 def subscriber_qos(data_type: str) -> Any:
@@ -303,8 +303,8 @@ class LwrclpyWorkerNode:
 
     def _input_queue_limit(self, input_port: dict[str, Any]) -> int:
         data_type = str(input_port.get("dataType") or "").replace(".", "/")
-        if input_port.get("receiveMode", "callback") != "callback" and data_type in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
-            return 1
+        if data_type in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
+            return 2
         return 100
 
     def _store_input(self, input_id: str, value: Any, queue_limit: int = 100) -> None:

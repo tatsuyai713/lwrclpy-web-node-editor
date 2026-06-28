@@ -74,7 +74,7 @@ def _discover_message_names(kind_dir: Path) -> set[str]:
 
 
 LWRCLPY_TYPE_TREE = discover_lwrclpy_types()
-GUI_DISPLAY_HZ = 30.0
+DEFAULT_RUN_HZ = 60.0
 LWRCLPY_INSTALL_MARKER = "github-latest-wheel"
 
 IMAGE_CROP_RESIZE_IMPORT_CODE = r'''
@@ -936,6 +936,9 @@ class CustomLwrclNodeInstance:
             "params": self.config.params,
             "statusPath": str(status_path),
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
+            "expectedSubscriptions": int(self.config.params.get("_expectedSubscriptions") or 0),
+            "expectedSubscriptionsByOutput": dict(self.config.params.get("_expectedSubscriptionsByOutput") or {}),
+            "discoveryTimeoutSec": 10.0,
         }
 
     def _ensure_dds_tap_worker(self) -> None:
@@ -997,6 +1000,7 @@ class CustomLwrclNodeInstance:
             str(self.config.params.get("clearToken") or ""),
             bool(self.config.params.get("_externalDdsCompatible")),
             "preview:raw:max640" if self.config.tool_type == "image_view" else "preview:jpeg",
+            self._run_hz(),
             self._dds_tap_transport(),
         )
 
@@ -1010,7 +1014,7 @@ class CustomLwrclNodeInstance:
             "topic": input_port.topics[0],
             "dataType": input_port.data_type,
             "windowSec": max(0.5, float(self.config.params.get("windowSec") or 5.0)),
-            "displayHz": GUI_DISPLAY_HZ,
+            "displayHz": self._run_hz(),
             "fieldPath": str(self.config.params.get("fieldPath") or "data"),
             "sampleLimit": int(self.config.params.get("sampleLimit") or 10000),
             "textMode": str(self.config.params.get("mode") or "replace"),
@@ -1197,6 +1201,15 @@ class CustomLwrclNodeInstance:
             )
         return env
 
+    def _run_hz(self) -> float:
+        try:
+            return max(1.0, min(float(self.config.params.get("_runHz") or DEFAULT_RUN_HZ), 120.0))
+        except Exception:
+            return DEFAULT_RUN_HZ
+
+    def _run_period(self) -> float:
+        return 1.0 / self._run_hz()
+
     def _video_worker_completed(self) -> bool:
         if bool(self.config.params.get("loop", True)):
             return False
@@ -1218,7 +1231,8 @@ class CustomLwrclNodeInstance:
             int(self.config.params.get("maxSide") or 0),
             self._video_frame_skip(),
             bool(self.config.params.get("_externalDdsCompatible")),
-            "preview:bmp:max640",
+            int(self.config.params.get("_expectedSubscriptions") or 0),
+            f"preview:raw:max640:{self._run_hz():g}hz",
             tuple((p.id, p.data_type, p.topics) for p in self.config.outputs),
         )
 
@@ -1234,13 +1248,15 @@ class CustomLwrclNodeInstance:
             "publishHz": max(0.01, float(self.config.params.get("publishHz") or 30.0)),
             "useSourceFps": True,
             "loop": bool(self.config.params.get("loop", True)),
-            "maxSide": int(self.config.params.get("maxSide") or 0),
+            "maxSide": 0,
             "frameSkip": self._video_frame_skip(),
             "statusPath": str(status_path),
             "framePath": str(frame_path),
             "enableDdsPublish": True,
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
-            "previewHz": GUI_DISPLAY_HZ,
+            "expectedSubscriptions": int(self.config.params.get("_expectedSubscriptions") or 0),
+            "discoveryTimeoutSec": 10.0,
+            "previewHz": self._run_hz(),
             "previewEncoding": "raw",
             "previewMaxSide": 640,
             "outputEncoding": "jpeg" if normalize_type(output.data_type) == "sensor_msgs/msg/CompressedImage" else "raw",
@@ -1312,39 +1328,39 @@ class CustomLwrclNodeInstance:
             try:
                 if tool == "video_file_input":
                     if self._uses_video_worker():
-                        period = 1.0 / GUI_DISPLAY_HZ
+                        period = self._run_period()
                         self._ensure_video_worker()
                         if self._should_update_background_view():
                             self._update_video_worker_view()
                     else:
-                        period = 1.0 / GUI_DISPLAY_HZ
+                        period = self._run_period()
                         self._execute_source_worker_status_once()
                 elif tool == "function_generator":
-                    period = 1.0 / GUI_DISPLAY_HZ
+                    period = self._run_period()
                     self._execute_source_worker_status_once()
                 elif tool == "image_file_input":
-                    period = 1.0 / GUI_DISPLAY_HZ
+                    period = self._run_period()
                     self._execute_source_worker_status_once()
                 elif tool == "image_view":
-                    period = 1.0 / GUI_DISPLAY_HZ
+                    period = self._run_period()
                     if self._uses_dds_tap_worker():
                         self._execute_image_view_worker_once()
                     else:
                         self._execute_image_view_once()
                 elif tool == "string_view":
-                    period = 1.0 / GUI_DISPLAY_HZ
+                    period = self._run_period()
                     if self._uses_dds_tap_worker():
                         self._execute_string_view_worker_once()
                     else:
                         self._execute_string_view_once()
                 elif tool == "topic_hz_monitor":
-                    period = 1.0 / GUI_DISPLAY_HZ
+                    period = self._run_period()
                     if self._uses_dds_tap_worker():
                         self._execute_topic_hz_monitor_worker_once()
                     else:
                         self._execute_topic_hz_monitor_once()
                 elif tool == "graph_view":
-                    period = 1.0 / GUI_DISPLAY_HZ
+                    period = self._run_period()
                     if self._uses_dds_tap_worker():
                         self._execute_graph_view_worker_once()
                     else:
@@ -1370,7 +1386,7 @@ class CustomLwrclNodeInstance:
                 next_at = time.time()
 
     def _should_update_background_view(self) -> bool:
-        hz = GUI_DISPLAY_HZ
+        hz = self._run_hz()
         now = time.time()
         next_at = float(self.state.get("background_view_next_update_at") or 0.0)
         if now < next_at:
@@ -1586,6 +1602,41 @@ class CustomLwrclNodeInstance:
             return data if isinstance(data, dict) else None
         except Exception:
             return None
+
+    def latest_worker_frame(self) -> dict[str, Any] | None:
+        if self.config.tool_type == "video_file_input":
+            status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.video.status.json"
+        elif self._uses_dds_tap_worker():
+            status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.tap.status.json"
+        else:
+            return None
+        if not status_path.exists():
+            return None
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(status, dict):
+            return None
+        frame_path = Path(str(status.get("framePath") or ""))
+        seq = int(status.get("frameSeq") or 0)
+        if seq <= 0 or not frame_path.is_file():
+            return None
+        width = int(status.get("width") or 0)
+        height = int(status.get("height") or 0)
+        preview_width = int(status.get("previewWidth") or width)
+        preview_height = int(status.get("previewHeight") or height)
+        encoding = str(status.get("frameEncoding") or status.get("encoding") or "rgb8").lower()
+        return {
+            "seq": seq,
+            "width": preview_width,
+            "height": preview_height,
+            "sourceWidth": width,
+            "sourceHeight": height,
+            "encoding": encoding,
+            "path": str(frame_path),
+            "updatedAt": time.time(),
+        }
 
     def _read_mcap_record_status(self) -> dict[str, Any] | None:
         status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.mcap_record.status.json"
@@ -2002,7 +2053,7 @@ class CustomLwrclNodeInstance:
         return {"kind": "image", "dataUrl": self._image_data_url(image), "status": status}
 
     def _should_update_image_view(self) -> bool:
-        hz = GUI_DISPLAY_HZ
+        hz = self._run_hz()
         now = time.time()
         next_at = float(self.state.get("image_view_next_update_at") or 0.0)
         if now < next_at:
@@ -2515,6 +2566,10 @@ class GraphRuntime:
             instance = self.instances.get(str(node_id))
             if instance is None:
                 return None
+            latest = instance.latest_worker_frame()
+            if latest is not None:
+                instance.state["image_view_frame"] = latest
+                return latest
             frame = instance.state.get("image_view_frame")
             return frame if isinstance(frame, dict) else None
 
@@ -2541,6 +2596,7 @@ class GraphRuntime:
     def _prepare_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.close()
         configs = [self._parse_node(node) for node in payload.get("nodes", [])]
+        self._apply_run_hz(configs, payload)
         links = [link for link in payload.get("links", []) if self._valid_link(link, configs)]
         self._apply_link_topics(configs, links)
         self._apply_builtin_param_topics(configs)
@@ -2577,6 +2633,7 @@ class GraphRuntime:
 
     def _run_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
         configs = [self._parse_node(node) for node in payload.get("nodes", [])]
+        self._apply_run_hz(configs, payload)
         links = [link for link in payload.get("links", []) if self._valid_link(link, configs)]
         self._apply_link_topics(configs, links)
         self._apply_builtin_param_topics(configs)
@@ -3316,6 +3373,8 @@ class GraphRuntime:
         }
         for node in nodes:
             node.params.pop("_externalDdsCompatible", None)
+            node.params.pop("_expectedSubscriptions", None)
+            node.params.pop("_expectedSubscriptionsByOutput", None)
         source_topics: dict[tuple[str, str], str] = {}
         for link in links:
             key = (str(link.get("fromNode")), str(link.get("fromPort")))
@@ -3335,6 +3394,7 @@ class GraphRuntime:
             for port in node.outputs
             if port.topics
         }
+        subscribers_by_output: dict[tuple[str, str], set[tuple[str, str]]] = {}
         external_topics: set[str] = {
             topic
             for node in nodes
@@ -3370,6 +3430,11 @@ class GraphRuntime:
                 continue
             output_topics.setdefault((str(link.get("fromNode")), str(link.get("fromPort"))), set()).add(topic)
             input_topics.setdefault((str(link.get("toNode")), str(link.get("toPort"))), set()).add(topic)
+            if dst is not None and dst.tool_type != "topic_output":
+                subscribers_by_output.setdefault((str(link.get("fromNode")), str(link.get("fromPort"))), set()).add((
+                    str(link.get("toNode")),
+                    str(link.get("toPort")),
+                ))
             if (src and src.tool_type == "topic_input") or (dst and dst.tool_type == "topic_output"):
                 external_topics.add(topic)
         for node in nodes:
@@ -3379,6 +3444,14 @@ class GraphRuntime:
             for port in node.outputs:
                 port.topic = ""
                 port.topics = tuple(sorted(output_topics.get((node.id, port.id), set())))
+            expected_by_output = {
+                port.id: len(subscribers_by_output.get((node.id, port.id), set()))
+                for port in node.outputs
+                if port.topics
+            }
+            if expected_by_output:
+                node.params["_expectedSubscriptionsByOutput"] = expected_by_output
+                node.params["_expectedSubscriptions"] = sum(expected_by_output.values())
         if external_topics:
             topics_by_node = {
                 node.id: {topic for port in [*node.inputs, *node.outputs] for topic in port.topics}
@@ -3414,6 +3487,14 @@ class GraphRuntime:
             topics = set(output.topics)
             topics.add(topic)
             output.topics = tuple(sorted(topics))
+
+    def _apply_run_hz(self, nodes: list[CustomLwrclNodeConfig], payload: dict[str, Any]) -> None:
+        try:
+            run_hz = max(1.0, min(float(payload.get("runHz") or DEFAULT_RUN_HZ), 120.0))
+        except Exception:
+            run_hz = DEFAULT_RUN_HZ
+        for node in nodes:
+            node.params["_runHz"] = run_hz
 
     def _link_topic(self, link: dict[str, Any], nodes: dict[str, CustomLwrclNodeConfig]) -> str:
         name = str(link.get("name") or "").strip()

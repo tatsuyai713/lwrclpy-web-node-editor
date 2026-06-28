@@ -39,7 +39,6 @@ WORKER_DIR = PROJECT_DIR / ".node_workers"
 APP_SETTINGS_DIR = PROJECT_DIR / ".app_settings"
 CUSTOM_NODE_DIR = APP_SETTINGS_DIR / "custom_nodes"
 SAMPLES_DIR = PROJECT_DIR / "samples"
-GUI_DISPLAY_HZ = 30.0
 GRAPH_RUN_HZ = 60.0
 LWRCLPY_RELEASES_API_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
 
@@ -1449,11 +1448,12 @@ class ContinuousGraphRunner:
         self._phase = "idle"
 
     def start(self, payload: dict) -> dict:
+        hz = max(1.0, min(float(payload.get("runHz") or GRAPH_RUN_HZ), 120.0))
         graph_payload = {
             "nodes": payload.get("nodes", []),
             "links": payload.get("links", []),
+            "runHz": hz,
         }
-        hz = GRAPH_RUN_HZ
         duration_value = payload.get("durationSec")
         duration_sec = None
         if duration_value is not None:
@@ -1487,13 +1487,16 @@ class ContinuousGraphRunner:
             return self.status()
 
     def update_payload(self, payload: dict) -> dict:
+        hz = max(1.0, min(float(payload.get("runHz") or self._hz), 120.0))
         graph_payload = {
             "nodes": payload.get("nodes", []),
             "links": payload.get("links", []),
+            "runHz": hz,
         }
         with self._lock:
             if self._running and not self._stopping:
                 self._payload = graph_payload
+                self._hz = hz
             return self.status()
 
     def update_node_params(self, payload: dict) -> dict:

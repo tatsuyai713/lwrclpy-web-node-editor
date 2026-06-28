@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 RUNNING = True
-GUI_DISPLAY_HZ = 30.0
+DEFAULT_DISPLAY_HZ = 60.0
 PREVIEW_JPEG_QUALITY = 60
 PREVIEW_JPEG_SUBSAMPLING = 2
 PREVIEW_MAX_SIDE = 640
@@ -156,7 +156,7 @@ class DdsTap:
         self.status_path = Path(config["statusPath"])
         self.frame_path = Path(config.get("framePath") or (str(self.status_path) + ".frame"))
         self.window_sec = max(0.5, float(config.get("windowSec") or 5.0))
-        self.display_hz = max(0.1, min(float(config.get("displayHz") or GUI_DISPLAY_HZ), 60.0))
+        self.display_hz = max(0.1, min(float(config.get("displayHz") or DEFAULT_DISPLAY_HZ), 120.0))
         self.preview_encoding = str(config.get("previewEncoding") or "raw").lower()
         self.preview_max_side = max(0, int(config.get("previewMaxSide") or PREVIEW_MAX_SIDE))
         self.field_path = str(config.get("fieldPath") or "data")
@@ -658,14 +658,9 @@ def _preview_image_bytes(width: int, height: int, rgb: bytes) -> tuple[bytes, st
         from PIL import Image
 
         image = Image.frombytes("RGB", (width, height), rgb)
-        if PREVIEW_MAX_SIDE > 0 and max(width, height) > PREVIEW_MAX_SIDE:
-            scale = PREVIEW_MAX_SIDE / max(width, height)
-            preview_width = max(1, int(round(width * scale)))
-            preview_height = max(1, int(round(height * scale)))
+        preview_width, preview_height = _scaled_preview_size(width, height, PREVIEW_MAX_SIDE)
+        if preview_width != width or preview_height != height:
             image = image.resize((preview_width, preview_height), Image.Resampling.BILINEAR)
-        else:
-            preview_width = width
-            preview_height = height
         out = io.BytesIO()
         image.save(out, format="JPEG", quality=PREVIEW_JPEG_QUALITY, subsampling=PREVIEW_JPEG_SUBSAMPLING)
         return out.getvalue(), "jpeg", preview_width, preview_height
@@ -728,11 +723,11 @@ def _resize_rgb_bytes(width: int, height: int, rgb: bytes, preview_width: int, p
         return None
 
 
-def _scaled_preview_size(width: int, height: int, max_side: int) -> tuple[int, int]:
-    if max_side <= 0 or max(width, height) <= max_side:
+def _scaled_preview_size(width: int, height: int, target_width: int) -> tuple[int, int]:
+    if target_width <= 0 or width <= target_width:
         return width, height
-    scale = max_side / max(width, height)
-    return max(1, int(round(width * scale))), max(1, int(round(height * scale)))
+    scale = target_width / width
+    return target_width, max(1, int(round(height * scale)))
 
 
 def main() -> int:

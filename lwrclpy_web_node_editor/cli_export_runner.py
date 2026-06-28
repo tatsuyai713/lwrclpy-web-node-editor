@@ -427,7 +427,9 @@ class RuntimeNode:
             self.last_inputs[input_port["id"]] = value
             queue = self.input_queues.setdefault(input_port["id"], [])
             queue.append(value)
-            del queue[:-100]
+            data_type = str(input_port.get("dataType") or "").replace(".", "/")
+            queue_limit = 2 if data_type in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"} else 100
+            del queue[:-queue_limit]
             if self.tool == "image_crop_resize":
                 out = self._crop_resize(value)
                 if out:
@@ -554,11 +556,6 @@ class RuntimeNode:
         for _ in range(frame_skip):
             self.video_capture.grab()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        max_side = int(self.params.get("maxSide") or 0)
-        if max_side > 0 and max(rgb.shape[:2]) > max_side:
-            h, w = rgb.shape[:2]
-            scale = max_side / max(h, w)
-            rgb = cv2.resize(rgb, (max(1, round(w * scale)), max(1, round(h * scale))), interpolation=cv2.INTER_AREA)
         rgb = rgb.copy()
         h, w = rgb.shape[:2]
         self.publish("out1", {"height": h, "width": w, "encoding": "rgb8", "is_bigendian": 0, "step": w * 3, "data": rgb.tobytes()})

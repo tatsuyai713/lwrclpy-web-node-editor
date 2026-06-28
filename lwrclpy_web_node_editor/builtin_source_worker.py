@@ -94,12 +94,12 @@ def _topic_qos(data_type: str, external: bool = False) -> Any:
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=5 if external else 64,
-            reliability=qos.ReliabilityPolicy.BEST_EFFORT if external else qos.ReliabilityPolicy.RELIABLE,
+            depth=5,
+            reliability=qos.ReliabilityPolicy.BEST_EFFORT,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
-        return 5 if external else 64
+        return 5
 
 
 def _set_field(msg: Any, key: str, value: Any) -> None:
@@ -166,6 +166,67 @@ def _write_status(path: Path, **values: Any) -> None:
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     tmp_path.write_text(json.dumps({"time": time.time(), **values}, ensure_ascii=False, default=str), encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _matched_subscriptions(publisher: Any) -> int:
+    if publisher is None:
+        return 0
+    try:
+        return int(publisher.get_subscription_count())
+    except Exception:
+        return 0
+
+
+def _wait_for_expected_subscriptions(config: dict[str, Any], publishers: dict[str, Any], status_path: Path) -> None:
+    expected_by_output = config.get("expectedSubscriptionsByOutput")
+    if not isinstance(expected_by_output, dict):
+        expected_total = max(0, int(config.get("expectedSubscriptions") or 0))
+        if expected_total <= 0:
+            return
+        expected_by_output = {next(iter(publishers), "out1"): expected_total}
+    expected = {
+        str(output_id): max(0, int(count or 0))
+        for output_id, count in expected_by_output.items()
+        if max(0, int(count or 0)) > 0 and str(output_id) in publishers
+    }
+    if not expected:
+        return
+    timeout_sec = max(0.0, float(config.get("discoveryTimeoutSec") or 3.0))
+    deadline = time.time() + timeout_sec
+    last_status = 0.0
+    while RUNNING and time.time() < deadline:
+        matched = {output_id: _matched_subscriptions(publishers[output_id]) for output_id in expected}
+        if all(matched[output_id] >= count for output_id, count in expected.items()):
+            return
+        now = time.time()
+        if now - last_status >= 0.25:
+            _write_status(
+                status_path,
+                running=True,
+                phase="waiting_subscribers",
+                published=0,
+                matchedSubscriptions=sum(matched.values()),
+                expectedSubscriptions=sum(expected.values()),
+                matchedSubscriptionsByOutput=matched,
+                expectedSubscriptionsByOutput=expected,
+                status="waiting for DDS subscribers",
+            )
+            last_status = now
+        time.sleep(0.05)
+    matched = {output_id: _matched_subscriptions(publishers[output_id]) for output_id in expected}
+    if any(matched[output_id] < count for output_id, count in expected.items()):
+        _write_status(
+            status_path,
+            running=True,
+            phase="subscriber_wait_timeout",
+            warning=f"only {sum(matched.values())}/{sum(expected.values())} subscriptions matched before publishing",
+            published=0,
+            matchedSubscriptions=sum(matched.values()),
+            expectedSubscriptions=sum(expected.values()),
+            matchedSubscriptionsByOutput=matched,
+            expectedSubscriptionsByOutput=expected,
+            status="subscriber wait timeout; publishing anyway",
+        )
 
 
 def _natural_sort_key(path: Path) -> list[object]:
@@ -605,10 +666,12 @@ def main() -> int:
                     str(topics[0]),
                     _topic_qos(data_type, bool(config.get("externalDdsCompatible"))),
                 )
+            _wait_for_expected_subscriptions(config, publishers, Path(config["statusPath"]))
             _run_mcap_input(config, publishers)
         else:
             data_type = str(config["dataType"])
             publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible"))))
+            _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
             if config.get("toolType") == "function_generator":
                 _run_function_generator(config, publisher)
             elif config.get("toolType") == "image_file_input":

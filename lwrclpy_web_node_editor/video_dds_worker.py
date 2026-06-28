@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 RUNNING = True
-GUI_DISPLAY_HZ = 30.0
+DEFAULT_PREVIEW_HZ = 60.0
 EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
     "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
     "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=true",
@@ -44,12 +44,12 @@ def _topic_qos(data_type: str, external: bool = False) -> Any:
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=5 if external else 64,
-            reliability=qos.ReliabilityPolicy.BEST_EFFORT if external else qos.ReliabilityPolicy.RELIABLE,
+            depth=5,
+            reliability=qos.ReliabilityPolicy.BEST_EFFORT,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
-        return 5 if external else 64
+        return 5
 
 
 def _set_field(msg: Any, key: str, value: Any) -> None:
@@ -182,7 +182,7 @@ class PreviewFrameWriter:
         if self.source_encoding == "jpeg":
             return frame, "jpeg", self.width, self.height
         if self.preview_encoding == "raw":
-            preview_width, preview_height = _scaled_size(self.width, self.height, self.preview_max_side)
+            preview_width, preview_height = _scaled_preview_size(self.width, self.height, self.preview_max_side)
             if preview_width == self.width and preview_height == self.height:
                 return frame, "rgb8", self.width, self.height
             resized = _resize_rgb_bytes(self.width, self.height, frame, preview_width, preview_height)
@@ -194,7 +194,7 @@ class PreviewFrameWriter:
                 from PIL import Image
 
                 image = Image.frombytes("RGB", (self.width, self.height), frame)
-                preview_width, preview_height = _scaled_size(self.width, self.height, self.preview_max_side)
+                preview_width, preview_height = _scaled_preview_size(self.width, self.height, self.preview_max_side)
                 if preview_width != self.width or preview_height != self.height:
                     image = image.resize((preview_width, preview_height), Image.Resampling.BILINEAR)
                 out = io.BytesIO()
@@ -202,7 +202,7 @@ class PreviewFrameWriter:
                 return out.getvalue(), "jpeg", preview_width, preview_height
             except Exception:
                 pass
-        preview_width, preview_height = _scaled_size(self.width, self.height, self.preview_max_side)
+        preview_width, preview_height = _scaled_preview_size(self.width, self.height, self.preview_max_side)
         if preview_width != self.width or preview_height != self.height:
             resized = _resize_rgb_bytes(self.width, self.height, frame, preview_width, preview_height)
             if resized is not None:
@@ -212,20 +212,21 @@ class PreviewFrameWriter:
 
 def _resize_rgb_bytes(width: int, height: int, rgb: bytes, preview_width: int, preview_height: int) -> bytes | None:
     try:
+        import cv2
+        import numpy as np
+
+        array = np.frombuffer(rgb, dtype=np.uint8).reshape((height, width, 3))
+        interpolation = cv2.INTER_AREA if preview_width < width or preview_height < height else cv2.INTER_LINEAR
+        resized = cv2.resize(array, (preview_width, preview_height), interpolation=interpolation)
+        return resized.tobytes()
+    except Exception:
+        pass
+    try:
         from PIL import Image
 
         image = Image.frombytes("RGB", (width, height), rgb)
         image = image.resize((preview_width, preview_height), Image.Resampling.BILINEAR)
         return image.tobytes()
-    except Exception:
-        pass
-    try:
-        import cv2
-        import numpy as np
-
-        array = np.frombuffer(rgb, dtype=np.uint8).reshape((height, width, 3))
-        resized = cv2.resize(array, (preview_width, preview_height), interpolation=cv2.INTER_AREA)
-        return resized.tobytes()
     except Exception:
         pass
     try:
@@ -321,6 +322,13 @@ def _scaled_size(width: int, height: int, max_side: int) -> tuple[int, int]:
     return out_w, out_h
 
 
+def _scaled_preview_size(width: int, height: int, target_width: int) -> tuple[int, int]:
+    if target_width <= 0 or width <= target_width:
+        return width, height
+    scale = target_width / width
+    return target_width, max(1, int(round(height * scale)))
+
+
 def _read_rgb_frame(capture: Any, width: int, height: int) -> bytes | None:
     import cv2
 
@@ -361,16 +369,20 @@ def main() -> int:
     enable_dds_publish = bool(config.get("enableDdsPublish", False))
     use_source_fps = bool(config.get("useSourceFps", False))
     publish_hz = max(0.01, float(config.get("publishHz") or 30.0))
+    expected_subscriptions = max(0, int(config.get("expectedSubscriptions") or 0))
+    discovery_timeout_sec = max(0.0, float(config.get("discoveryTimeoutSec") or 3.0))
     output_encoding = str(config.get("outputEncoding") or "raw").lower()
     if output_encoding not in {"raw", "jpeg"}:
         output_encoding = "raw"
     loop = bool(config.get("loop", True))
-    max_side = int(config.get("maxSide") or 0)
     try:
         frame_skip = max(0, int(float(config.get("frameSkip") or 0)))
     except Exception:
         frame_skip = 0
-    preview_hz = GUI_DISPLAY_HZ
+    try:
+        preview_hz = max(0.0, min(float(config.get("previewHz", DEFAULT_PREVIEW_HZ)), 120.0))
+    except Exception:
+        preview_hz = DEFAULT_PREVIEW_HZ
     preview_encoding = str(config.get("previewEncoding") or "jpeg").lower()
     if preview_encoding not in {"jpeg", "bmp", "raw"}:
         preview_encoding = "jpeg"
@@ -383,7 +395,7 @@ def main() -> int:
         if not video_path.is_file():
             raise RuntimeError(f"video file not found: {video_path}")
         src_w, src_h, src_fps = _probe(video_path)
-        width, height = _scaled_size(src_w, src_h, max_side)
+        width, height = src_w, src_h
         if use_source_fps and src_fps > 0:
             publish_hz = max(0.01, src_fps / (frame_skip + 1))
     except Exception as exc:
@@ -424,11 +436,46 @@ def main() -> int:
         frameSkip=frame_skip,
         published=0,
         matchedSubscriptions=_matched_subscriptions(publisher),
+        expectedSubscriptions=expected_subscriptions,
     )
-    if publisher is not None:
-        discovery_deadline = time.time() + 3.0
-        while RUNNING and time.time() < discovery_deadline and _matched_subscriptions(publisher) <= 0:
+    if publisher is not None and expected_subscriptions > 0:
+        discovery_deadline = time.time() + discovery_timeout_sec
+        last_discovery_status = 0.0
+        while RUNNING and time.time() < discovery_deadline and _matched_subscriptions(publisher) < expected_subscriptions:
+            now = time.time()
+            if now - last_discovery_status >= 0.25:
+                _write_status(
+                    status_path,
+                    running=True,
+                    phase="waiting_subscribers",
+                    error="",
+                    width=width,
+                    height=height,
+                    encoding=output_encoding,
+                    sourceFps=src_fps,
+                    frameSkip=frame_skip,
+                    published=0,
+                    matchedSubscriptions=_matched_subscriptions(publisher),
+                    expectedSubscriptions=expected_subscriptions,
+                )
+                last_discovery_status = now
             time.sleep(0.05)
+        if _matched_subscriptions(publisher) < expected_subscriptions:
+            _write_status(
+                status_path,
+                running=True,
+                phase="subscriber_wait_timeout",
+                warning=f"only {_matched_subscriptions(publisher)}/{expected_subscriptions} subscriptions matched before publishing",
+                error="",
+                width=width,
+                height=height,
+                encoding=output_encoding,
+                sourceFps=src_fps,
+                frameSkip=frame_skip,
+                published=0,
+                matchedSubscriptions=_matched_subscriptions(publisher),
+                expectedSubscriptions=expected_subscriptions,
+            )
     started_perf = time.perf_counter()
 
     try:
@@ -473,7 +520,8 @@ def main() -> int:
                                 "frameSkip": frame_skip,
                                 "published": count,
                                 "actualHz": actual_hz,
-                                "matchedSubscriptions": _matched_subscriptions(publisher)
+                                "matchedSubscriptions": _matched_subscriptions(publisher),
+                                "expectedSubscriptions": expected_subscriptions,
                             },
                         )
                         next_preview_at = now + (1.0 / preview_hz)
@@ -492,9 +540,11 @@ def main() -> int:
                             published=count,
                             actualHz=actual_hz,
                             matchedSubscriptions=_matched_subscriptions(publisher),
+                            expectedSubscriptions=expected_subscriptions,
                             **(preview_writer.status_snapshot() if preview_writer is not None else {}),
                         )
-                        next_status_at = now + (1.0 / GUI_DISPLAY_HZ)
+                        status_hz = preview_hz if preview_hz > 0 else DEFAULT_PREVIEW_HZ
+                        next_status_at = now + (1.0 / status_hz)
                     for _ in range(frame_skip):
                         if not capture.grab():
                             break
