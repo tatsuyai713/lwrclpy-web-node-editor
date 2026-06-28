@@ -675,7 +675,7 @@ class CustomLwrclNodeInstance:
             if not self.view:
                 self.view = {"kind": "text", "status": self._background_starting_status()}
             return True
-        if tool in {"function_generator", "image_file_input", "video_file_input", "image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save", "mcap_record"}:
+        if tool in {"mcap_record"}:
             self.last_outputs.clear()
             self.view = {"kind": "text", "status": "DDS topic is required; node execution is isolated in worker processes"}
             return True
@@ -2992,6 +2992,15 @@ class GraphRuntime:
             instance.env_status = "lwrclpy installer not found"
             instance.log(instance.env_status)
             return False
+        instance.env_status = "installing lwrclpy"
+        try:
+            subprocess.run([str(python_bin), str(installer)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
+            return True
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()[-1:]
+            instance.env_status = "lwrclpy install failed: " + (detail[0] if detail else str(exc))
+            instance.log(instance.env_status)
+            return False
 
     def _lwrclpy_install_marker_for(self, config: CustomLwrclNodeConfig) -> str:
         local_wheel = local_lwrclpy_wheel()
@@ -3098,15 +3107,6 @@ class GraphRuntime:
         if machine in {"x86_64", "amd64"} and any(token in lowered for token in ("x86_64", "amd64")):
             score += 3
         return score, name
-        instance.env_status = "installing lwrclpy"
-        try:
-            subprocess.run([str(python_bin), str(installer)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
-            return True
-        except subprocess.CalledProcessError as exc:
-            detail = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()[-1:]
-            instance.env_status = "lwrclpy install failed: " + (detail[0] if detail else str(exc))
-            instance.log(instance.env_status)
-            return False
 
     def _ensure_worker_process(self, config: CustomLwrclNodeConfig, instance: CustomLwrclNodeInstance, python_bin: Path) -> bool:
         signature = self._worker_signature(config)
