@@ -303,6 +303,7 @@ function bindToolbar() {
   $('load-project').onchange = loadProject;
   $('load-sample-project').onclick = openSampleProjectDialog;
   $('export-ros2-package').onclick = exportRos2Package;
+  $('export-cli-package').onclick = exportCliPackage;
   $('view-editor').onclick = () => setActiveView('editor');
   $('view-custom-nodes').onclick = () => setActiveView('custom-nodes');
   $('custom-node-import').onchange = importCustomNodeJson;
@@ -4206,15 +4207,56 @@ async function applyProjectPayload(imported, fileName = 'lwrclpy_web_node_projec
   scheduleRun();
 }
 
-function exportRos2Package() {
-  const config = projectRos2PackageConfig();
-  if (!config.nodes.length) {
-    alert('No custom ROS 2 nodes to export. Built-in browser tool nodes are not exported.');
-    return;
+async function exportRos2Package() {
+  try {
+    const response = await fetch('/api/export-ros2-package', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...projectConfig(), fileName: state.projectFileName || '' }),
+    });
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try {
+        const data = await response.json();
+        message = data.error || message;
+      } catch {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match ? match[1] : `${projectExportBaseName()}_ros2_package.zip`;
+    downloadBlob(filename, blob, 'application/zip');
+    setExecutionStatus('idle', `Downloaded ${filename}`);
+  } catch (err) {
+    setExecutionStatus('error', `ROS 2 export failed: ${err.message}`);
   }
-  const files = renderRos2PackageFiles(config);
-  const zip = makeZip(files);
-  downloadBlob(`${config.projectName}_ros2_packages.zip`, zip, 'application/zip');
+}
+
+async function exportCliPackage() {
+  try {
+    const response = await fetch('/api/export-cli', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...projectConfig(), fileName: state.projectFileName || '' }),
+    });
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try {
+        const data = await response.json();
+        message = data.error || message;
+      } catch {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match ? match[1] : `${projectExportBaseName()}_cli_export.zip`;
+    downloadBlob(filename, blob, 'application/zip');
+    setExecutionStatus('idle', `Downloaded ${filename}`);
+  } catch (err) {
+    setExecutionStatus('error', `CLI export failed: ${err.message}`);
+  }
 }
 
 function exportPythonNode(node) {

@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Any
 
 RUNNING = True
-EXTERNAL_FASTDDS_TRANSPORTS = "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=false"
+EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
+    "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
+    "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=true",
+)
 BUILTIN_TYPE_NAMES = {
     "bool", "byte", "char", "float32", "float64", "int8", "uint8", "int16", "uint16",
     "int32", "uint32", "int64", "uint64", "string", "wstring", "time", "duration",

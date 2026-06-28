@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Any
 
 RUNNING = True
-EXTERNAL_FASTDDS_TRANSPORTS = "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=false"
+EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
+    "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
+    "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=true",
+)
 
 
 def _configure_fastdds_transport(config: dict[str, Any]) -> None:
@@ -83,7 +86,7 @@ def _import_type_class(type_name: str):
     return getattr(module, name)
 
 
-def _topic_qos(data_type: str) -> Any:
+def _topic_qos(data_type: str, external: bool = False) -> Any:
     if str(data_type).replace(".", "/") not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
         return 10
     try:
@@ -91,12 +94,12 @@ def _topic_qos(data_type: str) -> Any:
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=64,
-            reliability=qos.ReliabilityPolicy.RELIABLE,
+            depth=5 if external else 64,
+            reliability=qos.ReliabilityPolicy.BEST_EFFORT if external else qos.ReliabilityPolicy.RELIABLE,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
-        return 64
+        return 5 if external else 64
 
 
 def _set_field(msg: Any, key: str, value: Any) -> None:
@@ -600,12 +603,12 @@ def main() -> int:
                 publishers[str(output.get("id"))] = node.create_publisher(
                     _import_type_class(data_type),
                     str(topics[0]),
-                    _topic_qos(data_type),
+                    _topic_qos(data_type, bool(config.get("externalDdsCompatible"))),
                 )
             _run_mcap_input(config, publishers)
         else:
             data_type = str(config["dataType"])
-            publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type))
+            publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible"))))
             if config.get("toolType") == "function_generator":
                 _run_function_generator(config, publisher)
             elif config.get("toolType") == "image_file_input":

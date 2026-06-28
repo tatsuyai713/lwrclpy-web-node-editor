@@ -12,7 +12,10 @@ from typing import Any
 
 
 os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
-EXTERNAL_FASTDDS_TRANSPORTS = "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=false"
+EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
+    "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
+    "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=true",
+)
 
 
 def configure_fastdds_transport(config: dict[str, Any]) -> None:
@@ -46,8 +49,8 @@ def topic_qos(data_type: str, depth: int = 1, reliable: bool = False) -> Any:
         return depth
 
 
-def publisher_qos(data_type: str) -> Any:
-    return topic_qos(data_type, depth=64, reliable=True)
+def publisher_qos(data_type: str, external: bool = False) -> Any:
+    return topic_qos(data_type, depth=5 if external else 64, reliable=not external)
 
 
 def subscriber_qos(data_type: str) -> Any:
@@ -86,7 +89,13 @@ class LwrclpyWorkerNode:
             type_cls = import_type_class(output["dataType"])
             for topic in self.port_topics.get("outputs", {}).get(output["id"], []):
                 if split_kind(output["dataType"]) == "msg":
-                    self.publishers.setdefault(output["id"], []).append(self.node.create_publisher(type_cls, topic, publisher_qos(output["dataType"])))
+                    self.publishers.setdefault(output["id"], []).append(
+                        self.node.create_publisher(
+                            type_cls,
+                            topic,
+                            publisher_qos(output["dataType"], bool(self.config.get("externalDdsCompatible"))),
+                        )
+                    )
                 else:
                     self.clients.setdefault(output["id"], []).append(self.node.create_client(type_cls, topic))
         for input_port in self.node_config.get("inputs", []):

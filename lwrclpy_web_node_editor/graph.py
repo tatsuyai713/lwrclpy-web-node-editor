@@ -86,7 +86,10 @@ def ros_image_to_bgr(img):
     data = img.get("data") or []
     fmt = str(img.get("format") or "").lower()
     if fmt or not img.get("height"):
-        arr = np.frombuffer(data, dtype=np.uint8)
+        try:
+            arr = np.frombuffer(data, dtype=np.uint8)
+        except Exception:
+            arr = np.asarray(data, dtype=np.uint8)
         if arr.size <= 0:
             return None
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -96,7 +99,10 @@ def ros_image_to_bgr(img):
     if h <= 0 or w <= 0:
         return None
     channels = 1 if enc == "mono8" else (4 if enc in {"rgba8", "bgra8"} else 3)
-    arr = np.frombuffer(data, dtype=np.uint8)
+    try:
+        arr = np.frombuffer(data, dtype=np.uint8)
+    except Exception:
+        arr = np.asarray(data, dtype=np.uint8)
     needed = h * w * channels
     if arr.size < needed:
         return None
@@ -983,7 +989,7 @@ class CustomLwrclNodeInstance:
             int(float(self.config.params.get("maxChars") or 20000)),
             str(self.config.params.get("clearToken") or ""),
             bool(self.config.params.get("_externalDdsCompatible")),
-            "preview:bmp:max640" if self.config.tool_type == "image_view" else "preview:jpeg",
+            "preview:raw:max640" if self.config.tool_type == "image_view" else "preview:jpeg",
             self._dds_tap_transport(),
         )
 
@@ -1009,7 +1015,7 @@ class CustomLwrclNodeInstance:
             "framePath": str(frame_path),
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
             "transport": self._dds_tap_transport(),
-            "previewEncoding": "bmp" if self.config.tool_type == "image_view" else "jpeg",
+            "previewEncoding": "raw" if self.config.tool_type == "image_view" else "jpeg",
             "previewMaxSide": 640,
         }
 
@@ -1228,7 +1234,7 @@ class CustomLwrclNodeInstance:
             "enableDdsPublish": True,
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
             "previewHz": GUI_DISPLAY_HZ,
-            "previewEncoding": "bmp",
+            "previewEncoding": "raw",
             "previewMaxSide": 640,
             "outputEncoding": "jpeg" if normalize_type(output.data_type) == "sensor_msgs/msg/CompressedImage" else "raw",
         }
@@ -2632,7 +2638,7 @@ class GraphRuntime:
         }
 
     def _config_needs_node_environment(self, config: CustomLwrclNodeConfig) -> bool:
-        return not config.tool_type or config.tool_type in {"llm_text"}
+        return not config.tool_type or config.tool_type in {"image_crop_resize", "llm_text"}
 
     def _config_runs_in_background(self, config: CustomLwrclNodeConfig) -> bool:
         tool_type = config.tool_type
@@ -2683,11 +2689,6 @@ class GraphRuntime:
                 instance.env_site_packages = self._site_packages_for(env_root)
             instance.env_status = "ready (built-in venv)" if config.tool_type else "ready"
             return True
-        uv = self._uv_command()
-        if not uv:
-            instance.env_status = "uv command not found"
-            instance.log(instance.env_status)
-            return False
         requested_python = self._python_for_config(config)
         expected_python = self._python_runtime_signature(requested_python, desired_python)
         try:
@@ -2701,14 +2702,14 @@ class GraphRuntime:
             env_root.mkdir(parents=True, exist_ok=True)
             if not python_bin.exists():
                 instance.env_status = "creating venv"
-                subprocess.run([uv, "venv", "--clear", "--python", requested_python, str(env_root)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
+                self._create_node_venv(env_root, requested_python)
                 python_marker.write_text(self._python_runtime_signature(requested_python, desired_python), encoding="utf-8")
             req_file.write_text(req_text, encoding="utf-8")
             current_hash = hash_file.read_text(encoding="utf-8") if hash_file.exists() else ""
             if current_hash != req_hash:
                 instance.env_status = "installing requirements"
                 if req_text.strip():
-                    subprocess.run([uv, "pip", "install", "--python", str(python_bin), "-r", str(req_file)], cwd=Path.cwd(), check=True, capture_output=True, text=True)
+                    self._install_node_requirements(python_bin, req_file)
                 hash_file.write_text(req_hash, encoding="utf-8")
             instance.env_path = env_root
             instance.env_python_bin = python_bin
@@ -2729,6 +2730,60 @@ class GraphRuntime:
             instance.env_status = f"setup failed: {exc}"
             instance.log(instance.env_status)
             return False
+
+    def _create_node_venv(self, env_root: Path, requested_python: str) -> None:
+        uv = self._uv_command()
+        if uv:
+            subprocess.run(
+                [uv, "venv", "--clear", "--python", requested_python, str(env_root)],
+                cwd=Path.cwd(),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return
+        subprocess.run(
+            [requested_python, "-m", "venv", str(env_root)],
+            cwd=Path.cwd(),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def _install_node_requirements(self, python_bin: Path, req_file: Path) -> None:
+        uv = self._uv_command()
+        if uv:
+            subprocess.run(
+                [uv, "pip", "install", "--python", str(python_bin), "-r", str(req_file)],
+                cwd=Path.cwd(),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return
+        try:
+            subprocess.run(
+                [str(python_bin), "-m", "pip", "--version"],
+                cwd=Path.cwd(),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError:
+            subprocess.run(
+                [str(python_bin), "-m", "ensurepip", "--upgrade"],
+                cwd=Path.cwd(),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            [str(python_bin), "-m", "pip", "install", "-r", str(req_file)],
+            cwd=Path.cwd(),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
     def _real_python(self) -> str:
         """Return a path to a genuine CPython interpreter.

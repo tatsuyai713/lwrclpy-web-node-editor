@@ -12,7 +12,10 @@ from typing import Any
 
 RUNNING = True
 GUI_DISPLAY_HZ = 30.0
-EXTERNAL_FASTDDS_TRANSPORTS = "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=false"
+EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
+    "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
+    "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=true",
+)
 
 
 def _configure_fastdds_transport(config: dict[str, Any]) -> None:
@@ -33,7 +36,7 @@ def _import_type_class(type_name: str):
     return getattr(module, name)
 
 
-def _topic_qos(data_type: str) -> Any:
+def _topic_qos(data_type: str, external: bool = False) -> Any:
     if str(data_type).replace(".", "/") not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
         return 10
     try:
@@ -41,12 +44,12 @@ def _topic_qos(data_type: str) -> Any:
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
-            depth=64,
-            reliability=qos.ReliabilityPolicy.RELIABLE,
+            depth=5 if external else 64,
+            reliability=qos.ReliabilityPolicy.BEST_EFFORT if external else qos.ReliabilityPolicy.RELIABLE,
             durability=qos.DurabilityPolicy.VOLATILE,
         )
     except Exception:
-        return 64
+        return 5 if external else 64
 
 
 def _set_field(msg: Any, key: str, value: Any) -> None:
@@ -400,7 +403,7 @@ def main() -> int:
         _write_status(status_path, running=True, phase="create_node", error="", videoPath=str(video_path))
         node = rclpy.create_node(f"ipn_video_dds_{config.get('nodeId', 'video')}".replace("-", "_")[:80])
         _write_status(status_path, running=True, phase="create_publisher", error="", videoPath=str(video_path))
-        publisher = node.create_publisher(_import_type_class(type_name), topic, _topic_qos(type_name))
+        publisher = node.create_publisher(_import_type_class(type_name), topic, _topic_qos(type_name, bool(config.get("externalDdsCompatible"))))
     count = 0
     started_perf = time.perf_counter()
     first_publish_perf: float | None = None
@@ -430,25 +433,25 @@ def main() -> int:
 
     try:
         period_sec = 1.0 / publish_hz
-        schedule_started = time.perf_counter()
+        next_publish_at = time.perf_counter()
         while RUNNING:
             capture = _open_capture(video_path)
             try:
                 while RUNNING:
-                    target_publish_at = schedule_started + (count * period_sec)
+                    delay = next_publish_at - time.perf_counter()
+                    while RUNNING and delay > 0:
+                        time.sleep(min(delay, 0.001))
+                        delay = next_publish_at - time.perf_counter()
                     rgb_frame = _read_rgb_frame(capture, width, height)
                     if rgb_frame is None:
                         break
                     frame = _jpeg_from_rgb(width, height, rgb_frame) if output_encoding == "jpeg" else rgb_frame
-                    delay = target_publish_at - time.perf_counter()
-                    while RUNNING and delay > 0:
-                        time.sleep(min(delay, 0.001))
-                        delay = target_publish_at - time.perf_counter()
-                    if delay < -period_sec:
-                        schedule_started = time.perf_counter() - (count * period_sec)
                     if publisher is not None:
                         _publish_frame(publisher, type_name, width, height, frame, output_encoding)
                     published_at = time.perf_counter()
+                    next_publish_at += period_sec
+                    if next_publish_at < published_at:
+                        next_publish_at = published_at + period_sec
                     if first_publish_perf is None:
                         first_publish_perf = published_at
                     last_publish_perf = published_at

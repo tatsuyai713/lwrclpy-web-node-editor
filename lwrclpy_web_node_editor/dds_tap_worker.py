@@ -18,7 +18,10 @@ PREVIEW_JPEG_QUALITY = 60
 PREVIEW_JPEG_SUBSAMPLING = 2
 PREVIEW_MAX_SIDE = 640
 RAW_PREVIEW_ENCODINGS = {"rgb8", "bgr8", "mono8", "8uc1"}
-EXTERNAL_FASTDDS_TRANSPORTS = "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=false"
+EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
+    "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
+    "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=true",
+)
 
 
 def _configure_fastdds_transport(config: dict[str, Any]) -> None:
@@ -241,6 +244,8 @@ class DdsTap:
         next_frame_at = 0.0
         status_hz = self.display_hz
         status_period = (1.0 / status_hz) if self.mode in {"graph", "hz", "text"} else 0.25
+        frame_period = 1.0 / self.display_hz
+        frame_retry_period = min(0.002, frame_period / 4.0)
         while RUNNING:
             try:
                 now = time.time() if self.mode == "graph" else time.perf_counter()
@@ -248,8 +253,12 @@ class DdsTap:
                     self._write_status(now)
                     next_at = now + status_period
                 if self.mode == "image" and now >= next_frame_at:
-                    self._write_latest_frame()
-                    next_frame_at = now + (1.0 / self.display_hz)
+                    if self._write_latest_frame():
+                        next_frame_at += frame_period
+                        if next_frame_at <= now:
+                            next_frame_at = now + frame_period
+                    else:
+                        next_frame_at = now + frame_retry_period
                 if self.mode == "save":
                     self._save_latest_image()
                 time.sleep(0.002)
@@ -360,17 +369,18 @@ class DdsTap:
             self._times = [t for t in self._times if t >= cutoff]
             return list(self._times), self._latest_seq
 
-    def _write_latest_frame(self) -> None:
+    def _write_latest_frame(self) -> bool:
         self._ensure_frame_writer()
         with self._lock:
             if self._latest_msg is None or self._latest_seq == self._written_seq:
-                return
+                return False
             msg = self._latest_msg
             seq = self._latest_seq
             self._written_seq = seq
         with self._frame_condition:
             self._frame_item = (seq, msg)
             self._frame_condition.notify()
+        return True
 
     def _ensure_frame_writer(self) -> None:
         if self._frame_writer_thread is not None:
@@ -623,8 +633,8 @@ def _bmp_bytes(width: int, height: int, rgb: Any) -> bytes:
     ])
 
 
-def _rgb_preview_bytes(data: Any, encoding: str) -> bytes:
-    raw = data if isinstance(data, bytes) else bytes(data)
+def _rgb_preview_bytes(data: Any, encoding: str) -> Any:
+    raw = data if isinstance(data, (bytes, bytearray, memoryview)) else bytes(data)
     encoding = encoding.lower()
     if encoding == "rgb8":
         return raw
@@ -686,20 +696,20 @@ def _bmp_preview_image_bytes(width: int, height: int, rgb: bytes, max_side: int)
 
 def _resize_rgb_bytes(width: int, height: int, rgb: bytes, preview_width: int, preview_height: int) -> bytes | None:
     try:
-        from PIL import Image
-
-        image = Image.frombytes("RGB", (width, height), rgb)
-        image = image.resize((preview_width, preview_height), Image.Resampling.BILINEAR)
-        return image.tobytes()
-    except Exception:
-        pass
-    try:
         import cv2
         import numpy as np
 
         array = np.frombuffer(rgb, dtype=np.uint8).reshape((height, width, 3))
         resized = cv2.resize(array, (preview_width, preview_height), interpolation=cv2.INTER_AREA)
         return resized.tobytes()
+    except Exception:
+        pass
+    try:
+        from PIL import Image
+
+        image = Image.frombytes("RGB", (width, height), rgb)
+        image = image.resize((preview_width, preview_height), Image.Resampling.BILINEAR)
+        return image.tobytes()
     except Exception:
         pass
     try:

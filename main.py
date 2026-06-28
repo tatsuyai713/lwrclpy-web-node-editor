@@ -274,23 +274,28 @@ if __name__ == "__main__":
         else:
             _configure_startup_local_lwrclpy(argv)
             _prepare_standalone_runtime()
-            # Import server lazily, AFTER auto-update has installed lwrclpy into
-            # lwrclpy_site and it has been prepended to sys.path. This ensures
-            # that fastdds_python and other native extensions bundled inside the
-            # latest lwrclpy wheel are importable when graph.py is first loaded.
-            from lwrclpy_web_node_editor import server  # noqa: E402
-            if argv and argv[0] == "--desktop":
-                from lwrclpy_web_node_editor import desktop_app
+            if argv and argv[0] == "--cli-run":
+                from lwrclpy_web_node_editor import cli_run
 
-                exit_code = int(desktop_app.main(argv[1:]))
-            elif argv and argv[0] == "--server":
-                exit_code = int(server.main(argv[1:]))
-            elif getattr(sys, "frozen", False) and not argv:
-                from lwrclpy_web_node_editor import desktop_app
-
-                exit_code = int(desktop_app.main([]))
+                exit_code = int(cli_run.main(argv[1:]))
             else:
-                exit_code = int(server.main(argv))
+                # Import server lazily, AFTER auto-update has installed lwrclpy into
+                # lwrclpy_site and it has been prepended to sys.path. This ensures
+                # that fastdds_python and other native extensions bundled inside the
+                # latest lwrclpy wheel are importable when graph.py is first loaded.
+                from lwrclpy_web_node_editor import server  # noqa: E402
+                if argv and argv[0] == "--desktop":
+                    from lwrclpy_web_node_editor import desktop_app
+
+                    exit_code = int(desktop_app.main(argv[1:]))
+                elif argv and argv[0] == "--server":
+                    exit_code = int(server.main(argv[1:]))
+                elif getattr(sys, "frozen", False) and not argv:
+                    from lwrclpy_web_node_editor import desktop_app
+
+                    exit_code = int(desktop_app.main([]))
+                else:
+                    exit_code = int(server.main(argv))
     except SystemExit as exc:
         value = exc.code
         if isinstance(value, int):

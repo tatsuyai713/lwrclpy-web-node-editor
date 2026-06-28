@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import hashlib
+import io
 import importlib
 import json
 import math
@@ -16,6 +17,7 @@ import sys
 import threading
 import time
 import urllib.request
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -842,6 +844,241 @@ def _read_sample_project(path_value: object) -> dict[str, object]:
     return {"ok": True, "path": rel, "project": payload}
 
 
+def _safe_archive_name(value: object, fallback: str = "lwrclpy_cli_project") -> str:
+    name = str(value or fallback).strip().lower()
+    name = re.sub(r"[^a-z0-9_.-]+", "_", name).strip("._-")
+    if not name:
+        name = fallback
+    if name[0].isdigit():
+        name = f"project_{name}"
+    return name
+
+
+def _cli_export_project_name(payload: dict) -> str:
+    raw = payload.get("name") or payload.get("projectName") or payload.get("fileName")
+    if raw:
+        return _safe_archive_name(raw)
+    nodes = payload.get("nodes") if isinstance(payload.get("nodes"), list) else []
+    for node in nodes:
+        if isinstance(node, dict) and node.get("name"):
+            return _safe_archive_name(f"{node.get('name')}_project")
+    return "lwrclpy_cli_project"
+
+
+GUI_EXPORT_EXCLUDED_TOOL_TYPES = {"image_view", "string_view", "graph_view", "topic_hz_monitor"}
+
+
+def _export_runtime_payload(payload: dict) -> dict[str, Any]:
+    nodes = [
+        node
+        for node in (payload.get("nodes") if isinstance(payload.get("nodes"), list) else [])
+        if isinstance(node, dict) and str(node.get("toolType") or "") not in GUI_EXPORT_EXCLUDED_TOOL_TYPES
+    ]
+    active_ids = {str(node.get("id") or "") for node in nodes}
+    links = [
+        link
+        for link in (payload.get("links") if isinstance(payload.get("links"), list) else [])
+        if isinstance(link, dict)
+        and str(link.get("fromNode") or "") in active_ids
+        and str(link.get("toNode") or "") in active_ids
+    ]
+    return {
+        "format": str(payload.get("format") or "lwrclpy-web-node-editor-project"),
+        "version": int(payload.get("version") or 1),
+        "nodes": nodes,
+        "links": links,
+        "view": payload.get("view") if isinstance(payload.get("view"), dict) else {"x": 0, "y": 0, "scale": 1},
+        "nextId": payload.get("nextId") or 1,
+    }
+
+
+def _build_cli_export_zip(payload: dict) -> tuple[str, bytes]:
+    project_name = _cli_export_project_name(payload)
+    project_payload = _export_runtime_payload(payload)
+    root = f"{project_name}_cli"
+    buffer = io.BytesIO()
+    runner_path = PROJECT_DIR / "lwrclpy_web_node_editor" / "cli_export_runner.py"
+    runner_text = runner_path.read_text(encoding="utf-8")
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"{root}/project.json", json.dumps(project_payload, ensure_ascii=False, indent=2, default=str) + "\n")
+        archive.writestr(f"{root}/README.md", _render_cli_export_readme(project_name))
+        archive.writestr(f"{root}/run_project.py", runner_text)
+        archive.writestr(f"{root}/.gitignore", ".venv/\n__pycache__/\n*.pyc\n")
+    return f"{project_name}_cli_export.zip", buffer.getvalue()
+
+
+def _build_ros2_export_zip(payload: dict) -> tuple[str, bytes]:
+    project_name = _cli_export_project_name(payload)
+    package_name = _safe_archive_name(f"{project_name}_runner").replace("-", "_")
+    project_payload = _export_runtime_payload(payload)
+    root = f"{project_name}_ros2"
+    runner_text = (PROJECT_DIR / "lwrclpy_web_node_editor" / "cli_export_runner.py").read_text(encoding="utf-8")
+    runner_text = runner_text.replace(
+        'PROJECT_PATH = Path(__file__).with_name("project.json")',
+        'PROJECT_PATH = Path(__file__).with_name("project.json")',
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        base = f"{root}/{package_name}"
+        archive.writestr(f"{root}/README.md", _render_ros2_export_readme(project_name, package_name))
+        archive.writestr(f"{base}/package.xml", _render_ros2_runner_package_xml(package_name))
+        archive.writestr(f"{base}/setup.py", _render_ros2_runner_setup_py(package_name))
+        archive.writestr(f"{base}/setup.cfg", _render_ros2_setup_cfg(package_name))
+        archive.writestr(f"{base}/resource/{package_name}", "")
+        archive.writestr(f"{base}/{package_name}/__init__.py", "")
+        archive.writestr(f"{base}/{package_name}/runner.py", runner_text)
+        archive.writestr(f"{base}/{package_name}/project.json", json.dumps(project_payload, ensure_ascii=False, indent=2, default=str) + "\n")
+        archive.writestr(f"{base}/launch/{project_name}.launch.py", _render_ros2_runner_launch_py(package_name))
+    return f"{project_name}_ros2_package.zip", buffer.getvalue()
+
+
+def _render_ros2_export_readme(project_name: str, package_name: str) -> str:
+    return f"""# {project_name} ROS 2 Export
+
+This archive contains one ROS 2 Python package. It runs the exported project, including supported built-in nodes, in a normal ROS 2 `rclpy` environment.
+
+## Build
+
+Copy `{package_name}` into a ROS 2 workspace `src` directory:
+
+```bash
+colcon build --packages-select {package_name}
+source install/setup.bash
+```
+
+Install Python packages used by built-ins if they are not already available in the ROS 2 Python environment:
+
+```bash
+python3 -m pip install numpy opencv-python-headless pillow mcap mcap-ros2-support PyYAML
+```
+
+## Run
+
+```bash
+ros2 launch {package_name} {project_name}.launch.py
+```
+
+External image/video paths stored in `project.json` must exist on the target machine.
+"""
+
+
+def _render_ros2_runner_package_xml(package_name: str) -> str:
+    return f"""<?xml version="1.0"?>
+<package format="3">
+  <name>{package_name}</name>
+  <version>0.0.0</version>
+  <description>ROS 2 runner package exported from lwrclpy Web Node Editor.</description>
+  <maintainer email="user@example.com">user</maintainer>
+  <license>TODO</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
+"""
+
+
+def _render_ros2_runner_setup_py(package_name: str) -> str:
+    return f"""from glob import glob
+from setuptools import find_packages, setup
+
+package_name = '{package_name}'
+
+setup(
+    name=package_name,
+    version='0.0.0',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
+    ],
+    package_data={{package_name: ['project.json']}},
+    include_package_data=True,
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='user',
+    maintainer_email='user@example.com',
+    description='ROS 2 runner package exported from lwrclpy Web Node Editor.',
+    license='TODO',
+    entry_points={{'console_scripts': ['run_project = {package_name}.runner:main']}},
+)
+"""
+
+
+def _render_ros2_setup_cfg(package_name: str) -> str:
+    return f"""[develop]
+script_dir=$base/lib/{package_name}
+[install]
+install_scripts=$base/lib/{package_name}
+"""
+
+
+def _render_ros2_runner_launch_py(package_name: str) -> str:
+    return f"""import os
+
+from launch import LaunchDescription
+from launch.actions import SetEnvironmentVariable
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+    return LaunchDescription([
+        SetEnvironmentVariable('LWRCLPY_CLI_EXPORT_NO_BOOTSTRAP', '1'),
+        Node(
+            package='{package_name}',
+            executable='run_project',
+            name='{package_name}',
+            output='screen',
+            additional_env={{'LWRCLPY_CLI_EXPORT_NO_BOOTSTRAP': '1'}},
+        ),
+    ])
+"""
+
+
+def _render_cli_export_readme(project_name: str) -> str:
+    return f"""# {project_name} CLI Export
+
+This archive runs a saved lwrclpy Web Node Editor project without the web UI.
+It contains only `project.json`, this README, and a standalone `run_project.py`.
+
+## Requirements
+
+- Python 3.13 or compatible Python for the lwrclpy wheel you use.
+- `venv` from the Python standard library, or `uv`.
+- Network access on the first run so `run_project.py` can install the matching lwrclpy wheel into its local `.venv`.
+
+No system-wide install script is required. The runner creates a local `.venv` beside itself when needed.
+
+## Run
+
+macOS/Linux:
+
+```bash
+python3 run_project.py --duration 10
+```
+
+Windows:
+
+```bat
+python run_project.py --duration 10
+```
+
+Without `--duration`, the project runs until interrupted.
+
+## Notes
+
+- `project.json` is the exported editor project.
+- Runtime files are created in the local `.venv` beside this README.
+- External image/video paths stored in the project must exist on the target PC, or you must edit `project.json`.
+- The runner implements the built-ins needed for CLI execution directly. It does not include the web editor runtime.
+- For ROS 2/DDS communication across machines, make sure both PCs use compatible `ROS_DOMAIN_ID`, network interfaces, and QoS settings.
+"""
+
+
 def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
     targets = _framework_worker_pids()
     killed: list[int] = []
@@ -1259,6 +1496,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path in {"/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"}:
+            self._send_no_content()
+            return
         if path == "/api/message-types":
             self._send_json({"types": graph_module.LWRCLPY_TYPE_TREE})
             return
@@ -1316,6 +1556,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/custom-nodes/import",
             "/api/open-mcap-file",
             "/api/sample-project",
+            "/api/export-cli",
+            "/api/export-ros2-package",
         }:
             self.send_error(404)
             return
@@ -1334,6 +1576,14 @@ class Handler(BaseHTTPRequestHandler):
                 result = _open_mcap_file(payload.get("path"))
             elif path == "/api/sample-project":
                 result = _read_sample_project(payload.get("path"))
+            elif path == "/api/export-cli":
+                filename, data = _build_cli_export_zip(payload)
+                self._send_blob(data, "application/zip", filename)
+                return
+            elif path == "/api/export-ros2-package":
+                filename, data = _build_ros2_export_zip(payload)
+                self._send_blob(data, "application/zip", filename)
+                return
             elif path == "/api/run":
                 signature = self._payload_signature(payload)
                 if self.__class__._ready_signature != signature:
@@ -1409,6 +1659,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(status)
             self.send_header("content-type", "application/json; charset=utf-8")
             self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def _send_blob(self, data: bytes, content_type: str, filename: str, status: int = 200):
+        safe_name = str(filename or "download.bin").replace('"', "")
+        try:
+            self.send_response(status)
+            self.send_header("content-type", content_type)
+            self.send_header("content-length", str(len(data)))
+            self.send_header("content-disposition", f'attachment; filename="{safe_name}"')
             self.end_headers()
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
