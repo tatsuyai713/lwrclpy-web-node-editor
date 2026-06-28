@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 import math
@@ -24,45 +25,127 @@ LATEST_TAG_RELEASE_URL = "https://github.com/tatsuyai713/lwrclpy/releases/expand
 GITHUB_BASE_URL = "https://github.com"
 
 
+def status(message: str) -> None:
+    print(f"[lwrclpy-cli] {message}", flush=True)
+
+
 def bootstrap_venv() -> None:
     if os.environ.get("LWRCLPY_CLI_EXPORT_NO_BOOTSTRAP") == "1":
         return
     if os.environ.get("LWRCLPY_CLI_EXPORT_BOOTSTRAPPED") == "1":
         return
+    current_python = Path(sys.executable)
+    if _runtime_importable() and _requirements_install_current(current_python):
+        status("runtime dependencies already available")
+        return
     if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        status("running inside an existing venv; installing missing runtime dependencies")
+        install_runtime(current_python)
+        os.environ["LWRCLPY_CLI_EXPORT_BOOTSTRAPPED"] = "1"
         return
     root = Path(__file__).resolve().parent
     venv = root / ".venv"
     python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if not python.exists():
+        status(f"creating local venv: {venv}")
         uv = shutil.which("uv")
         if uv:
+            status(f"using uv: {uv}")
             subprocess.check_call([uv, "venv", str(venv)])
         else:
+            status(f"using stdlib venv with {sys.executable}")
             subprocess.check_call([sys.executable, "-m", "venv", str(venv)])
     env = os.environ.copy()
     env["LWRCLPY_CLI_EXPORT_BOOTSTRAPPED"] = "1"
     install_runtime(python)
+    status(f"restarting with local venv python: {python}")
     os.execve(str(python), [str(python), str(Path(__file__).resolve()), *sys.argv[1:]], env)
 
 
+def _runtime_importable() -> bool:
+    try:
+        import rclpy  # noqa: F401
+        import lwrclpy  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def install_runtime(python: Path) -> None:
-    marker = Path(__file__).resolve().parent / ".venv" / ".lwrclpy_cli_export_installed"
-    requirements = ["pillow", "opencv-python-headless", "numpy", "mcap", "mcap-ros2-support", "PyYAML"]
-    if marker.exists():
+    root = Path(__file__).resolve().parent
+    marker = root / ".lwrclpy_cli_export_installed"
+    requirements_file = root / "requirements.txt"
+    requirements_marker = _requirements_marker()
+    current_marker = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+    if marker.exists() and current_marker == requirements_marker and _python_has_runtime(python):
+        status("runtime install marker found and requirements are unchanged")
         return
     uv = shutil.which("uv")
+    if requirements_file.exists():
+        status(f"installing requirements from {requirements_file}")
+        if uv:
+            status(f"using uv pip with {python}")
+            subprocess.check_call([uv, "pip", "install", "--python", str(python), "-r", str(requirements_file)])
+        else:
+            status("upgrading pip")
+            subprocess.check_call([str(python), "-m", "pip", "install", "--upgrade", "pip"])
+            status("installing requirements")
+            subprocess.check_call([str(python), "-m", "pip", "install", "-r", str(requirements_file)])
+        marker.write_text(requirements_marker or str(time.time()), encoding="utf-8")
+        status("runtime dependencies installed")
+        return
+    requirements = ["pillow", "opencv-python-headless", "numpy", "mcap", "mcap-ros2-support", "PyYAML"]
     if uv:
+        status("installing Python package dependencies")
         subprocess.check_call([uv, "pip", "install", "--python", str(python), *requirements])
+        status("installing lwrclpy wheel from latest release")
         subprocess.check_call([uv, "pip", "install", "--python", str(python), "--force-reinstall", "--no-cache", latest_lwrclpy_wheel_url()])
     else:
+        status("upgrading pip")
         subprocess.check_call([str(python), "-m", "pip", "install", "--upgrade", "pip"])
+        status("installing Python package dependencies")
         subprocess.check_call([str(python), "-m", "pip", "install", *requirements])
+        status("installing lwrclpy wheel from latest release")
         subprocess.check_call([str(python), "-m", "pip", "install", "--force-reinstall", "--no-cache-dir", latest_lwrclpy_wheel_url()])
-    marker.write_text(str(time.time()), encoding="utf-8")
+    marker.write_text(requirements_marker or str(time.time()), encoding="utf-8")
+    status("runtime dependencies installed")
+
+
+def _python_has_runtime(python: Path) -> bool:
+    try:
+        subprocess.check_call([str(python), "-c", "import rclpy, lwrclpy"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
+
+def _requirements_marker() -> str:
+    requirements_file = Path(__file__).resolve().parent / "requirements.txt"
+    if not requirements_file.exists():
+        return ""
+    try:
+        return hashlib.sha256(requirements_file.read_bytes()).hexdigest()
+    except Exception:
+        return ""
+
+
+def _requirements_install_current(python: Path) -> bool:
+    requirements_file = Path(__file__).resolve().parent / "requirements.txt"
+    if not requirements_file.exists():
+        return True
+    marker = Path(__file__).resolve().parent / ".lwrclpy_cli_export_installed"
+    if not marker.exists():
+        return False
+    try:
+        if marker.read_text(encoding="utf-8").strip() != _requirements_marker():
+            return False
+    except Exception:
+        return False
+    return _python_has_runtime(python)
 
 
 def latest_lwrclpy_wheel_url() -> str:
+    status("finding matching lwrclpy wheel from latest release")
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -93,17 +176,28 @@ def latest_lwrclpy_wheel_url() -> str:
         candidates.append((score, name, urllib.parse.urljoin(GITHUB_BASE_URL, decoded)))
     if not candidates:
         raise RuntimeError(f"No lwrclpy wheel found for Python {py_tag} on {platform.platform()}")
-    return sorted(candidates, reverse=True)[0][2]
+    selected = sorted(candidates, reverse=True)[0]
+    status(f"selected lwrclpy wheel: {selected[1]}")
+    return selected[2]
+
+
+def valid_data_type(type_name: object) -> bool:
+    parts = str(type_name or "").split("/")
+    return len(parts) == 3 and all(parts)
 
 
 def import_type_class(type_name: str):
-    package, kind, name = type_name.split("/")
+    if not valid_data_type(type_name):
+        raise ValueError(f"invalid ROS type name: {type_name!r}")
+    package, kind, name = str(type_name).split("/")
     module = importlib.import_module(f"{package}.{kind}")
     return getattr(module, name)
 
 
 def split_kind(type_name: str) -> str:
-    return type_name.split("/")[1]
+    if not valid_data_type(type_name):
+        return ""
+    return str(type_name).split("/")[1]
 
 
 def set_field(msg: Any, key: str, value: Any) -> None:
@@ -125,11 +219,53 @@ def plain_value(value: Any) -> Any:
             pass
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value)
+    lwrclpy_memoryview = getattr(value, "_lwrclpy_memoryview", None)
+    if callable(lwrclpy_memoryview):
+        try:
+            return memoryview(lwrclpy_memoryview()).tobytes()
+        except Exception:
+            pass
+    memoryview_method = getattr(value, "memoryview", None)
+    if callable(memoryview_method):
+        try:
+            return memoryview(memoryview_method()).tobytes()
+        except Exception:
+            pass
+    tobytes_method = getattr(value, "tobytes", None)
+    if callable(tobytes_method):
+        try:
+            return tobytes_method()
+        except Exception:
+            pass
     if hasattr(value, "get_buffer"):
-        return value
+        try:
+            return memoryview(value.get_buffer())
+        except Exception:
+            return value
     if value.__class__.__name__.endswith("_vector"):
         return value
     return value
+
+
+def uint8_array_from_data(data: Any):
+    import numpy as np
+    if data is None:
+        return np.asarray([], dtype=np.uint8)
+    if callable(data):
+        try:
+            data = data()
+        except TypeError:
+            pass
+    memoryview_method = getattr(data, "memoryview", None)
+    if callable(memoryview_method):
+        try:
+            data = memoryview(memoryview_method())
+        except Exception:
+            pass
+    try:
+        return np.frombuffer(data, dtype=np.uint8)
+    except TypeError:
+        return np.asarray(data, dtype=np.uint8)
 
 
 def message_to_value(msg: Any) -> Any:
@@ -178,9 +314,11 @@ def apply_link_topics(project: dict[str, Any]) -> list[dict[str, Any]]:
     by_id = {str(node.get("id")): node for node in nodes}
     for node in nodes:
         for port in node.get("inputs", []):
-            port["topics"] = []
+            existing = port.get("topics") if isinstance(port.get("topics"), list) else []
+            port["topics"] = [topic for topic in (normalize_topic(item) for item in existing) if topic]
         for port in node.get("outputs", []):
-            port["topics"] = []
+            existing = port.get("topics") if isinstance(port.get("topics"), list) else []
+            port["topics"] = [topic for topic in (normalize_topic(item) for item in existing) if topic]
     for link in project.get("links", []):
         if not isinstance(link, dict):
             continue
@@ -191,10 +329,12 @@ def apply_link_topics(project: dict[str, Any]) -> list[dict[str, Any]]:
         topic = normalize_topic(link.get("name") or default_topic(link.get("fromNode"), link.get("fromPort"), link.get("toNode"), link.get("toPort")))
         for port in src.get("outputs", []):
             if port.get("id") == link.get("fromPort"):
-                port.setdefault("topics", []).append(topic)
+                if topic not in port.setdefault("topics", []):
+                    port["topics"].append(topic)
         for port in dst.get("inputs", []):
             if port.get("id") == link.get("toPort"):
-                port.setdefault("topics", []).append(topic)
+                if topic not in port.setdefault("topics", []):
+                    port["topics"].append(topic)
     for node in nodes:
         params = node.setdefault("params", {})
         tool = node.get("toolType")
@@ -202,6 +342,11 @@ def apply_link_topics(project: dict[str, Any]) -> list[dict[str, Any]]:
             outputs = [topic for port in node.get("outputs", []) for topic in port.get("topics", [])]
             if outputs:
                 params["topic"] = outputs[0]
+            elif tool == "function_generator" and params.get("ddsTopic"):
+                topic = normalize_topic(params.get("ddsTopic"))
+                if topic and node.get("outputs"):
+                    node["outputs"][0].setdefault("topics", []).append(topic)
+                    params["topic"] = topic
         if tool in {"image_view", "topic_hz_monitor", "image_file_save", "string_view"}:
             inputs = [topic for port in node.get("inputs", []) for topic in port.get("topics", [])]
             if inputs:
@@ -234,17 +379,40 @@ class RuntimeNode:
             topic = normalize_topic(self.params.get("topic"))
             if topic and self.config.get("outputs"):
                 output = self.config["outputs"][0]
-                self.publishers.setdefault(output["id"], []).append(self.node.create_publisher(import_type_class(output["dataType"]), topic, 10))
+                data_type = output.get("dataType")
+                if valid_data_type(data_type):
+                    self.publishers.setdefault(output["id"], []).append(self.node.create_publisher(import_type_class(data_type), topic, 10))
+                else:
+                    status(f"skipping publisher for {self.config.get('name')}.{output.get('id')}: invalid dataType {data_type!r}")
+            return
+        if self.tool == "mcap_record":
             return
         for output in self.config.get("outputs", []):
-            type_cls = import_type_class(output["dataType"])
+            topics = [normalize_topic(topic) for topic in output.get("topics", []) if normalize_topic(topic)]
+            if not topics:
+                continue
+            data_type = output.get("dataType")
+            if not valid_data_type(data_type):
+                status(f"skipping publisher for {self.config.get('name')}.{output.get('id')}: invalid dataType {data_type!r}")
+                continue
+            type_cls = import_type_class(data_type)
             for topic in output.get("topics", []):
-                if split_kind(output["dataType"]) == "msg":
+                topic = normalize_topic(topic)
+                if topic and split_kind(data_type) == "msg":
                     self.publishers.setdefault(output["id"], []).append(self.node.create_publisher(type_cls, topic, 10))
         for input_port in self.config.get("inputs", []):
-            type_cls = import_type_class(input_port["dataType"])
+            topics = [normalize_topic(topic) for topic in input_port.get("topics", []) if normalize_topic(topic)]
+            if not topics:
+                continue
+            data_type = input_port.get("dataType")
+            if not valid_data_type(data_type):
+                status(f"skipping subscription for {self.config.get('name')}.{input_port.get('id')}: invalid dataType {data_type!r}")
+                continue
+            type_cls = import_type_class(data_type)
             for topic in input_port.get("topics", []):
-                self.node.create_subscription(type_cls, topic, self._make_callback(input_port), 10)
+                topic = normalize_topic(topic)
+                if topic:
+                    self.node.create_subscription(type_cls, topic, self._make_callback(input_port), 10)
         if self.tool in {"image_view", "topic_hz_monitor", "image_file_save", "string_view"}:
             topic = normalize_topic(self.params.get("topic"))
             data_type = self.config.get("inputs", [{}])[0].get("dataType", "sensor_msgs/msg/Image")
@@ -296,8 +464,11 @@ class RuntimeNode:
         output = next((item for item in self.config.get("outputs", []) if item.get("id") == output_id), None)
         if not output:
             return
+        publishers = self.publishers.get(output_id, [])
+        if not publishers:
+            return
         msg = coerce_message(output["dataType"], value)
-        for publisher in self.publishers.get(output_id, []):
+        for publisher in publishers:
             publisher.publish(msg)
 
     def tick(self) -> None:
@@ -370,6 +541,7 @@ class RuntimeNode:
         if not path:
             return
         if self.video_capture is None:
+            status(f"{self.config.get('name')}: opening video {path}")
             self.video_capture = cv2.VideoCapture(path)
         ok, frame = self.video_capture.read()
         if not ok:
@@ -422,11 +594,13 @@ class RuntimeNode:
                 print(f"[{self.config.get('name')}] no MCAP output topics")
                 return
             files = self._mcap_input_files()
+            status(f"{self.config.get('name')}: playing MCAP {len(files)} file(s), topics={', '.join(selected_topics)}")
             while True:
                 first_log_time: int | None = None
                 wall_start = time.monotonic()
                 played_any = False
                 for file_path in files:
+                    status(f"{self.config.get('name')}: reading {file_path}")
                     for item in read_ros2_messages(str(file_path), topics=selected_topics, log_time_order=True):
                         log_time = int(getattr(item, "log_time_ns", 0) or getattr(getattr(item, "message", None), "log_time", 0) or 0)
                         if first_log_time is None:
@@ -444,6 +618,7 @@ class RuntimeNode:
                             self.publish(port_id, item.ros_msg)
                             played_any = True
                 if not loop or not played_any:
+                    status(f"{self.config.get('name')}: MCAP playback ended")
                     return
         except Exception as exc:
             print(f"[{self.config.get('name')}] MCAP input error: {exc}")
@@ -473,7 +648,7 @@ class RuntimeNode:
         split_size_mb = float(self.params.get("splitSizeMb") or 0)
         if split_size_mb > 0:
             command[3:3] = ["--max-bag-size", str(int(split_size_mb * 1024 * 1024))]
-        print(f"[{self.config.get('name')}] starting: {' '.join(command)}")
+        status(f"{self.config.get('name')}: starting {' '.join(command)}")
         self.mcap_record_process = subprocess.Popen(command)
 
     def close(self) -> None:
@@ -498,7 +673,7 @@ class RuntimeNode:
         enc = str(img.get("encoding") or "rgb8").lower()
         if h <= 0 or w <= 0:
             return None
-        arr = np.frombuffer(data, dtype=np.uint8)
+        arr = uint8_array_from_data(data)
         channels = 1 if enc == "mono8" else 3
         if arr.size < h * w * channels:
             return None
@@ -574,6 +749,7 @@ class RuntimeNode:
         api_base = str(self.params.get("apiBase") or "").rstrip("/")
         if provider == "ollama":
             api_base = api_base or "http://127.0.0.1:11434"
+            status(f"{self.config.get('name')}: sending prompt to Ollama model={model}")
             payload = {
                 "model": model,
                 "messages": self._chat_messages(system_prompt, prompt),
@@ -584,6 +760,7 @@ class RuntimeNode:
             return str((result.get("message") or {}).get("content") or "")
         if provider in {"openai", "openai_compatible", "lmstudio"}:
             api_base = api_base or ("http://127.0.0.1:1234/v1" if provider == "lmstudio" else "https://api.openai.com/v1")
+            status(f"{self.config.get('name')}: sending prompt to {provider} model={model}")
             api_key_env = str(self.params.get("apiKeyEnv") or ("OPENAI_API_KEY" if provider == "openai" else ""))
             headers = {}
             if api_key_env:
@@ -626,7 +803,7 @@ class RuntimeNode:
         if h <= 0 or w <= 0:
             return
         channels = 1 if enc == "mono8" else 3
-        arr = np.frombuffer(data, dtype=np.uint8)
+        arr = uint8_array_from_data(data)
         if arr.size < h * w * channels:
             return
         arr = arr[:h * w * channels].reshape((h, w, channels))
@@ -671,17 +848,28 @@ class RuntimeNode:
 
 
 def main() -> int:
+    status("starting exported project runner")
     bootstrap_venv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", default=str(PROJECT_PATH))
     parser.add_argument("--duration", "-d", type=float, default=None)
     parser.add_argument("--hz", type=float, default=60.0)
     args = parser.parse_args()
+    status(f"loading project: {args.project}")
     project = json.loads(Path(args.project).read_text(encoding="utf-8"))
+    status("importing lwrclpy runtime modules")
     import rclpy
     from rclpy.executors import MultiThreadedExecutor
+    status("initializing lwrclpy runtime")
     rclpy.init(args=None)
-    nodes = [RuntimeNode(rclpy, node) for node in apply_link_topics(project)]
+    runtime_configs = apply_link_topics(project)
+    status(f"creating {len(runtime_configs)} runtime node(s)")
+    nodes = []
+    for index, node_config in enumerate(runtime_configs, start=1):
+        name = str(node_config.get("name") or node_config.get("id") or f"node_{index}")
+        tool = str(node_config.get("toolType") or "custom")
+        status(f"creating node {index}/{len(runtime_configs)}: {name} ({tool})")
+        nodes.append(RuntimeNode(rclpy, node_config))
     executor = MultiThreadedExecutor()
     for node in nodes:
         executor.add_node(node.node)
@@ -689,6 +877,9 @@ def main() -> int:
     period = 1.0 / max(1.0, float(args.hz))
     next_at = time.perf_counter()
     try:
+        status(f"running at {float(args.hz):g} Hz" + (f" for {args.duration:g}s" if args.duration is not None else " until interrupted"))
+        last_heartbeat = time.time()
+        tick_count = 0
         while rclpy.ok():
             if args.duration is not None and time.time() - started >= args.duration:
                 break
@@ -697,15 +888,21 @@ def main() -> int:
             if now >= next_at:
                 for node in nodes:
                     node.tick()
+                tick_count += 1
                 next_at = now + period
+                if time.time() - last_heartbeat >= 5.0:
+                    status(f"running... elapsed={time.time() - started:.1f}s ticks={tick_count}")
+                    last_heartbeat = time.time()
             else:
                 time.sleep(min(0.002, next_at - now))
     finally:
+        status("stopping runtime")
         for node in nodes:
             node.close()
             executor.remove_node(node.node)
             node.node.destroy_node()
         rclpy.shutdown()
+        status("stopped")
     return 0
 
 

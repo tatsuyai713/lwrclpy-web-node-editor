@@ -114,9 +114,12 @@ def run_project(args: argparse.Namespace) -> int:
     if args.cwd:
         workdir = Path(args.cwd).expanduser().resolve()
     else:
-        workdir = Path.cwd()
+        script_path = Path(sys.argv[0]).expanduser()
+        workdir = script_path.resolve().parent if script_path.exists() else project_path.parent
     workdir.mkdir(parents=True, exist_ok=True)
     os.chdir(workdir)
+    os.environ.setdefault("LWRCLPY_CLI_VERBOSE_INSTALL", "1")
+    print(f"[lwrclpy-web-node-editor-cli] Working directory: {workdir}", flush=True)
 
     from .graph import GraphRuntime
 

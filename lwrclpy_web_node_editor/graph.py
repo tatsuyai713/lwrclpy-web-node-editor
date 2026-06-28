@@ -328,6 +328,13 @@ def normalize_type(type_name: str) -> str:
     return type_name.replace(".", "/")
 
 
+def normalize_topic(topic: str) -> str:
+    text = str(topic or "").strip()
+    if not text:
+        return ""
+    return text if text.startswith("/") else f"/{text}"
+
+
 def split_type(type_name: str) -> tuple[str, str, str]:
     parts = normalize_type(type_name).split("/")
     if len(parts) != 3 or parts[1] not in {"msg", "srv"}:
@@ -2734,31 +2741,31 @@ class GraphRuntime:
     def _create_node_venv(self, env_root: Path, requested_python: str) -> None:
         uv = self._uv_command()
         if uv:
+            self._log_cli_setup(f"creating node venv: {env_root}")
             subprocess.run(
                 [uv, "venv", "--clear", "--python", requested_python, str(env_root)],
                 cwd=Path.cwd(),
                 check=True,
-                capture_output=True,
-                text=True,
+                **self._setup_subprocess_kwargs(),
             )
             return
+        self._log_cli_setup(f"creating node venv: {env_root}")
         subprocess.run(
             [requested_python, "-m", "venv", str(env_root)],
             cwd=Path.cwd(),
             check=True,
-            capture_output=True,
-            text=True,
+            **self._setup_subprocess_kwargs(),
         )
 
     def _install_node_requirements(self, python_bin: Path, req_file: Path) -> None:
         uv = self._uv_command()
         if uv:
+            self._log_cli_setup(f"installing node requirements: {req_file}")
             subprocess.run(
                 [uv, "pip", "install", "--python", str(python_bin), "-r", str(req_file)],
                 cwd=Path.cwd(),
                 check=True,
-                capture_output=True,
-                text=True,
+                **self._setup_subprocess_kwargs(),
             )
             return
         try:
@@ -2770,20 +2777,30 @@ class GraphRuntime:
                 text=True,
             )
         except subprocess.CalledProcessError:
+            self._log_cli_setup(f"bootstrapping pip: {python_bin}")
             subprocess.run(
                 [str(python_bin), "-m", "ensurepip", "--upgrade"],
                 cwd=Path.cwd(),
                 check=True,
-                capture_output=True,
-                text=True,
+                **self._setup_subprocess_kwargs(),
             )
+        self._log_cli_setup(f"installing node requirements: {req_file}")
         subprocess.run(
             [str(python_bin), "-m", "pip", "install", "-r", str(req_file)],
             cwd=Path.cwd(),
             check=True,
-            capture_output=True,
-            text=True,
+            **self._setup_subprocess_kwargs(),
         )
+
+    def _cli_verbose_install(self) -> bool:
+        return os.environ.get("LWRCLPY_CLI_VERBOSE_INSTALL") == "1"
+
+    def _setup_subprocess_kwargs(self) -> dict[str, Any]:
+        return {"capture_output": not self._cli_verbose_install(), "text": True}
+
+    def _log_cli_setup(self, message: str) -> None:
+        if self._cli_verbose_install():
+            print(f"[lwrclpy-web-node-editor-cli] {message}", flush=True)
 
     def _real_python(self) -> str:
         """Return a path to a genuine CPython interpreter.
@@ -2917,20 +2934,20 @@ class GraphRuntime:
             try:
                 uv = self._uv_command()
                 if uv:
+                    self._log_cli_setup(f"installing local lwrclpy for {instance.config.id}: {local_wheel.name}")
                     subprocess.run(
                         [uv, "pip", "install", "--upgrade", "--force-reinstall", "--no-cache", "--python", str(python_bin), str(local_wheel)],
                         cwd=Path.cwd(),
                         check=True,
-                        capture_output=True,
-                        text=True,
+                        **self._setup_subprocess_kwargs(),
                     )
                 else:
+                    self._log_cli_setup(f"installing local lwrclpy for {instance.config.id}: {local_wheel.name}")
                     subprocess.run(
                         [str(python_bin), "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", str(local_wheel)],
                         cwd=Path.cwd(),
                         check=True,
-                        capture_output=True,
-                        text=True,
+                        **self._setup_subprocess_kwargs(),
                     )
                 return True
             except subprocess.CalledProcessError as exc:
@@ -2949,20 +2966,20 @@ class GraphRuntime:
             try:
                 uv = self._uv_command()
                 if uv:
+                    self._log_cli_setup(f"installing lwrclpy {selected_version} for {instance.config.id}")
                     subprocess.run(
                         [uv, "pip", "install", "--upgrade", "--force-reinstall", "--no-cache", "--python", str(python_bin), wheel_url],
                         cwd=Path.cwd(),
                         check=True,
-                        capture_output=True,
-                        text=True,
+                        **self._setup_subprocess_kwargs(),
                     )
                 else:
+                    self._log_cli_setup(f"installing lwrclpy {selected_version} for {instance.config.id}")
                     subprocess.run(
                         [str(python_bin), "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", wheel_url],
                         cwd=Path.cwd(),
                         check=True,
-                        capture_output=True,
-                        text=True,
+                        **self._setup_subprocess_kwargs(),
                     )
                 return True
             except subprocess.CalledProcessError as exc:
@@ -3256,11 +3273,13 @@ class GraphRuntime:
             data_type = "std_msgs/msg/String"
         if tool_type == "mcap_record" and not port.get("dataType"):
             data_type = ""
+        topics = port.get("topics") if isinstance(port.get("topics"), list) else []
         return PortConfig(
             id=str(port.get("id")),
             name=str(port.get("name") or port.get("id")),
             data_type=normalize_type(data_type),
             topic=str(port.get("topic", "")),
+            topics=tuple(sorted({normalize_topic(str(topic)) for topic in topics if str(topic).strip()})),
             receive_mode=str(port.get("receiveMode", "callback")),
             callback_code=str(port.get("callbackCode", "")),
         )
@@ -3291,6 +3310,10 @@ class GraphRuntime:
 
     def _apply_link_topics(self, nodes: list[CustomLwrclNodeConfig], links: list[dict[str, Any]]) -> None:
         by_id = {node.id: node for node in nodes}
+        pre_external_node_ids = {
+            node.id for node in nodes
+            if bool(node.params.get("_externalDdsCompatible"))
+        }
         for node in nodes:
             node.params.pop("_externalDdsCompatible", None)
         source_topics: dict[tuple[str, str], str] = {}
@@ -3299,9 +3322,33 @@ class GraphRuntime:
             if key not in source_topics:
                 source_topics[key] = self._link_topic(link, by_id)
             link["name"] = source_topics[key]
-        input_topics: dict[tuple[str, str], set[str]] = {}
-        output_topics: dict[tuple[str, str], set[str]] = {}
-        external_topics: set[str] = set()
+        linked_topics = {topic for topic in source_topics.values() if topic}
+        input_topics: dict[tuple[str, str], set[str]] = {
+            (node.id, port.id): set(port.topics)
+            for node in nodes
+            for port in node.inputs
+            if port.topics
+        }
+        output_topics: dict[tuple[str, str], set[str]] = {
+            (node.id, port.id): set(port.topics)
+            for node in nodes
+            for port in node.outputs
+            if port.topics
+        }
+        external_topics: set[str] = {
+            topic
+            for node in nodes
+            if node.id in pre_external_node_ids
+            for port in [*node.inputs, *node.outputs]
+            for topic in port.topics
+        }
+        external_topics.update(
+            topic
+            for node in nodes
+            for port in [*node.inputs, *node.outputs]
+            for topic in port.topics
+            if topic not in linked_topics
+        )
         for link in links:
             src = by_id.get(str(link.get("fromNode")))
             dst = by_id.get(str(link.get("toNode")))

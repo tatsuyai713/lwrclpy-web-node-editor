@@ -865,23 +865,120 @@ def _cli_export_project_name(payload: dict) -> str:
     return "lwrclpy_cli_project"
 
 
-GUI_EXPORT_EXCLUDED_TOOL_TYPES = {"image_view", "string_view", "graph_view", "topic_hz_monitor"}
+EXPORT_EXCLUDED_TOOL_TYPES = {
+    "image_view",
+    "string_view",
+    "graph_view",
+    "topic_hz_monitor",
+    "topic_input",
+    "topic_output",
+}
+
+
+def _valid_ros_type_name(value: object) -> bool:
+    parts = str(value or "").split("/")
+    return len(parts) == 3 and all(parts)
+
+
+def _normalize_export_topic(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text if text.startswith("/") else f"/{text}"
+
+
+def _find_port(node: dict[str, Any] | None, direction: str, port_id: object) -> dict[str, Any] | None:
+    if not isinstance(node, dict):
+        return None
+    ports = node.get(direction)
+    if not isinstance(ports, list):
+        return None
+    for port in ports:
+        if isinstance(port, dict) and port.get("id") == port_id:
+            return port
+    return None
+
+
+def _append_export_port_topic(port: dict[str, Any] | None, topic: str) -> None:
+    if not port or not topic:
+        return
+    topics = port.setdefault("topics", [])
+    if not isinstance(topics, list):
+        topics = []
+        port["topics"] = topics
+    if topic not in topics:
+        topics.append(topic)
+
+
+def _mark_export_external(node: dict[str, Any] | None) -> None:
+    if not isinstance(node, dict):
+        return
+    params = node.setdefault("params", {})
+    if not isinstance(params, dict):
+        params = {}
+        node["params"] = params
+    params["_externalDdsCompatible"] = True
+
+
+def _infer_export_link_types(src_port: dict[str, Any] | None, dst_port: dict[str, Any] | None) -> None:
+    if not src_port or not dst_port:
+        return
+    src_type = str(src_port.get("dataType") or "")
+    dst_type = str(dst_port.get("dataType") or "")
+    if not _valid_ros_type_name(src_type) and _valid_ros_type_name(dst_type):
+        src_port["dataType"] = dst_type
+    elif not _valid_ros_type_name(dst_type) and _valid_ros_type_name(src_type):
+        dst_port["dataType"] = src_type
 
 
 def _export_runtime_payload(payload: dict) -> dict[str, Any]:
+    source_nodes = [
+        node for node in (payload.get("nodes") if isinstance(payload.get("nodes"), list) else [])
+        if isinstance(node, dict)
+    ]
+    source_by_id = {str(node.get("id") or ""): node for node in source_nodes}
     nodes = [
-        node
-        for node in (payload.get("nodes") if isinstance(payload.get("nodes"), list) else [])
-        if isinstance(node, dict) and str(node.get("toolType") or "") not in GUI_EXPORT_EXCLUDED_TOOL_TYPES
+        json.loads(json.dumps(node, default=str))
+        for node in source_nodes
+        if str(node.get("toolType") or "") not in EXPORT_EXCLUDED_TOOL_TYPES
     ]
+    runtime_by_id = {str(node.get("id") or ""): node for node in nodes}
     active_ids = {str(node.get("id") or "") for node in nodes}
-    links = [
-        link
-        for link in (payload.get("links") if isinstance(payload.get("links"), list) else [])
-        if isinstance(link, dict)
-        and str(link.get("fromNode") or "") in active_ids
-        and str(link.get("toNode") or "") in active_ids
-    ]
+    links: list[dict[str, Any]] = []
+    for raw_link in (payload.get("links") if isinstance(payload.get("links"), list) else []):
+        if not isinstance(raw_link, dict):
+            continue
+        link = json.loads(json.dumps(raw_link, default=str))
+        src_id = str(link.get("fromNode") or "")
+        dst_id = str(link.get("toNode") or "")
+        src_source = source_by_id.get(src_id)
+        dst_source = source_by_id.get(dst_id)
+        src_runtime = runtime_by_id.get(src_id)
+        dst_runtime = runtime_by_id.get(dst_id)
+        topic = _normalize_export_topic(
+            link.get("name")
+            or f"/{link.get('fromNode')}_{link.get('fromPort')}_to_{link.get('toNode')}_{link.get('toPort')}"
+        )
+        if src_id in active_ids and dst_id in active_ids:
+            src_port = _find_port(src_runtime, "outputs", link.get("fromPort"))
+            dst_port = _find_port(dst_runtime, "inputs", link.get("toPort"))
+            _infer_export_link_types(src_port, dst_port)
+            links.append(link)
+            continue
+        if str(src_source.get("toolType") if src_source else "") == "topic_input" and dst_runtime is not None:
+            src_port = _find_port(src_source, "outputs", link.get("fromPort"))
+            dst_port = _find_port(dst_runtime, "inputs", link.get("toPort"))
+            _infer_export_link_types(src_port, dst_port)
+            _append_export_port_topic(dst_port, topic)
+            _mark_export_external(dst_runtime)
+            continue
+        if src_runtime is not None and str(dst_source.get("toolType") if dst_source else "") == "topic_output":
+            src_port = _find_port(src_runtime, "outputs", link.get("fromPort"))
+            dst_port = _find_port(dst_source, "inputs", link.get("toPort"))
+            _infer_export_link_types(src_port, dst_port)
+            _append_export_port_topic(src_port, topic)
+            _mark_export_external(src_runtime)
+            continue
     return {
         "format": str(payload.get("format") or "lwrclpy-web-node-editor-project"),
         "version": int(payload.get("version") or 1),
@@ -897,14 +994,63 @@ def _build_cli_export_zip(payload: dict) -> tuple[str, bytes]:
     project_payload = _export_runtime_payload(payload)
     root = f"{project_name}_cli"
     buffer = io.BytesIO()
-    runner_path = PROJECT_DIR / "lwrclpy_web_node_editor" / "cli_export_runner.py"
-    runner_text = runner_path.read_text(encoding="utf-8")
+    wheel = local_lwrclpy_wheel()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(f"{root}/project.json", json.dumps(project_payload, ensure_ascii=False, indent=2, default=str) + "\n")
-        archive.writestr(f"{root}/README.md", _render_cli_export_readme(project_name))
-        archive.writestr(f"{root}/run_project.py", runner_text)
-        archive.writestr(f"{root}/.gitignore", ".venv/\n__pycache__/\n*.pyc\n")
-    return f"{project_name}_cli_export.zip", buffer.getvalue()
+        archive.writestr(f"{root}/README.md", _render_cli_export_readme(project_name, wheel))
+        archive.writestr(f"{root}/requirements.txt", _render_cli_export_requirements(wheel))
+        archive.writestr(f"{root}/run_project.py", _render_cli_package_run_project(wheel))
+        for source in _cli_package_runtime_files():
+            archive.write(source, f"{root}/lwrclpy_web_node_editor/{source.name}")
+        if wheel is not None and wheel.is_file():
+            archive.write(wheel, f"{root}/wheels/{wheel.name}")
+        archive.writestr(f"{root}/.gitignore", "venv/\n.venv/\n.node_envs/\n.node_workers/\n__pycache__/\n*.pyc\n")
+    return f"{project_name}_cli_package.zip", buffer.getvalue()
+
+
+def _cli_package_runtime_files() -> list[Path]:
+    package_dir = PROJECT_DIR / "lwrclpy_web_node_editor"
+    names = [
+        "__init__.py",
+        "cli_run.py",
+        "runtime_exec.py",
+        "graph.py",
+        "node_worker.py",
+        "video_dds_worker.py",
+        "dds_tap_worker.py",
+        "builtin_source_worker.py",
+        "mcap_record_worker.py",
+    ]
+    return [package_dir / name for name in names if (package_dir / name).is_file()]
+
+
+def _render_cli_package_run_project(wheel: Path | None) -> str:
+    wheel_arg = f"wheels/{wheel.name}" if wheel is not None and wheel.is_file() else ""
+    return f'''#!/usr/bin/env python3
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from lwrclpy_web_node_editor.cli_run import main
+
+
+def _argv() -> list[str]:
+    root = Path(__file__).resolve().parent
+    args = list(sys.argv[1:])
+    if not args or args[0].startswith("-"):
+        args.insert(0, str(root / "project.json"))
+    if "--cwd" not in args:
+        args.extend(["--cwd", str(root)])
+    wheel = root / {wheel_arg!r}
+    if {bool(wheel_arg)!r} and wheel.exists() and "--lwrclpy-wheel" not in args:
+        args.extend(["--lwrclpy-wheel", str(wheel)])
+    return args
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(_argv()))
+'''
 
 
 def _build_ros2_export_zip(payload: dict) -> tuple[str, bytes]:
@@ -1039,19 +1185,58 @@ def generate_launch_description():
 """
 
 
-def _render_cli_export_readme(project_name: str) -> str:
+def _render_cli_export_requirements(wheel: Path | None, project_payload: dict | None = None) -> str:
+    lines = [
+        "pillow",
+        "opencv-python-headless",
+        "numpy",
+        "mcap",
+        "mcap-ros2-support",
+        "PyYAML",
+    ]
+    for node in (project_payload or {}).get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        for raw_line in str(node.get("requirements") or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line not in lines:
+                lines.append(line)
+    if wheel is not None and wheel.is_file():
+        lines.append(f"./wheels/{wheel.name}")
+    return "\n".join(lines) + "\n"
+
+
+def _render_cli_export_readme(project_name: str, wheel: Path | None) -> str:
+    wheel_text = (
+        f"- Bundled lwrclpy wheel: `wheels/{wheel.name}`\n"
+        if wheel is not None and wheel.is_file()
+        else "- No local lwrclpy wheel was configured when this package was exported. The runner will try to download a matching lwrclpy wheel on first run.\n"
+    )
     return f"""# {project_name} CLI Export
 
 This archive runs a saved lwrclpy Web Node Editor project without the web UI.
-It contains only `project.json`, this README, and a standalone `run_project.py`.
+It contains `run_project.py`, `project.json`, a small CLI runtime, `requirements.txt`, and the lwrclpy wheel used by the editor when available.
 
 ## Requirements
 
 - Python 3.13 or compatible Python for the lwrclpy wheel you use.
 - `venv` from the Python standard library, or `uv`.
-- Network access on the first run so `run_project.py` can install the matching lwrclpy wheel into its local `.venv`.
+{wheel_text}
 
-No system-wide install script is required. The runner creates a local `.venv` beside itself when needed.
+No system-wide install script is required. Use any Python environment with `venv` or `uv` available.
+Each exported node creates its own environment under `.node_envs/<node_id>` when needed, so node-specific Python versions and requirements stay separate.
+
+Manual install, if desired:
+
+```bash
+python3 -m venv venv
+. venv/bin/activate
+pip install -r requirements.txt
+```
+
+Do not run `pip install -r wheels/name.whl`; `-r` is only for requirements text files.
 
 ## Run
 
@@ -1072,9 +1257,10 @@ Without `--duration`, the project runs until interrupted.
 ## Notes
 
 - `project.json` is the exported editor project.
-- Runtime files are created in the local `.venv` beside this README.
+- Node environments are created under `.node_envs/` beside this README.
+- Worker state and logs are created under `.node_workers/`.
 - External image/video paths stored in the project must exist on the target PC, or you must edit `project.json`.
-- The runner implements the built-ins needed for CLI execution directly. It does not include the web editor runtime.
+- The package includes only the CLI graph runtime and worker scripts needed to run the project. It does not include the web UI.
 - For ROS 2/DDS communication across machines, make sure both PCs use compatible `ROS_DOMAIN_ID`, network interfaces, and QoS settings.
 """
 
