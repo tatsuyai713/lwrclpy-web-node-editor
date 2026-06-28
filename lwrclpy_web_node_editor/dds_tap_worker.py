@@ -6,9 +6,11 @@ import io
 import json
 import os
 import signal
+import struct
 import threading
 import time
 import traceback
+from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,10 @@ PREVIEW_JPEG_QUALITY = 60
 PREVIEW_JPEG_SUBSAMPLING = 2
 PREVIEW_MAX_SIDE = 640
 RAW_PREVIEW_ENCODINGS = {"rgb8", "bgr8", "mono8", "8uc1"}
+STREAM_HEADER = struct.Struct("<4sI Q I I I I I I d")
+STREAM_MAGIC = b"IPNF"
+STREAM_VERSION = 1
+STREAM_ENCODING_CODES = {"rgb8": 1, "bgr8": 2, "mono8": 3, "8uc1": 3, "jpeg": 10, "jpg": 10, "bmp": 11, "png": 12}
 EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
     "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
     "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=true",
@@ -123,6 +129,55 @@ def _write_bytes(path: Path, payload: Any) -> None:
     tmp_path.replace(path)
 
 
+def _create_shared_memory(name: str, size: int) -> shared_memory.SharedMemory | None:
+    try:
+        try:
+            stale = shared_memory.SharedMemory(name=name, create=False)
+            stale.close()
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        return shared_memory.SharedMemory(name=name, create=True, size=size)
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def _write_stream_frame(
+    memory: shared_memory.SharedMemory,
+    seq: int,
+    data: Any,
+    width: int,
+    height: int,
+    encoding: str,
+    source_width: int,
+    source_height: int,
+) -> bool:
+    payload = data if isinstance(data, (bytes, bytearray)) else bytes(data)
+    if len(payload) + STREAM_HEADER.size > memory.size:
+        return False
+    encoding_code = STREAM_ENCODING_CODES.get(str(encoding or "").lower(), 1)
+    view = memory.buf
+    view[STREAM_HEADER.size:STREAM_HEADER.size + len(payload)] = payload
+    STREAM_HEADER.pack_into(
+        view,
+        0,
+        STREAM_MAGIC,
+        STREAM_VERSION,
+        max(0, int(seq)),
+        max(0, int(width)),
+        max(0, int(height)),
+        max(0, int(encoding_code)),
+        len(payload),
+        max(0, int(source_width)),
+        max(0, int(source_height)),
+        time.time(),
+    )
+    return True
+
+
 def _bytes_payload(value: Any) -> Any:
     if isinstance(value, (bytes, bytearray, memoryview)):
         return value
@@ -159,6 +214,11 @@ class DdsTap:
         self.display_hz = max(0.1, min(float(config.get("displayHz") or DEFAULT_DISPLAY_HZ), 120.0))
         self.preview_encoding = str(config.get("previewEncoding") or "raw").lower()
         self.preview_max_side = max(0, int(config.get("previewMaxSide") or PREVIEW_MAX_SIDE))
+        self.stream_name = str(config.get("streamName") or "")
+        self.stream_size = max(0, int(config.get("streamSize") or 0))
+        self._stream_memory: shared_memory.SharedMemory | None = None
+        if self.mode == "image" and self.stream_name and self.stream_size > STREAM_HEADER.size:
+            self._stream_memory = _create_shared_memory(self.stream_name, self.stream_size)
         self.field_path = str(config.get("fieldPath") or "data")
         self.text_mode = "append" if str(config.get("textMode") or "replace") == "append" else "replace"
         self.max_chars = max(1, int(config.get("maxChars") or 20000))
@@ -171,7 +231,7 @@ class DdsTap:
         self._series: list[dict[str, float]] = []
         self._graph_recent_points: list[dict[str, float]] = []
         self._graph_reset_key = f"{os.getpid()}:{time.time_ns()}"
-        self._graph_transfer_limit = max(256, min(self.sample_limit, 2048))
+        self._graph_transfer_limit = self.graph_display_limit
         self._text = ""
         self._text_seq = 0
         self._latest_msg: Any = None
@@ -242,6 +302,8 @@ class DdsTap:
     def run_status_loop(self) -> None:
         next_at = 0.0
         next_frame_at = 0.0
+        next_keepalive_at = 0.0
+        last_status_seq = -1
         status_hz = self.display_hz
         status_period = (1.0 / status_hz) if self.mode in {"graph", "hz", "text"} else 0.25
         frame_period = 1.0 / self.display_hz
@@ -250,7 +312,17 @@ class DdsTap:
             try:
                 now = time.time() if self.mode == "graph" else time.perf_counter()
                 if now >= next_at:
-                    self._write_status(now)
+                    write_status = True
+                    current_seq = self._latest_seq
+                    if self.mode == "graph":
+                        with self._lock:
+                            current_seq = self._latest_seq
+                        write_status = current_seq != last_status_seq or now >= next_keepalive_at
+                    if write_status:
+                        self._write_status(now)
+                        last_status_seq = current_seq
+                        if self.mode == "graph":
+                            next_keepalive_at = now + 1.0
                     next_at = now + status_period
                 if self.mode == "image" and now >= next_frame_at:
                     if self._write_latest_frame():
@@ -398,6 +470,16 @@ class DdsTap:
         thread = self._frame_writer_thread
         if thread is not None:
             thread.join(timeout=1.0)
+        if self._stream_memory is not None:
+            try:
+                self._stream_memory.close()
+            except Exception:
+                pass
+            try:
+                self._stream_memory.unlink()
+            except Exception:
+                pass
+            self._stream_memory = None
 
     def _frame_writer_loop(self) -> None:
         while True:
@@ -444,7 +526,20 @@ class DdsTap:
             elif source_width > 0 and source_height > 0:
                 data, frame_encoding, preview_width, preview_height = _preview_image_bytes(source_width, source_height, _rgb_preview_bytes(data, dds_encoding))
         dds_format = _dds_format_label(str(status.get("dataType") or self.data_type), dds_encoding)
-        _write_bytes(self.frame_path, data)
+        stream_written = False
+        if self._stream_memory is not None:
+            stream_written = _write_stream_frame(
+                self._stream_memory,
+                seq,
+                data,
+                preview_width,
+                preview_height,
+                frame_encoding,
+                source_width,
+                source_height,
+            )
+        if not stream_written:
+            _write_bytes(self.frame_path, data)
         with self._lock:
             self._latest_frame_status = {
                 "encoding": dds_encoding,
@@ -457,7 +552,9 @@ class DdsTap:
                 "previewWidth": preview_width,
                 "previewHeight": preview_height,
                 "frameSeq": seq,
-                "framePath": str(self.frame_path),
+                "framePath": "" if stream_written else str(self.frame_path),
+                "streamName": self.stream_name if stream_written else "",
+                "streamSize": self.stream_size if stream_written else 0,
             }
         now = time.time()
         now_counter = time.perf_counter()
@@ -475,7 +572,9 @@ class DdsTap:
             "previewWidth": preview_width,
             "previewHeight": preview_height,
             "frameSeq": seq,
-            "framePath": str(self.frame_path),
+            "framePath": "" if stream_written else str(self.frame_path),
+            "streamName": self.stream_name if stream_written else "",
+            "streamSize": self.stream_size if stream_written else 0,
             "time": now,
             "running": True,
             "subscribed": True,

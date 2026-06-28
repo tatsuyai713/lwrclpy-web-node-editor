@@ -5,13 +5,20 @@ import io
 import json
 import os
 import signal
+import struct
 import threading
 import time
+import traceback
+from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 
 RUNNING = True
 DEFAULT_PREVIEW_HZ = 60.0
+STREAM_HEADER = struct.Struct("<4sI Q I I I I I I d")
+STREAM_MAGIC = b"IPNF"
+STREAM_VERSION = 1
+STREAM_ENCODING_CODES = {"rgb8": 1, "bgr8": 2, "mono8": 3, "8uc1": 3, "jpeg": 10, "jpg": 10, "bmp": 11, "png": 12}
 EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
     "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
     "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=true",
@@ -113,8 +120,48 @@ def _write_status(path: Path, **values: Any) -> None:
     tmp_path.replace(path)
 
 
+def _create_shared_memory(name: str, size: int) -> shared_memory.SharedMemory | None:
+    try:
+        try:
+            stale = shared_memory.SharedMemory(name=name, create=False)
+            stale.close()
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        return shared_memory.SharedMemory(name=name, create=True, size=size)
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def _write_stream_frame(memory: shared_memory.SharedMemory, seq: int, data: bytes, width: int, height: int, encoding: str, source_width: int, source_height: int) -> bool:
+    payload = data if isinstance(data, (bytes, bytearray)) else bytes(data)
+    if len(payload) + STREAM_HEADER.size > memory.size:
+        return False
+    encoding_code = STREAM_ENCODING_CODES.get(str(encoding or "").lower(), 1)
+    view = memory.buf
+    view[STREAM_HEADER.size:STREAM_HEADER.size + len(payload)] = payload
+    STREAM_HEADER.pack_into(
+        view,
+        0,
+        STREAM_MAGIC,
+        STREAM_VERSION,
+        max(0, int(seq)),
+        max(0, int(width)),
+        max(0, int(height)),
+        max(0, int(encoding_code)),
+        len(payload),
+        max(0, int(source_width)),
+        max(0, int(source_height)),
+        time.time(),
+    )
+    return True
+
+
 class PreviewFrameWriter:
-    def __init__(self, frame_path: Path, status_path: Path, width: int, height: int, source_encoding: str, preview_encoding: str = "jpeg", preview_max_side: int = 640) -> None:
+    def __init__(self, frame_path: Path, status_path: Path, width: int, height: int, source_encoding: str, preview_encoding: str = "jpeg", preview_max_side: int = 640, stream_name: str = "", stream_size: int = 0) -> None:
         self.frame_path = frame_path
         self.status_path = status_path
         self.width = width
@@ -122,6 +169,9 @@ class PreviewFrameWriter:
         self.source_encoding = source_encoding
         self.preview_encoding = preview_encoding
         self.preview_max_side = max(0, int(preview_max_side or 0))
+        self.stream_name = stream_name
+        self.stream_size = max(0, int(stream_size or 0))
+        self._stream_memory = _create_shared_memory(self.stream_name, self.stream_size) if self.stream_name and self.stream_size > STREAM_HEADER.size else None
         self._condition = threading.Condition()
         self._item: tuple[int, bytes, dict[str, Any]] | None = None
         self._latest_status: dict[str, Any] = {}
@@ -139,6 +189,16 @@ class PreviewFrameWriter:
             self._stopped = True
             self._condition.notify()
         self._thread.join(timeout=1.0)
+        if self._stream_memory is not None:
+            try:
+                self._stream_memory.close()
+            except Exception:
+                pass
+            try:
+                self._stream_memory.unlink()
+            except Exception:
+                pass
+            self._stream_memory = None
 
     def status_snapshot(self) -> dict[str, Any]:
         with self._condition:
@@ -158,15 +218,21 @@ class PreviewFrameWriter:
             seq, frame, status_values = item
             try:
                 data, frame_encoding, preview_width, preview_height = self._preview_payload(frame)
-                tmp_frame_path = self.frame_path.with_name(f"{self.frame_path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-                tmp_frame_path.write_bytes(data)
-                tmp_frame_path.replace(self.frame_path)
+                stream_written = False
+                if self._stream_memory is not None:
+                    stream_written = _write_stream_frame(self._stream_memory, seq, data, preview_width, preview_height, frame_encoding, self.width, self.height)
+                if not stream_written:
+                    tmp_frame_path = self.frame_path.with_name(f"{self.frame_path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+                    tmp_frame_path.write_bytes(data)
+                    tmp_frame_path.replace(self.frame_path)
                 frame_status = {
                     "frameSeq": seq,
-                    "framePath": str(self.frame_path),
+                    "framePath": "" if stream_written else str(self.frame_path),
                     "frameEncoding": frame_encoding,
                     "previewWidth": preview_width,
                     "previewHeight": preview_height,
+                    "streamName": self.stream_name if stream_written else "",
+                    "streamSize": self.stream_size if stream_written else 0,
                 }
                 with self._condition:
                     self._latest_status = frame_status
@@ -387,6 +453,8 @@ def main() -> int:
     if preview_encoding not in {"jpeg", "bmp", "raw"}:
         preview_encoding = "jpeg"
     preview_max_side = max(0, int(config.get("previewMaxSide") or 640))
+    stream_name = str(config.get("streamName") or "")
+    stream_size = max(0, int(config.get("streamSize") or 0))
     status_path = Path(config.get("statusPath") or (str(config_path) + ".status"))
     frame_path = Path(config.get("framePath") or (str(config_path) + ".frame"))
 
@@ -424,7 +492,7 @@ def main() -> int:
     next_preview_at = 0.0
     next_status_at = 0.0
     frame_encoding = "jpeg" if output_encoding == "jpeg" else preview_encoding
-    preview_writer = PreviewFrameWriter(frame_path, status_path, width, height, output_encoding, frame_encoding, preview_max_side) if preview_hz > 0 else None
+    preview_writer = PreviewFrameWriter(frame_path, status_path, width, height, output_encoding, frame_encoding, preview_max_side, stream_name, stream_size) if preview_hz > 0 else None
     _write_status(
         status_path,
         running=True,

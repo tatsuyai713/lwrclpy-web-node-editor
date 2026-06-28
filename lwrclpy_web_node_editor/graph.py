@@ -1024,6 +1024,8 @@ class CustomLwrclNodeInstance:
             "outputDir": str(Path.cwd() / "saved_images"),
             "statusPath": str(status_path),
             "framePath": str(frame_path),
+            "streamName": f"ipn_{self.config.id}_frame_{os.getpid()}",
+            "streamSize": (640 * 2048 * 4) + 4096,
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
             "transport": self._dds_tap_transport(),
             "previewEncoding": "raw" if self.config.tool_type == "image_view" else "jpeg",
@@ -1228,7 +1230,6 @@ class CustomLwrclNodeInstance:
             self.config.params.get("videoPath"),
             float(self.config.params.get("publishHz") or 30.0),
             bool(self.config.params.get("loop", True)),
-            int(self.config.params.get("maxSide") or 0),
             self._video_frame_skip(),
             bool(self.config.params.get("_externalDdsCompatible")),
             int(self.config.params.get("_expectedSubscriptions") or 0),
@@ -1248,10 +1249,11 @@ class CustomLwrclNodeInstance:
             "publishHz": max(0.01, float(self.config.params.get("publishHz") or 30.0)),
             "useSourceFps": True,
             "loop": bool(self.config.params.get("loop", True)),
-            "maxSide": 0,
             "frameSkip": self._video_frame_skip(),
             "statusPath": str(status_path),
             "framePath": str(frame_path),
+            "streamName": f"ipn_{self.config.id}_video_{os.getpid()}",
+            "streamSize": (640 * 2048 * 4) + 4096,
             "enableDdsPublish": True,
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
             "expectedSubscriptions": int(self.config.params.get("_expectedSubscriptions") or 0),
@@ -1288,13 +1290,14 @@ class CustomLwrclNodeInstance:
         if not status:
             status = "video DDS worker running"
         frame_path = Path(str(data.get("framePath") or "")) if isinstance(data, dict) else Path("")
+        stream_name = str(data.get("streamName") or "") if isinstance(data, dict) else ""
         seq = int(data.get("frameSeq") or 0) if isinstance(data, dict) else 0
         width = int(data.get("width") or 0) if isinstance(data, dict) else 0
         height = int(data.get("height") or 0) if isinstance(data, dict) else 0
         preview_width = int(data.get("previewWidth") or width) if isinstance(data, dict) else 0
         preview_height = int(data.get("previewHeight") or height) if isinstance(data, dict) else 0
         encoding = str(data.get("frameEncoding") or data.get("encoding") or "jpeg").lower() if isinstance(data, dict) else "jpeg"
-        if seq > 0 and frame_path.is_file():
+        if seq > 0 and (stream_name or frame_path.is_file()):
             self.state["image_view_frame"] = {
                 "seq": seq,
                 "width": preview_width,
@@ -1302,7 +1305,9 @@ class CustomLwrclNodeInstance:
                 "sourceWidth": width,
                 "sourceHeight": height,
                 "encoding": encoding,
-                "path": str(frame_path),
+                "path": str(frame_path) if not stream_name else "",
+                "streamName": stream_name,
+                "streamSize": int(data.get("streamSize") or 0),
                 "updatedAt": time.time(),
             }
             self.view = {
@@ -1315,6 +1320,7 @@ class CustomLwrclNodeInstance:
                     "sourceWidth": width,
                     "sourceHeight": height,
                     "encoding": self.state["image_view_frame"]["encoding"],
+                    "stream": bool(stream_name),
                 },
                 "status": status,
             }
@@ -1477,8 +1483,9 @@ class CustomLwrclNodeInstance:
             self.view = {"kind": "image", "dataUrl": "", "status": str(status.get("error"))}
             return
         frame_path = Path(str(status.get("framePath") or ""))
+        stream_name = str(status.get("streamName") or "")
         seq = int(status.get("frameSeq") or 0)
-        if seq <= 0 or not frame_path.exists():
+        if seq <= 0 or (not stream_name and not frame_path.exists()):
             self.view = {"kind": "image", "dataUrl": "", "status": "No image"}
             return
         width = int(status.get("width") or 0)
@@ -1509,7 +1516,9 @@ class CustomLwrclNodeInstance:
             "sourceWidth": width,
             "sourceHeight": height,
             "encoding": frame_encoding,
-            "path": str(frame_path),
+            "path": str(frame_path) if not stream_name else "",
+            "streamName": stream_name,
+            "streamSize": int(status.get("streamSize") or 0),
             "updatedAt": time.time(),
         }
         frame_ref = {
@@ -1520,6 +1529,7 @@ class CustomLwrclNodeInstance:
             "sourceWidth": width,
             "sourceHeight": height,
             "encoding": self.state["image_view_frame"]["encoding"],
+            "stream": bool(stream_name),
         }
         self.view = {
             "kind": "image",
@@ -1619,8 +1629,9 @@ class CustomLwrclNodeInstance:
         if not isinstance(status, dict):
             return None
         frame_path = Path(str(status.get("framePath") or ""))
+        stream_name = str(status.get("streamName") or "")
         seq = int(status.get("frameSeq") or 0)
-        if seq <= 0 or not frame_path.is_file():
+        if seq <= 0 or (not stream_name and not frame_path.is_file()):
             return None
         width = int(status.get("width") or 0)
         height = int(status.get("height") or 0)
@@ -1634,7 +1645,9 @@ class CustomLwrclNodeInstance:
             "sourceWidth": width,
             "sourceHeight": height,
             "encoding": encoding,
-            "path": str(frame_path),
+            "path": str(frame_path) if not stream_name else "",
+            "streamName": stream_name,
+            "streamSize": int(status.get("streamSize") or 0),
             "updatedAt": time.time(),
         }
 
@@ -1695,6 +1708,9 @@ class CustomLwrclNodeInstance:
             "kind": "plot",
             "points": points,
             "series": [],
+            "statusTime": float(status.get("time") or 0.0),
+            "running": bool(status.get("running", True)),
+            "hz": float(status.get("hz") or 0.0),
             "sampleLimit": max(8, min(int(self.config.params.get("sampleLimit") or 10000), 100000)),
             "resetKey": str(status.get("resetKey") or ""),
             "status": str(status.get("fieldPath") or self.config.params.get("fieldPath") or "data"),

@@ -7,6 +7,7 @@ const VIDEO_RAW_IMAGE_TYPE = 'sensor_msgs/msg/Image';
 const VIDEO_COMPRESSED_IMAGE_TYPE = 'sensor_msgs/msg/CompressedImage';
 const FRAME_FETCH_TIMEOUT_MS = 1200;
 const FRAME_DECODE_TIMEOUT_MS = 1200;
+const FRAME_STREAM_HEADER_BYTES = 36;
 
 const state = {
   messageTypes: {},
@@ -130,7 +131,7 @@ const INTERFACE_NODE_TEMPLATES = [
       name: 'video_file_input',
       inputs: [],
       outputs: [{ id: 'out1', name: 'frame', dataType: VIDEO_RAW_IMAGE_TYPE }],
-      params: { loop: false, publishHz: 30, detectedFps: 0, maxSide: 0, frameSkip: 0 },
+      params: { loop: false, publishHz: 30, detectedFps: 0, frameSkip: 0 },
       loopCode: '',
     },
   },
@@ -1743,7 +1744,6 @@ function bindToolActions(el, node) {
       sourceFps: detectedFps > 0 ? detectedFps : undefined,
       sourceWidth: Number(metadata.width || 0) || undefined,
       sourceHeight: Number(metadata.height || 0) || undefined,
-      maxSide: 0,
       frameSkip: videoFrameSkip(node),
       outputType: videoOutputType(node),
       embeddedVideo: false,
@@ -2482,7 +2482,6 @@ function nodeForRunPayload(node) {
   delete params.dataUrl;
   if (params.serverDecode && params.videoPath) {
     delete params.frameMessage;
-    params.maxSide = 0;
     params.frameSkip = videoFrameSkip(node);
     params.outputType = videoOutputType(node);
   }
@@ -2640,7 +2639,6 @@ function videoRuntimeParams(node) {
       serverDecode: true,
       loop: Boolean(p.loop),
       publishHz: effectiveVideoHz(node),
-      maxSide: 0,
       frameSkip: videoFrameSkip(node),
       outputType: videoOutputType(node),
     };
@@ -2703,7 +2701,11 @@ function runHasStartingNodes(nodes) {
     }
     const view = payload?.view;
     if (view?.kind === 'image' && !(view.dataUrl || view.raw || view.frameRef) && /worker/.test(status)) return true;
-    if (view?.kind === 'plot' && Array.isArray(view.series) && view.series.length === 0 && /worker/.test(status)) return true;
+    if (view?.kind === 'plot') {
+      const hasSeries = Array.isArray(view.series) && view.series.length > 0;
+      const hasPoints = Array.isArray(view.points) && view.points.length > 0;
+      if (!hasSeries && !hasPoints && /worker/.test(status)) return true;
+    }
     return false;
   });
 }
@@ -2861,6 +2863,7 @@ function mergeGraphView(nodeId, view) {
   }
   if (buffer.points.length > limit) buffer.points.splice(0, buffer.points.length - limit);
   view.series = buffer.points.slice();
+  view.clientReceivedAt = performance.now() / 1000;
 }
 
 function nodeViewSignature(view) {
@@ -2939,9 +2942,14 @@ const frameFetchControllers = new WeakMap();
 function stopFramePullLoop(canvas) {
   if (!canvas) return;
   canvas._framePullActive = false;
+  canvas._frameStreamActive = false;
   if (canvas._framePullTimer) {
     clearTimeout(canvas._framePullTimer);
     canvas._framePullTimer = null;
+  }
+  if (canvas._frameStreamController) {
+    canvas._frameStreamController.abort();
+    canvas._frameStreamController = null;
   }
   cancelCanvasFrameLoad(canvas);
 }
@@ -2976,11 +2984,127 @@ function cancelCanvasFrameLoad(canvas) {
 
 function scheduleFrameRefDraw(canvas, frameRef) {
   if (!canvas || !frameRef) return;
+  if (frameRef.stream) {
+    scheduleFrameStreamDraw(canvas, frameRef);
+    return;
+  }
+  if (canvas._frameStreamActive) {
+    stopFramePullLoop(canvas);
+  }
   canvas._framePullRef = frameRef;
   canvas.dataset.desiredFrame = `${frameRef.nodeId}:${frameRef.seq || 0}`;
   if (canvas._framePullActive) return;
   canvas._framePullActive = true;
   pullLatestFrameToCanvas(canvas);
+}
+
+function drawRawBytesToCanvas(canvas, bytes, width, height, encoding, signature) {
+  if (!bytes?.length || !width || !height) return;
+  const required = width * height * 4;
+  if (!canvas._rgbaBuffer || canvas._rgbaBuffer.length !== required) {
+    canvas._rgbaBuffer = new Uint8ClampedArray(required);
+    canvas._imageData = new ImageData(canvas._rgbaBuffer, width, height);
+  }
+  const rgba = canvas._rgbaBuffer;
+  const pixelCount = width * height;
+  const normalized = String(encoding || 'rgb8').toLowerCase();
+  if (normalized === 'mono8' || normalized === '8uc1') {
+    for (let i = 0; i < pixelCount; i += 1) {
+      const v = bytes[i] || 0;
+      const dst = i * 4;
+      rgba[dst] = v;
+      rgba[dst + 1] = v;
+      rgba[dst + 2] = v;
+      rgba[dst + 3] = 255;
+    }
+  } else {
+    const bgr = normalized === 'bgr8';
+    for (let i = 0; i < pixelCount; i += 1) {
+      const src = i * 3;
+      const dst = i * 4;
+      rgba[dst] = bytes[src + (bgr ? 2 : 0)] || 0;
+      rgba[dst + 1] = bytes[src + 1] || 0;
+      rgba[dst + 2] = bytes[src + (bgr ? 0 : 2)] || 0;
+      rgba[dst + 3] = 255;
+    }
+  }
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  canvas.getContext('2d').putImageData(canvas._imageData, 0, 0);
+  canvas.dataset.rawSignature = signature;
+}
+
+function streamEncodingName(code) {
+  if (code === 2) return 'bgr8';
+  if (code === 3) return 'mono8';
+  if (code === 10) return 'jpeg';
+  if (code === 11) return 'bmp';
+  if (code === 12) return 'png';
+  return 'rgb8';
+}
+
+function appendBytes(a, b) {
+  if (!a?.length) return b;
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+function scheduleFrameStreamDraw(canvas, frameRef) {
+  if (!canvas || !frameRef?.nodeId) return;
+  canvas._framePullRef = frameRef;
+  if (canvas._frameStreamActive && canvas._frameStreamNodeId === frameRef.nodeId) return;
+  stopFramePullLoop(canvas);
+  canvas._frameStreamActive = true;
+  canvas._frameStreamNodeId = frameRef.nodeId;
+  const controller = new AbortController();
+  canvas._frameStreamController = controller;
+  pullFrameStreamToCanvas(canvas, frameRef.nodeId, controller).catch((err) => {
+    if (err?.name !== 'AbortError') console.warn('Frame stream failed', err);
+  });
+}
+
+async function pullFrameStreamToCanvas(canvas, nodeId, controller) {
+  const response = await fetch(`/api/node-frame-stream?nodeId=${encodeURIComponent(nodeId)}`, {
+    signal: controller.signal,
+    cache: 'no-store',
+  });
+  if (!response.ok || !response.body) return;
+  const reader = response.body.getReader();
+  let buffer = new Uint8Array(0);
+  while (canvas._frameStreamActive && canvas.isConnected) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer = appendBytes(buffer, value);
+    while (buffer.length >= FRAME_STREAM_HEADER_BYTES) {
+      const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      const magic = String.fromCharCode(buffer[0], buffer[1], buffer[2], buffer[3]);
+      if (magic !== 'IPFS') {
+        buffer = new Uint8Array(0);
+        break;
+      }
+      const seq = Number(view.getBigUint64(4, true));
+      const width = view.getUint32(12, true);
+      const height = view.getUint32(16, true);
+      const encodingCode = view.getUint32(20, true);
+      const dataLength = view.getUint32(24, true);
+      if (buffer.length < FRAME_STREAM_HEADER_BYTES + dataLength) break;
+      const payload = buffer.slice(FRAME_STREAM_HEADER_BYTES, FRAME_STREAM_HEADER_BYTES + dataLength);
+      buffer = buffer.slice(FRAME_STREAM_HEADER_BYTES + dataLength);
+      const encoding = streamEncodingName(encodingCode);
+      const signature = frameSignature(nodeId, seq);
+      if (['jpeg', 'bmp', 'png', 'webp'].includes(encoding)) {
+        const bitmap = await blobToBitmapLike(new Blob([payload], { type: encoding === 'jpeg' ? 'image/jpeg' : `image/${encoding}` }));
+        drawBitmapLike(canvas, bitmap);
+        canvas.dataset.rawSignature = signature;
+      } else {
+        drawRawBytesToCanvas(canvas, payload, width, height, encoding, signature);
+      }
+    }
+  }
 }
 
 async function pullLatestFrameToCanvas(canvas) {
@@ -3190,6 +3314,7 @@ function patchNodeViewEl(el, view) {
     patchPlotViewEl(el, view);
     return;
   }
+  stopPlotAnimation(el);
   if (view?.kind === 'image' && (view.dataUrl || view.raw || view.frameRef)) {
     const existingFig = el.querySelector('figure.image-view');
     if (existingFig) {
@@ -3227,6 +3352,30 @@ function patchNodeViewEl(el, view) {
   }
 }
 
+function stopPlotAnimation(el) {
+  if (!el) return;
+  if (el._plotAnimationFrame) {
+    cancelAnimationFrame(el._plotAnimationFrame);
+    el._plotAnimationFrame = null;
+  }
+  if (el._plotRenderTimer) {
+    clearTimeout(el._plotRenderTimer);
+    el._plotRenderTimer = null;
+  }
+}
+
+function schedulePlotAnimation(el, view) {
+  if (!el || view?.running === false || !Array.isArray(view?.series) || view.series.length < 2) return;
+  if (el._plotAnimationFrame) return;
+  el._plotAnimationFrame = requestAnimationFrame(() => {
+    el._plotAnimationFrame = null;
+    const nodeId = el.dataset.nodeView;
+    const nextView = state.nodeViews[nodeId];
+    if (!document.body.contains(el) || nextView?.kind !== 'plot' || nextView.running === false) return;
+    patchPlotViewEl(el, nextView);
+  });
+}
+
 function patchPlotViewEl(el, view) {
   const now = performance.now();
   const minIntervalMs = UI_DISPLAY_FRAME_MS;
@@ -3257,6 +3406,7 @@ function patchPlotViewEl(el, view) {
   if (svg && svg.getAttribute('viewBox') !== '0 0 280 120') svg.setAttribute('viewBox', '0 0 280 120');
   if (polyline && polyline.getAttribute('points') !== model.points) polyline.setAttribute('points', model.points);
   if (caption && caption.textContent !== model.caption) caption.textContent = model.caption;
+  schedulePlotAnimation(el, nextView);
 }
 
 function normalizedNodeView(nodeId, view) {
@@ -3302,7 +3452,13 @@ function plotRenderModel(series, label, view = {}) {
   }).filter((point) => Number.isFinite(point.t) && Number.isFinite(point.y));
   const latestT = allPoints.length ? Math.max(...allPoints.map((point) => point.t)) : 0;
   const windowSec = Math.max(0.1, Number(view.xAxisSeconds || (latestT - (allPoints[0]?.t || 0)) || 1));
-  const startT = latestT - windowSec;
+  let renderT = latestT;
+  const statusTime = Number(view.statusTime || 0);
+  const clientReceivedAt = Number(view.clientReceivedAt || 0);
+  if (view.running !== false && Number.isFinite(statusTime) && statusTime > 0 && Number.isFinite(clientReceivedAt) && clientReceivedAt > 0) {
+    renderT = Math.max(renderT, statusTime + Math.max(0, (performance.now() / 1000) - clientReceivedAt));
+  }
+  const startT = renderT - windowSec;
   const pointsData = allPoints.filter((point) => point.t >= startT);
   if (pointsData.length < 2) {
     return { points: '', caption: label || 'Waiting for values' };
@@ -3717,10 +3873,10 @@ function handleVideoEnded(controller) {
   // Do not stop the run when a video ends; other nodes may still be running.
 }
 
-function imageElementToMessage(source, maxSide = 640, options = {}) {
+function imageElementToMessage(source, sizeLimit = 0, options = {}) {
   const naturalWidth = source.videoWidth || source.naturalWidth || source.width;
   const naturalHeight = source.videoHeight || source.naturalHeight || source.height;
-  const scale = maxSide > 0 ? Math.min(1, maxSide / Math.max(naturalWidth, naturalHeight)) : 1;
+  const scale = sizeLimit > 0 ? Math.min(1, sizeLimit / Math.max(naturalWidth, naturalHeight)) : 1;
   const width = Math.max(1, Math.round(naturalWidth * scale));
   const height = Math.max(1, Math.round(naturalHeight * scale));
   const canvas = document.createElement('canvas');

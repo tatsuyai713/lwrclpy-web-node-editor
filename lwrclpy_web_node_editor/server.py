@@ -13,12 +13,14 @@ import re
 import signal
 import shutil
 import subprocess
+import struct
 import sys
 import threading
 import time
 import urllib.request
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from multiprocessing import shared_memory
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from . import graph as graph_module
@@ -40,6 +42,11 @@ APP_SETTINGS_DIR = PROJECT_DIR / ".app_settings"
 CUSTOM_NODE_DIR = APP_SETTINGS_DIR / "custom_nodes"
 SAMPLES_DIR = PROJECT_DIR / "samples"
 GRAPH_RUN_HZ = 60.0
+STREAM_HEADER = struct.Struct("<4sI Q I I I I I I d")
+STREAM_CHUNK_HEADER = struct.Struct("<4sQIIIIII")
+STREAM_MAGIC = b"IPNF"
+STREAM_CHUNK_MAGIC = b"IPFS"
+STREAM_ENCODINGS = {1: "rgb8", 2: "bgr8", 3: "mono8", 10: "jpeg", 11: "bmp", 12: "png"}
 LWRCLPY_RELEASES_API_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
 
 
@@ -1710,6 +1717,10 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             self._send_node_frame(str((query.get("nodeId") or [""])[0]))
             return
+        if path == "/api/node-frame-stream":
+            query = parse_qs(parsed.query)
+            self._send_node_frame_stream(str((query.get("nodeId") or [""])[0]))
+            return
         self._send_static(path)
 
     def do_POST(self):
@@ -1904,6 +1915,74 @@ class Handler(BaseHTTPRequestHandler):
                 with frame_path.open("rb") as handle:
                     shutil.copyfileobj(handle, self.wfile, length=256 * 1024)
         except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def _read_stream_frame(self, frame: dict) -> dict | None:
+        name = str(frame.get("streamName") or "")
+        size = int(frame.get("streamSize") or 0)
+        if not name or size <= STREAM_HEADER.size:
+            return None
+        memory = None
+        try:
+            memory = shared_memory.SharedMemory(name=name, create=False)
+            header = bytes(memory.buf[:STREAM_HEADER.size])
+            magic, version, seq, width, height, encoding_code, data_len, source_width, source_height, timestamp = STREAM_HEADER.unpack(header)
+            if magic != STREAM_MAGIC or version != 1 or data_len <= 0 or data_len + STREAM_HEADER.size > memory.size:
+                return None
+            data = bytes(memory.buf[STREAM_HEADER.size:STREAM_HEADER.size + data_len])
+            header_after = bytes(memory.buf[:STREAM_HEADER.size])
+            if header_after != header:
+                return None
+            return {
+                "seq": int(seq),
+                "width": int(width),
+                "height": int(height),
+                "sourceWidth": int(source_width),
+                "sourceHeight": int(source_height),
+                "encodingCode": int(encoding_code),
+                "encoding": STREAM_ENCODINGS.get(int(encoding_code), "rgb8"),
+                "timestamp": float(timestamp),
+                "data": data,
+            }
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return None
+        finally:
+            if memory is not None:
+                try:
+                    memory.close()
+                except Exception:
+                    pass
+
+    def _send_node_frame_stream(self, node_id: str):
+        try:
+            self.send_response(200)
+            self.send_header("content-type", "application/octet-stream")
+            self.send_header("cache-control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("connection", "close")
+            self.end_headers()
+            last_seq = 0
+            while True:
+                frame = self.runtime.get_node_frame(node_id)
+                stream_frame = self._read_stream_frame(frame or {})
+                if stream_frame is not None and int(stream_frame["seq"]) > last_seq:
+                    payload = stream_frame["data"]
+                    self.wfile.write(STREAM_CHUNK_HEADER.pack(
+                        STREAM_CHUNK_MAGIC,
+                        int(stream_frame["seq"]),
+                        int(stream_frame["width"]),
+                        int(stream_frame["height"]),
+                        int(stream_frame["encodingCode"]),
+                        len(payload),
+                        int(stream_frame["sourceWidth"] or stream_frame["width"]),
+                        int(stream_frame["sourceHeight"] or stream_frame["height"]),
+                    ))
+                    self.wfile.write(payload)
+                    self.wfile.flush()
+                    last_seq = int(stream_frame["seq"])
+                time.sleep(1.0 / max(1.0, GRAPH_RUN_HZ))
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
 
     def _send_no_content(self) -> None:
