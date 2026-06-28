@@ -2533,7 +2533,7 @@ async function readyRun() {
   state.ready = false;
   state.readySignature = '';
   $('ready-model').classList.add('active');
-  setExecutionStatus('running', 'Preparing node environments');
+  setExecutionStatus('preparing', 'Preparing node environments');
   try {
     const payload = graphRunPayload();
     const data = await fetch('/api/ready', {
@@ -2799,6 +2799,7 @@ function setExecutionStatus(kind, detail) {
   label.textContent = {
     idle: 'Idle',
     tick: 'Tick',
+    preparing: 'Preparing',
     starting: 'Starting',
     running: 'Running',
     stopping: 'Stopping',

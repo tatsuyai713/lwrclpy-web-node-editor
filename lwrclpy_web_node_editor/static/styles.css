@@ -327,6 +327,7 @@ body.panning, body.panning * {
 }
 .status-pill.idle { background: var(--muted); }
 .status-pill.tick { background: var(--warn); }
+.status-pill.preparing { background: #7f8ea3; }
 .status-pill.starting { background: #62a8ff; }
 .status-pill.running { background: var(--accent); }
 .status-pill.stopping { background: #d58b24; }
