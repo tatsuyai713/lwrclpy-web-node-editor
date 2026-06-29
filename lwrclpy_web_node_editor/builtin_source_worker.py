@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -86,7 +87,21 @@ def _import_type_class(type_name: str):
     return getattr(module, name)
 
 
-def _topic_qos(data_type: str, external: bool = False) -> Any:
+def _topic_qos(data_type: str, external: bool = False, topic: str = "") -> Any:
+    normalized = str(data_type).replace(".", "/")
+    topic_name = str(topic or "")
+    if normalized == "tf2_msgs/msg/TFMessage" and topic_name.rstrip("/") == "/tf_static":
+        try:
+            import rclpy.qos as qos
+
+            return qos.QoSProfile(
+                history=qos.HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=qos.ReliabilityPolicy.RELIABLE,
+                durability=qos.DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+        except Exception:
+            return 1
     if str(data_type).replace(".", "/") not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
         return 10
     try:
@@ -111,6 +126,16 @@ def _set_field(msg: Any, key: str, value: Any) -> None:
         except TypeError:
             pass
     setattr(msg, key, value)
+
+
+def _get_field(msg: Any, key: str) -> Any:
+    field = getattr(msg, key, None)
+    if callable(field):
+        try:
+            return field()
+        except TypeError:
+            return field
+    return field
 
 
 def _plain_value(value: Any) -> Any:
@@ -147,8 +172,8 @@ def _populate_message(msg: Any, value: Any) -> None:
     if isinstance(value, dict):
         for key, item in value.items():
             if hasattr(msg, key):
-                current = getattr(msg, key, None)
-                if isinstance(item, dict) and current is not None and not callable(current) and hasattr(current, "__dict__"):
+                current = _get_field(msg, key)
+                if isinstance(item, dict) and current is not None and not callable(current):
                     _populate_message(current, item)
                 else:
                     _set_field(msg, key, item)
@@ -160,6 +185,120 @@ def _coerce_message(type_name: str, value: Any) -> Any:
     msg = _import_type_class(type_name)()
     _populate_message(msg, _plain_value(value))
     return msg
+
+
+def _set_time_stamp(stamp: Any, value: float) -> None:
+    sec = int(value)
+    nanosec = int((value - sec) * 1_000_000_000)
+    if stamp is not None:
+        _set_field(stamp, "sec", sec)
+        _set_field(stamp, "nanosec", nanosec)
+
+
+def _quaternion_from_rpy(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    return (
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    )
+
+
+def _float_triplet(value: str | None, default: tuple[float, float, float]) -> tuple[float, float, float]:
+    if not value:
+        return default
+    parts = str(value).replace(",", " ").split()
+    if len(parts) != 3:
+        return default
+    try:
+        return float(parts[0]), float(parts[1]), float(parts[2])
+    except Exception:
+        return default
+
+
+def _load_urdf_or_xacro(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".xacro":
+        try:
+            import xacro  # type: ignore
+
+            return xacro.process_file(str(path)).toxml()
+        except Exception:
+            pass
+        result = subprocess.run(["xacro", str(path)], capture_output=True, text=True)
+        if result.returncode != 0:
+            text = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(text or "xacro failed")
+        return result.stdout
+    return path.read_text(encoding="utf-8")
+
+
+def _urdf_fixed_transforms(path: Path) -> list[dict[str, Any]]:
+    root = ET.fromstring(_load_urdf_or_xacro(path))
+    transforms: list[dict[str, Any]] = []
+    for joint in root.findall("joint"):
+        if str(joint.attrib.get("type") or "") != "fixed":
+            continue
+        parent = joint.find("parent")
+        child = joint.find("child")
+        parent_link = str(parent.attrib.get("link") or "") if parent is not None else ""
+        child_link = str(child.attrib.get("link") or "") if child is not None else ""
+        if not parent_link or not child_link:
+            continue
+        origin = joint.find("origin")
+        xyz = _float_triplet(origin.attrib.get("xyz") if origin is not None else None, (0.0, 0.0, 0.0))
+        rpy = _float_triplet(origin.attrib.get("rpy") if origin is not None else None, (0.0, 0.0, 0.0))
+        qx, qy, qz, qw = _quaternion_from_rpy(*rpy)
+        transforms.append({
+            "parent": parent_link,
+            "child": child_link,
+            "translation": xyz,
+            "rotation": (qx, qy, qz, qw),
+        })
+    return transforms
+
+
+def _transform_stamped_messages(transforms: list[dict[str, Any]]) -> list[Any]:
+    transform_cls = _import_type_class("geometry_msgs/msg/TransformStamped")
+    stamp_time = time.time()
+    messages = []
+    for item in transforms:
+        msg = transform_cls()
+        header = _get_field(msg, "header")
+        if header is not None:
+            _set_time_stamp(_get_field(header, "stamp"), stamp_time)
+            _set_field(header, "frame_id", str(item["parent"]))
+        _set_field(msg, "child_frame_id", str(item["child"]))
+        transform = _get_field(msg, "transform")
+        if transform is not None:
+            translation = _get_field(transform, "translation")
+            rotation = _get_field(transform, "rotation")
+            tx, ty, tz = item["translation"]
+            qx, qy, qz, qw = item["rotation"]
+            if translation is not None:
+                _set_field(translation, "x", float(tx))
+                _set_field(translation, "y", float(ty))
+                _set_field(translation, "z", float(tz))
+            if rotation is not None:
+                _set_field(rotation, "x", float(qx))
+                _set_field(rotation, "y", float(qy))
+                _set_field(rotation, "z", float(qz))
+                _set_field(rotation, "w", float(qw))
+        messages.append(msg)
+    return messages
+
+
+def _tf_message(transforms: list[dict[str, Any]]) -> Any:
+    tf_msg = _import_type_class("tf2_msgs/msg/TFMessage")()
+    messages = _transform_stamped_messages(transforms)
+    _set_field(tf_msg, "transforms", messages)
+    return tf_msg
 
 
 def _write_status(path: Path, **values: Any) -> None:
@@ -440,6 +579,36 @@ def _run_function_generator(config: dict[str, Any], publisher: Any) -> None:
         time.sleep(max(0.0, min(0.002, next_at - time.time())))
 
 
+def _run_urdf_static_tf(config: dict[str, Any], node: Any) -> None:
+    params = config.get("params") or {}
+    status_path = Path(config["statusPath"])
+    urdf_path = Path(str(params.get("urdfPath") or "")).expanduser()
+    if not urdf_path.is_file():
+        _write_status(status_path, running=False, error=f"URDF/Xacro file not found: {urdf_path}", status="No URDF/Xacro selected")
+        return
+    transforms = _urdf_fixed_transforms(urdf_path)
+    transform_messages = _transform_stamped_messages(transforms)
+    from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+
+    broadcaster = StaticTransformBroadcaster(node)
+    count = 0
+    while RUNNING:
+        broadcaster.sendTransform(transform_messages)
+        count += 1
+        _write_status(
+            status_path,
+            running=True,
+            published=count,
+            transformCount=len(transforms),
+            status=f"broadcast {len(transforms)} static transforms from {urdf_path.name}",
+        )
+        if count >= 3:
+            break
+        time.sleep(0.25)
+    while RUNNING:
+        time.sleep(0.2)
+
+
 def _run_image_input(config: dict[str, Any], publisher: Any) -> None:
     params = config.get("params") or {}
     data_type = str(config.get("dataType") or "sensor_msgs/msg/Image")
@@ -664,19 +833,26 @@ def main() -> int:
                 publishers[str(output.get("id"))] = node.create_publisher(
                     _import_type_class(data_type),
                     str(topics[0]),
-                    _topic_qos(data_type, bool(config.get("externalDdsCompatible"))),
+                    _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(topics[0])),
                 )
             _wait_for_expected_subscriptions(config, publishers, Path(config["statusPath"]))
             _run_mcap_input(config, publishers)
         else:
             data_type = str(config["dataType"])
-            publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible"))))
-            _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
             if config.get("toolType") == "function_generator":
+                publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_function_generator(config, publisher)
+            elif config.get("toolType") == "urdf_static_tf_publisher":
+                _wait_for_expected_subscriptions(config, {}, Path(config["statusPath"]))
+                _run_urdf_static_tf(config, node)
             elif config.get("toolType") == "image_file_input":
+                publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_image_input(config, publisher)
             elif config.get("toolType") == "video_file_input":
+                publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_video_input(config, publisher)
     except Exception as exc:
         had_error = True

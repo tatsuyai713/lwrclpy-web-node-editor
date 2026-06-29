@@ -4,6 +4,7 @@ import argparse
 import base64
 import io
 import json
+import math
 import os
 import signal
 import struct
@@ -57,8 +58,22 @@ def _import_type_class(type_name: str):
     return getattr(module, name)
 
 
-def _topic_qos(data_type: str) -> Any:
-    if str(data_type).replace(".", "/") not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
+def _topic_qos(data_type: str, topic: str = "") -> Any:
+    normalized = str(data_type).replace(".", "/")
+    topic_name = str(topic or "").rstrip("/")
+    if normalized == "tf2_msgs/msg/TFMessage" and topic_name == "/tf_static":
+        try:
+            import rclpy.qos as qos
+
+            return qos.QoSProfile(
+                history=qos.HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=qos.ReliabilityPolicy.RELIABLE,
+                durability=qos.DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+        except Exception:
+            return 1
+    if normalized not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage", "sensor_msgs/msg/PointCloud2"}:
         return 10
     try:
         import rclpy.qos as qos
@@ -234,6 +249,14 @@ class DdsTap:
         self._graph_transfer_limit = self.graph_display_limit
         self._text = ""
         self._text_seq = 0
+        self._tf_frames: dict[str, dict[str, Any]] = {}
+        self._tf_seq = 0
+        self._point_clouds: dict[str, dict[str, Any]] = {}
+        self._occupancy_grids: dict[str, dict[str, Any]] = {}
+        self.point_cloud_topics = [str(item) for item in (config.get("pointCloudTopics") or []) if str(item)]
+        self.occupancy_grid_topics = [str(item) for item in (config.get("occupancyGridTopics") or []) if str(item)]
+        self.point_cloud_max_points = max(100, min(int(config.get("pointCloudMaxPoints") or 5000), 100000))
+        self.enable_tf = bool(config.get("enableTf", True))
         self._latest_msg: Any = None
         self._latest_seq = 0
         self._written_seq = 0
@@ -259,7 +282,7 @@ class DdsTap:
             return 4
         return 64
 
-    def callback(self, msg: Any) -> None:
+    def callback(self, msg: Any, static: bool = False, point_cloud_topic: str = "", occupancy_grid_topic: str = "") -> None:
         try:
             now = time.time() if self.mode == "graph" else time.perf_counter()
             if self.mode == "graph":
@@ -269,6 +292,15 @@ class DdsTap:
                 return
             if self.mode == "text":
                 self._record_text_value(now, _extract_text(msg))
+                return
+            if self.mode in {"tf", "scene3d"} and point_cloud_topic:
+                self._record_point_cloud_message(time.time(), msg, point_cloud_topic)
+                return
+            if self.mode == "scene3d" and occupancy_grid_topic:
+                self._record_occupancy_grid_message(time.time(), msg, occupancy_grid_topic)
+                return
+            if self.mode in {"tf", "scene3d"}:
+                self._record_tf_message(time.time(), msg, static=static)
                 return
             with self._lock:
                 self._times.append(now)
@@ -305,7 +337,7 @@ class DdsTap:
         next_keepalive_at = 0.0
         last_status_seq = -1
         status_hz = self.display_hz
-        status_period = (1.0 / status_hz) if self.mode in {"graph", "hz", "text"} else 0.25
+        status_period = (1.0 / status_hz) if self.mode in {"graph", "hz", "text", "tf", "scene3d"} else 0.25
         frame_period = 1.0 / self.display_hz
         frame_retry_period = min(0.002, frame_period / 4.0)
         while RUNNING:
@@ -314,14 +346,14 @@ class DdsTap:
                 if now >= next_at:
                     write_status = True
                     current_seq = self._latest_seq
-                    if self.mode == "graph":
+                    if self.mode in {"graph", "tf", "scene3d"}:
                         with self._lock:
                             current_seq = self._latest_seq
                         write_status = current_seq != last_status_seq or now >= next_keepalive_at
                     if write_status:
                         self._write_status(now)
                         last_status_seq = current_seq
-                        if self.mode == "graph":
+                        if self.mode in {"graph", "tf", "scene3d"}:
                             next_keepalive_at = now + 1.0
                     next_at = now + status_period
                 if self.mode == "image" and now >= next_frame_at:
@@ -385,6 +417,20 @@ class DdsTap:
                 payload["textSeq"] = self._text_seq
             payload["textMode"] = self.text_mode
             payload["maxChars"] = self.max_chars
+        if self.mode in {"tf", "scene3d"}:
+            with self._lock:
+                frames = list(self._tf_frames.values())
+                tf_seq = self._tf_seq
+            payload["tfSeq"] = tf_seq
+            payload["frames"] = frames
+            parents = {str(item.get("parent") or "") for item in frames if item.get("parent")}
+            children = {str(item.get("child") or "") for item in frames if item.get("child")}
+            payload["roots"] = sorted(parents - children)
+            payload["frameNames"] = sorted(parents | children)
+        if self.mode == "scene3d":
+            with self._lock:
+                payload["pointClouds"] = list(self._point_clouds.values())
+                payload["occupancyGrids"] = list(self._occupancy_grids.values())
         _write_json(self.status_path, payload)
 
     def _record_graph_value(self, timestamp: float, value: float) -> None:
@@ -408,6 +454,39 @@ class DdsTap:
                 self._text = value
             if len(self._text) > self.max_chars:
                 self._text = self._text[-self.max_chars:]
+
+    def _record_tf_message(self, timestamp: float, msg: Any, static: bool = False) -> None:
+        transforms = _field(msg, "transforms") or []
+        with self._lock:
+            self._latest_seq += 1
+            self._tf_seq = self._latest_seq
+            self._times.append(time.perf_counter())
+            del self._times[:-10000]
+            for transform in transforms:
+                parsed = _tf_transform_payload(transform, timestamp, static)
+                child = parsed.get("child")
+                if child:
+                    self._tf_frames[str(child)] = parsed
+
+    def _record_point_cloud_message(self, timestamp: float, msg: Any, topic: str) -> None:
+        parsed = _point_cloud_payload(msg, topic, timestamp, self.point_cloud_max_points)
+        if not parsed:
+            return
+        with self._lock:
+            self._latest_seq += 1
+            self._times.append(time.perf_counter())
+            del self._times[:-10000]
+            self._point_clouds[topic] = parsed
+
+    def _record_occupancy_grid_message(self, timestamp: float, msg: Any, topic: str) -> None:
+        parsed = _occupancy_grid_payload(msg, topic, timestamp)
+        if not parsed:
+            return
+        with self._lock:
+            self._latest_seq += 1
+            self._times.append(time.perf_counter())
+            del self._times[:-10000]
+            self._occupancy_grids[topic] = parsed
 
     def _record_error(self, stage: str, exc: BaseException) -> None:
         self._last_error = f"{stage}: {exc}"
@@ -690,6 +769,123 @@ def _extract_text(value: Any) -> str:
         return str(value)
 
 
+def _tf_transform_payload(transform: Any, timestamp: float, static: bool) -> dict[str, Any]:
+    header = _field(transform, "header")
+    body = _field(transform, "transform")
+    translation = _field(body, "translation")
+    rotation = _field(body, "rotation")
+    rotation_w = _field(rotation, "w")
+    return {
+        "parent": str(_field(header, "frame_id") or ""),
+        "child": str(_field(transform, "child_frame_id") or ""),
+        "translation": [
+            float(_field(translation, "x") or 0.0),
+            float(_field(translation, "y") or 0.0),
+            float(_field(translation, "z") or 0.0),
+        ],
+        "rotation": [
+            float(_field(rotation, "x") or 0.0),
+            float(_field(rotation, "y") or 0.0),
+            float(_field(rotation, "z") or 0.0),
+            float(rotation_w if rotation_w is not None else 1.0),
+        ],
+        "static": bool(static),
+        "updatedAt": float(timestamp),
+    }
+
+
+def _point_cloud_payload(msg: Any, topic: str, timestamp: float, max_points: int) -> dict[str, Any] | None:
+    fields = _field(msg, "fields") or []
+    offsets: dict[str, int] = {}
+    for field in fields:
+        name = str(_field(field, "name") or "")
+        if name in {"x", "y", "z"}:
+            try:
+                offsets[name] = int(_field(field, "offset") or 0)
+            except Exception:
+                pass
+    if not {"x", "y", "z"}.issubset(offsets):
+        return None
+    try:
+        point_step = int(_field(msg, "point_step") or 0)
+        width = int(_field(msg, "width") or 0)
+        height = int(_field(msg, "height") or 1)
+    except Exception:
+        return None
+    data = _bytes_field(msg, "data")
+    if point_step <= 0 or data is None:
+        return None
+    raw = _bytes_payload(data)
+    total = min(width * max(1, height), len(raw) // point_step)
+    if total <= 0:
+        return None
+    endian = ">" if bool(_field(msg, "is_bigendian")) else "<"
+    step = max(1, math.ceil(total / max(1, max_points)))
+    points: list[list[float]] = []
+    for index in range(0, total, step):
+        base = index * point_step
+        try:
+            x = struct.unpack_from(f"{endian}f", raw, base + offsets["x"])[0]
+            y = struct.unpack_from(f"{endian}f", raw, base + offsets["y"])[0]
+            z = struct.unpack_from(f"{endian}f", raw, base + offsets["z"])[0]
+        except Exception:
+            continue
+        if math.isfinite(x) and math.isfinite(y) and math.isfinite(z):
+            points.append([round(float(x), 5), round(float(y), 5), round(float(z), 5)])
+    header = _field(msg, "header")
+    return {
+        "topic": topic,
+        "frameId": str(_field(header, "frame_id") or ""),
+        "points": points,
+        "sourcePoints": total,
+        "updatedAt": float(timestamp),
+    }
+
+
+def _occupancy_grid_payload(msg: Any, topic: str, timestamp: float) -> dict[str, Any] | None:
+    info = _field(msg, "info")
+    if info is None:
+        return None
+    try:
+        width = int(_field(info, "width") or 0)
+        height = int(_field(info, "height") or 0)
+        resolution = float(_field(info, "resolution") or 0.0)
+    except Exception:
+        return None
+    data = _field(msg, "data")
+    if width <= 0 or height <= 0 or resolution <= 0 or data is None:
+        return None
+    values = list(data)
+    if len(values) > width * height:
+        values = values[:width * height]
+    origin = _field(info, "origin")
+    position = _field(origin, "position")
+    orientation = _field(origin, "orientation")
+    header = _field(msg, "header")
+    return {
+        "topic": topic,
+        "frameId": str(_field(header, "frame_id") or ""),
+        "width": width,
+        "height": height,
+        "resolution": resolution,
+        "origin": {
+            "position": [
+                float(_field(position, "x") or 0.0),
+                float(_field(position, "y") or 0.0),
+                float(_field(position, "z") or 0.0),
+            ],
+            "orientation": [
+                float(_field(orientation, "x") or 0.0),
+                float(_field(orientation, "y") or 0.0),
+                float(_field(orientation, "z") or 0.0),
+                float(_field(orientation, "w") if _field(orientation, "w") is not None else 1.0),
+            ],
+        },
+        "data": values,
+        "updatedAt": float(timestamp),
+    }
+
+
 def _bmp_bytes(width: int, height: int, rgb: Any) -> bytes:
     if not isinstance(rgb, bytes):
         rgb = bytes(rgb)
@@ -847,10 +1043,42 @@ def main() -> int:
     if not rclpy.ok():
         rclpy.init(args=None)
     node = rclpy.create_node(f"ipn_dds_tap_{config.get('nodeId', 'tap')}".replace("-", "_")[:80])
-    callback = None if tap.transport == "polling" else tap.callback
-    subscription = node.create_subscription(_import_type_class(tap.data_type), tap.topic, callback, _topic_qos(tap.data_type))
-    tap.subscription = subscription
-    if subscription is None:
+    subscriptions = []
+    tf_poll_subscriptions: list[tuple[Any, bool]] = []
+    if tap.mode in {"tf", "scene3d"}:
+        type_class = _import_type_class("tf2_msgs/msg/TFMessage")
+        subscription = node.create_subscription(type_class, "/tf", lambda msg: tap.callback(msg, static=False), _topic_qos("tf2_msgs/msg/TFMessage", "/tf")) if tap.enable_tf else None
+        static_subscription = node.create_subscription(type_class, "/tf_static", lambda msg: tap.callback(msg, static=True), _topic_qos("tf2_msgs/msg/TFMessage", "/tf_static")) if tap.enable_tf else None
+        subscriptions = [item for item in (subscription, static_subscription) if item is not None]
+        tf_poll_subscriptions = [(item, static) for item, static in ((subscription, False), (static_subscription, True)) if item is not None]
+        tap.subscription = subscription
+        if tap.mode == "scene3d":
+            point_cloud_class = _import_type_class("sensor_msgs/msg/PointCloud2")
+            for topic in tap.point_cloud_topics:
+                pc_subscription = node.create_subscription(
+                    point_cloud_class,
+                    topic,
+                    lambda msg, topic=topic: tap.callback(msg, point_cloud_topic=topic),
+                    _topic_qos("sensor_msgs/msg/PointCloud2", topic),
+                )
+                if pc_subscription is not None:
+                    subscriptions.append(pc_subscription)
+            occupancy_grid_class = _import_type_class("nav_msgs/msg/OccupancyGrid")
+            for topic in tap.occupancy_grid_topics:
+                grid_subscription = node.create_subscription(
+                    occupancy_grid_class,
+                    topic,
+                    lambda msg, topic=topic: tap.callback(msg, occupancy_grid_topic=topic),
+                    _topic_qos("nav_msgs/msg/OccupancyGrid", topic),
+                )
+                if grid_subscription is not None:
+                    subscriptions.append(grid_subscription)
+    else:
+        callback = None if tap.transport == "polling" else tap.callback
+        subscription = node.create_subscription(_import_type_class(tap.data_type), tap.topic, callback, _topic_qos(tap.data_type, tap.topic))
+        subscriptions = [subscription] if subscription is not None else []
+        tap.subscription = subscription
+    if not subscriptions and tap.mode != "scene3d":
         _write_json(tap.status_path, {"running": False, "error": "failed to create DDS subscription", "mode": tap.mode, "topic": tap.topic, "dataType": tap.data_type})
         return 2
     executor = None
@@ -884,7 +1112,17 @@ def main() -> int:
     status_thread.start()
     try:
         while RUNNING:
-            if tap.transport == "polling" or executor is None:
+            if tap.mode in {"tf", "scene3d"} and (tap.transport == "polling" or executor is None):
+                for subscription, static in tf_poll_subscriptions:
+                    try:
+                        samples = subscription.take(tap.poll_batch_size())
+                    except Exception:
+                        samples = []
+                    for item in samples:
+                        msg = item[0] if isinstance(item, tuple) else item
+                        if msg is not None:
+                            tap.callback(msg, static=static)
+            elif tap.transport == "polling" or executor is None:
                 tap.poll(tap.poll_batch_size())
             time.sleep(0.001)
     finally:

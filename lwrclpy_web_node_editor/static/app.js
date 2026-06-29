@@ -148,6 +148,47 @@ const INTERFACE_NODE_TEMPLATES = [
     },
   },
   {
+    category: 'TF',
+    label: 'URDF Static TF',
+    toolType: 'urdf_static_tf_publisher',
+    node: {
+      name: 'urdf_static_tf_publisher',
+      inputs: [],
+      outputs: [{ id: 'tf_static', name: 'TF', dataType: 'tf2_msgs/msg/TFMessage' }],
+      params: { urdfPath: '', fileName: '' },
+      loopCode: '',
+    },
+  },
+  {
+    category: 'TF',
+    label: 'TF Merge',
+    toolType: 'tf_merge',
+    node: {
+      name: 'tf_merge',
+      inputs: [
+        { id: 'in1', name: 'TF', dataType: 'tf2_msgs/msg/TFMessage', receiveMode: 'manual', callbackCode: '' },
+        { id: 'in2', name: 'TF', dataType: 'tf2_msgs/msg/TFMessage', receiveMode: 'manual', callbackCode: '' },
+      ],
+      outputs: [
+        { id: 'tf', name: 'TF', dataType: 'tf2_msgs/msg/TFMessage' },
+      ],
+      params: { topicCount: 2 },
+      loopCode: '',
+    },
+  },
+  {
+    category: 'Views',
+    label: '3D Viewer',
+    toolType: '3d_viewer',
+    node: {
+      name: '3d_viewer',
+      inputs: [{ id: 'tf_in', name: 'TF', dataType: 'tf2_msgs/msg/TFMessage', receiveMode: 'manual', callbackCode: '' }],
+      outputs: [],
+      params: { rootFrame: '', enableTf: true, pointCloudCount: 0, pointCloudStyle: 'square', pointCloudSize: 0.03, pointCloudColor: '#ffffff', pointCloudOpacity: 1, occupancyGridCount: 0, occupancyGridColorScheme: 'map', occupancyGridAlpha: 0.7, occupancyGridDrawBehind: true, showRobotModel: false, robotModelPath: '', robotModel: null, robotModelColor: '#9aa4b2', robotModelOpacity: 0.45, gridStep: 0.25, gridSize: 4, axisSize: 0.35, showLabels: true },
+      loopCode: '',
+    },
+  },
+  {
     category: 'Image Processing',
     label: 'Crop / Resize',
     toolType: 'image_crop_resize',
@@ -317,12 +358,15 @@ function bindToolbar() {
   $('config-input-count').oninput = renderConfigPorts;
   $('config-output-count').oninput = renderConfigPorts;
   $('config-timer-count').oninput = renderConfigPorts;
+  $('config-tf-input').onchange = renderConfigPorts;
+  $('config-tf-output').onchange = renderConfigPorts;
   $('config-python-version').onchange = updateDraftRuntimeVersions;
   $('config-lwrclpy-version').onchange = updateDraftRuntimeVersions;
   $('node-form').addEventListener('submit', saveNodeDialog);
   $('code-form').addEventListener('submit', saveCodeDialog);
   $('signal-form').addEventListener('submit', saveSignalDialog);
   $('graph-form').addEventListener('submit', saveGraphDialog);
+  $('tf-viewer-form').addEventListener('submit', saveTfViewerDialog);
   $('graph-y-mode').onchange = updateGraphAxisFields;
   document.addEventListener('selectstart', (ev) => {
     if (ev.target.closest('#workspace')) ev.preventDefault();
@@ -801,8 +845,10 @@ function openNodeDialog(node = null) {
   draft.pythonVersion = draft.pythonVersion || defaultPythonVersion();
   draft.lwrclpyVersion = draft.lwrclpyVersion || defaultLwrclpyVersion();
   renderRuntimeVersionSelects(draft);
-  $('config-input-count').value = draft.inputs.length;
-  $('config-output-count').value = draft.outputs.length;
+  $('config-input-count').value = (draft.inputs || []).filter((port) => !isTfMessagePort(port)).length;
+  $('config-output-count').value = (draft.outputs || []).filter((port) => !isTfMessagePort(port)).length;
+  $('config-tf-input').checked = Boolean(draft.params?.tfInputEnabled);
+  $('config-tf-output').checked = Boolean(draft.params?.tfOutputEnabled);
   $('config-timer-count').value = draft.timers.length;
   renderConfigPorts();
   $('node-dialog').showModal();
@@ -842,8 +888,10 @@ function renderConfigPorts() {
   draft.name = $('config-node-name').value || draft.name;
   draft.pythonVersion = $('config-python-version').value || draft.pythonVersion || defaultPythonVersion();
   draft.lwrclpyVersion = $('config-lwrclpy-version').value || draft.lwrclpyVersion || defaultLwrclpyVersion();
+  draft.params = { ...(draft.params || {}), tfInputEnabled: $('config-tf-input').checked, tfOutputEnabled: $('config-tf-output').checked };
   draft.inputs = resizePorts(draft.inputs || [], Number($('config-input-count').value || 0), 'in');
   draft.outputs = resizePorts(draft.outputs || [], Number($('config-output-count').value || 0), 'out');
+  applyCustomTfPorts(draft);
   draft.timers = resizeTimers(normalizeTimers(draft), Number($('config-timer-count').value || 0));
   draft.timerEnabled = draft.timers.length > 0;
   draft.timerPeriodSec = draft.timers[0]?.periodSec || 1.0;
@@ -922,7 +970,7 @@ function updateDraftTimer(input) {
 }
 
 function resizePorts(ports, count, prefix) {
-  const next = ports.slice(0, count);
+  const next = ports.filter((port) => !isTfMessagePort(port)).slice(0, count);
   while (next.length < count) {
     const index = next.length + 1;
     next.push({
@@ -936,6 +984,30 @@ function resizePorts(ports, count, prefix) {
   return next.map((port, index) => ({ ...port, id: port.id || `${prefix}${index + 1}` }));
 }
 
+function isTfMessagePort(port) {
+  return String(port?.dataType || '') === 'tf2_msgs/msg/TFMessage';
+}
+
+function applyCustomTfPorts(node) {
+  const params = node.params || {};
+  const nonTfInputs = (node.inputs || []).filter((port) => !isTfMessagePort(port));
+  const nonTfOutputs = (node.outputs || []).filter((port) => !isTfMessagePort(port));
+  node.inputs = nonTfInputs;
+  node.outputs = nonTfOutputs;
+  if (params.tfInputEnabled) {
+    node.inputs = [
+      { id: 'tf_in', name: 'TF', dataType: 'tf2_msgs/msg/TFMessage', receiveMode: 'manual', callbackCode: '' },
+      ...nonTfInputs,
+    ];
+  }
+  if (params.tfOutputEnabled) {
+    node.outputs = [
+      { id: 'tf', name: 'TF', dataType: 'tf2_msgs/msg/TFMessage' },
+      ...nonTfOutputs,
+    ];
+  }
+}
+
 function renderPortConfigList(containerId, ports, labelPrefix) {
   const container = $(containerId);
   container.innerHTML = '';
@@ -944,14 +1016,16 @@ function renderPortConfigList(containerId, ports, labelPrefix) {
     row.className = 'port-config-row';
     const type = parseDataType(port.dataType);
     const receiveMode = port.receiveMode || 'callback';
+    const tfPort = isTfMessagePort(port);
+    const disabled = tfPort ? ' disabled' : '';
     const receiveModeField = containerId.startsWith('input')
-      ? `<label class="checkbox-field"><input data-key="receiveMode" data-index="${index}" type="checkbox" ${receiveMode !== 'manual' ? 'checked' : ''}><span>Use Callback</span></label>`
+      ? `<label class="checkbox-field"><input data-key="receiveMode" data-index="${index}" type="checkbox" ${receiveMode !== 'manual' ? 'checked' : ''}${disabled}><span>Use Callback</span></label>`
       : '';
     row.innerHTML = `
-      <label><span>${labelPrefix} Name</span><input data-key="name" data-index="${index}" value="${escapeAttr(port.name)}"></label>
-      <label><span>Package</span><select data-key="typePackage" data-index="${index}">${packageOptions(type.pkg)}</select></label>
-      <label><span>Kind</span><select data-key="typeKind" data-index="${index}">${kindOptions(type.pkg, type.kind)}</select></label>
-      <label><span>Name</span><select data-key="typeName" data-index="${index}">${nameOptions(type.pkg, type.kind, type.name)}</select></label>
+      <label><span>${labelPrefix} Name</span><input data-key="name" data-index="${index}" value="${escapeAttr(port.name)}"${disabled}></label>
+      <label><span>Package</span><select data-key="typePackage" data-index="${index}"${disabled}>${packageOptions(type.pkg)}</select></label>
+      <label><span>Kind</span><select data-key="typeKind" data-index="${index}"${disabled}>${kindOptions(type.pkg, type.kind)}</select></label>
+      <label><span>Name</span><select data-key="typeName" data-index="${index}"${disabled}>${nameOptions(type.pkg, type.kind, type.name)}</select></label>
       ${receiveModeField}`;
     container.appendChild(row);
   });
@@ -1028,6 +1102,8 @@ function saveNodeDialog(ev) {
   draft.name = $('config-node-name').value || 'custom_ros_node';
   draft.pythonVersion = $('config-python-version').value || draft.pythonVersion || defaultPythonVersion();
   draft.lwrclpyVersion = $('config-lwrclpy-version').value || draft.lwrclpyVersion || defaultLwrclpyVersion();
+  draft.params = { ...(draft.params || {}), tfInputEnabled: $('config-tf-input').checked, tfOutputEnabled: $('config-tf-output').checked };
+  applyCustomTfPorts(draft);
   draft.timers = resizeTimers(normalizeTimers(draft), Number($('config-timer-count').value || 0));
   draft.timerEnabled = draft.timers.length > 0;
   draft.timerPeriodSec = draft.timers[0]?.periodSec || 1.0;
@@ -1266,6 +1342,116 @@ function saveGraphDialog(ev) {
   scheduleRun();
 }
 
+function openTfViewerDialog(node) {
+  $('tf-viewer-dialog').dataset.nodeId = node.id;
+  $('tf-viewer-dialog').dataset.params = JSON.stringify(tfViewerDefaults(node.params || {}));
+  renderTfViewerConfigFields();
+  $('tf-viewer-dialog').showModal();
+}
+
+function renderTfViewerConfigFields() {
+  const p = tfViewerDefaults(JSON.parse($('tf-viewer-dialog').dataset.params || '{}'));
+  $('tf-viewer-grid-step').value = p.gridStep;
+  $('tf-viewer-grid-size').value = p.gridSize;
+  $('tf-viewer-axis-size').value = p.axisSize;
+  $('tf-viewer-labels').checked = p.showLabels;
+  $('viewer-enable-tf').checked = p.enableTf;
+  $('viewer-pointcloud-count').value = p.pointCloudCount;
+  $('viewer-pointcloud-style').value = p.pointCloudStyle;
+  $('viewer-pointcloud-size').value = p.pointCloudSize;
+  $('viewer-pointcloud-color').value = p.pointCloudColor;
+  $('viewer-pointcloud-opacity').value = p.pointCloudOpacity;
+  $('viewer-occupancy-grid-count').value = p.occupancyGridCount;
+  $('viewer-occupancy-grid-color-scheme').value = p.occupancyGridColorScheme;
+  $('viewer-occupancy-grid-alpha').value = p.occupancyGridAlpha;
+  $('viewer-occupancy-grid-draw-behind').checked = p.occupancyGridDrawBehind;
+  $('viewer-robot-model').checked = p.showRobotModel;
+  $('viewer-robot-model-path').value = p.robotModelPath;
+  $('viewer-robot-model-color').value = p.robotModelColor;
+  $('viewer-robot-model-opacity').value = p.robotModelOpacity;
+  const select = $('viewer-robot-model-select');
+  if (select) {
+    select.onclick = async () => {
+      select.disabled = true;
+      try {
+        const selected = await selectUrdfFileFromServer();
+        if (selected?.path) {
+          $('viewer-robot-model-path').value = selected.path;
+          const model = await fetchRobotModel(selected.path);
+          const params = tfViewerDefaults(JSON.parse($('tf-viewer-dialog').dataset.params || '{}'));
+          params.robotModelPath = selected.path;
+          params.robotModel = model;
+          params.showRobotModel = true;
+          $('tf-viewer-dialog').dataset.params = JSON.stringify(params);
+          renderTfViewerConfigFields();
+        }
+      } catch (err) {
+        setExecutionStatus('error', `Robot model load failed: ${err.message}`);
+      } finally {
+        select.disabled = false;
+      }
+    };
+  }
+}
+
+function saveTfViewerDialog(ev) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const node = nodeFor($('tf-viewer-dialog').dataset.nodeId);
+  if (!node) return;
+  const current = tfViewerDefaults(node.params || {});
+  const gridStep = Number($('tf-viewer-grid-step').value);
+  const gridSize = Number($('tf-viewer-grid-size').value);
+  const axisSize = Number($('tf-viewer-axis-size').value);
+  const pointCloudCount = Number($('viewer-pointcloud-count').value);
+  const pointCloudSize = Number($('viewer-pointcloud-size').value);
+  const pointCloudOpacity = Number($('viewer-pointcloud-opacity').value);
+  const occupancyGridCount = Number($('viewer-occupancy-grid-count').value);
+  const occupancyGridAlpha = Number($('viewer-occupancy-grid-alpha').value);
+  const robotModelOpacity = Number($('viewer-robot-model-opacity').value);
+  const robotModelPath = $('viewer-robot-model-path').value.trim();
+  const finish = (robotModel) => {
+    node.params = {
+      ...(node.params || {}),
+      ...current,
+      gridStep: Number.isFinite(gridStep) ? Math.max(0.01, gridStep) : current.gridStep,
+      gridSize: Number.isFinite(gridSize) ? Math.max(0.1, gridSize) : current.gridSize,
+      axisSize: Number.isFinite(axisSize) ? Math.max(0.01, axisSize) : current.axisSize,
+      showLabels: $('tf-viewer-labels').checked,
+      enableTf: $('viewer-enable-tf').checked,
+      pointCloudCount: Number.isFinite(pointCloudCount) ? Math.max(0, Math.min(16, Math.floor(pointCloudCount))) : current.pointCloudCount,
+      pointCloudStyle: $('viewer-pointcloud-style').value === 'circle' ? 'circle' : 'square',
+      pointCloudSize: Number.isFinite(pointCloudSize) ? Math.max(0.001, pointCloudSize) : current.pointCloudSize,
+      pointCloudColor: $('viewer-pointcloud-color').value || current.pointCloudColor,
+      pointCloudOpacity: Number.isFinite(pointCloudOpacity) ? Math.max(0, Math.min(1, pointCloudOpacity)) : current.pointCloudOpacity,
+      occupancyGridCount: Number.isFinite(occupancyGridCount) ? Math.max(0, Math.min(16, Math.floor(occupancyGridCount))) : current.occupancyGridCount,
+      occupancyGridColorScheme: ['map', 'costmap', 'raw'].includes($('viewer-occupancy-grid-color-scheme').value) ? $('viewer-occupancy-grid-color-scheme').value : current.occupancyGridColorScheme,
+      occupancyGridAlpha: Number.isFinite(occupancyGridAlpha) ? Math.max(0, Math.min(1, occupancyGridAlpha)) : current.occupancyGridAlpha,
+      occupancyGridDrawBehind: $('viewer-occupancy-grid-draw-behind').checked,
+      showRobotModel: $('viewer-robot-model').checked,
+      robotModelPath,
+      robotModel,
+      robotModelColor: $('viewer-robot-model-color').value || current.robotModelColor,
+      robotModelOpacity: Number.isFinite(robotModelOpacity) ? Math.max(0, Math.min(1, robotModelOpacity)) : current.robotModelOpacity,
+    };
+    apply3dViewerPorts(node, node.params);
+    if (state.nodeViews[node.id]?.kind === 'tf3d') {
+      state.nodeViews[node.id] = withTfViewerParams(node.id, state.nodeViews[node.id]);
+    }
+    $('tf-viewer-dialog').close();
+    renderAll();
+    scheduleRun();
+  };
+  if (robotModelPath && robotModelPath !== current.robotModelPath) {
+    fetchRobotModel(robotModelPath).then(finish).catch((err) => {
+      setExecutionStatus('error', `Robot model load failed: ${err.message}`);
+      finish(current.robotModel);
+    });
+  } else {
+    finish(current.robotModel);
+  }
+}
+
 function renderAll() {
   commitHistory();
   renderNodeList();
@@ -1297,7 +1483,7 @@ function renderNodes() {
   root.innerHTML = '';
   state.nodes.forEach((node) => {
     const el = document.createElement('article');
-    el.className = 'node ros-node';
+    el.className = `node ros-node${['3d_viewer', 'tf_viewer'].includes(node.toolType) ? ' node-no-outputs' : ''}`;
     el.dataset.id = node.id;
     el.style.left = `${node.x}px`;
     el.style.top = `${node.y}px`;
@@ -1483,6 +1669,92 @@ function applyMcapRecordTopicCount(node, count) {
   node.params = { ...(node.params || {}), topicCount: nextCount };
 }
 
+function tfMergeTopicCount(node) {
+  return Math.max(1, Math.min(64, Math.floor(Number(node?.params?.topicCount || node?.inputs?.length || 2))));
+}
+
+function tfViewerDefaults(params = {}) {
+  const numberParam = (key, fallback, min) => {
+    const value = Number(params[key]);
+    return Number.isFinite(value) ? Math.max(min, value) : fallback;
+  };
+  return {
+    rootFrame: String(params.rootFrame || ''),
+    enableTf: params.enableTf !== false,
+    pointCloudCount: Math.max(0, Math.min(16, Math.floor(Number(params.pointCloudCount || 0)))),
+    pointCloudStyle: ['square', 'circle'].includes(String(params.pointCloudStyle || 'square')) ? String(params.pointCloudStyle || 'square') : 'square',
+    pointCloudSize: numberParam('pointCloudSize', 0.03, 0.001),
+    pointCloudColor: /^#[0-9a-fA-F]{6}$/.test(String(params.pointCloudColor || '')) ? String(params.pointCloudColor) : '#ffffff',
+    pointCloudOpacity: Math.max(0, Math.min(1, numberParam('pointCloudOpacity', 1, 0))),
+    occupancyGridCount: Math.max(0, Math.min(16, Math.floor(Number(params.occupancyGridCount || 0)))),
+    occupancyGridColorScheme: ['map', 'costmap', 'raw'].includes(String(params.occupancyGridColorScheme || 'map')) ? String(params.occupancyGridColorScheme || 'map') : 'map',
+    occupancyGridAlpha: Math.max(0, Math.min(1, numberParam('occupancyGridAlpha', 0.7, 0))),
+    occupancyGridDrawBehind: params.occupancyGridDrawBehind !== false,
+    showRobotModel: params.showRobotModel === true,
+    robotModelPath: String(params.robotModelPath || ''),
+    robotModel: params.robotModel || null,
+    robotModelColor: /^#[0-9a-fA-F]{6}$/.test(String(params.robotModelColor || '')) ? String(params.robotModelColor) : '#9aa4b2',
+    robotModelOpacity: Math.max(0, Math.min(1, numberParam('robotModelOpacity', 0.45, 0))),
+    gridStep: numberParam('gridStep', 0.25, 0.01),
+    gridSize: numberParam('gridSize', 4, 0.1),
+    axisSize: numberParam('axisSize', 0.35, 0.01),
+    showLabels: params.showLabels !== false,
+  };
+}
+
+function apply3dViewerPorts(node, params = node.params || {}, pruneLinks = true) {
+  const p = tfViewerDefaults(params);
+  const inputs = [];
+  if (p.enableTf) inputs.push({ id: 'tf_in', name: 'TF', dataType: 'tf2_msgs/msg/TFMessage', receiveMode: 'manual', callbackCode: '' });
+  for (let index = 0; index < p.pointCloudCount; index += 1) {
+    const existing = (node.inputs || []).find((port) => port.id === `cloud${index + 1}`);
+    inputs.push(existing ? { ...existing, name: existing.name || `cloud${index + 1}`, dataType: 'sensor_msgs/msg/PointCloud2', receiveMode: 'manual', callbackCode: '' } : {
+      id: `cloud${index + 1}`,
+      name: `cloud${index + 1}`,
+      dataType: 'sensor_msgs/msg/PointCloud2',
+      receiveMode: 'manual',
+      callbackCode: '',
+    });
+  }
+  for (let index = 0; index < p.occupancyGridCount; index += 1) {
+    const existing = (node.inputs || []).find((port) => port.id === `grid${index + 1}`);
+    inputs.push(existing ? { ...existing, name: existing.name || `grid${index + 1}`, dataType: 'nav_msgs/msg/OccupancyGrid', receiveMode: 'manual', callbackCode: '' } : {
+      id: `grid${index + 1}`,
+      name: `grid${index + 1}`,
+      dataType: 'nav_msgs/msg/OccupancyGrid',
+      receiveMode: 'manual',
+      callbackCode: '',
+    });
+  }
+  const kept = new Set(inputs.map((port) => port.id));
+  if (pruneLinks) state.links = state.links.filter((link) => link.toNode !== node.id || kept.has(link.toPort));
+  node.inputs = inputs;
+  node.outputs = [];
+  node.params = { ...(node.params || {}), ...p };
+}
+
+function applyTfMergeTopicCount(node, count) {
+  const nextCount = Math.max(1, Math.min(64, Math.floor(Number(count || 2))));
+  const nextInputs = [];
+  for (let index = 0; index < nextCount; index += 1) {
+    const existing = node.inputs?.[index];
+    nextInputs.push(existing ? { ...existing, dataType: 'tf2_msgs/msg/TFMessage', receiveMode: 'manual', callbackCode: '' } : {
+      id: `in${index + 1}`,
+      name: 'TF',
+      dataType: 'tf2_msgs/msg/TFMessage',
+      receiveMode: 'manual',
+      callbackCode: '',
+    });
+  }
+  const keptInputIds = new Set(nextInputs.map((port) => port.id));
+  state.links = state.links.filter((link) => link.toNode !== node.id || keptInputIds.has(link.toPort));
+  node.inputs = nextInputs;
+  node.outputs = [
+    { id: 'tf', name: 'TF', dataType: 'tf2_msgs/msg/TFMessage' },
+  ];
+  node.params = { ...(node.params || {}), topicCount: nextCount };
+}
+
 function timerActionButtons(node) {
   const timers = normalizeTimers(node);
   return timers.map((timer) => `<button data-timer-input="${escapeAttr(timer.id)}">Timer: ${escapeHtml(timer.name)}</button>`).join('');
@@ -1532,6 +1804,28 @@ function toolActionHtml(node) {
       <label class="tool-field"><span>Rate</span><input data-tool-mcap-rate type="number" min="0.001" step="0.1" value="${escapeAttr(playbackRate)}"></label>
       <label class="tool-check"><input data-tool-mcap-loop type="checkbox" ${loopChecked}> Loop</label>
       <div class="tool-summary">${escapeHtml(summary)}</div>
+    </div>`;
+  }
+  if (node.toolType === 'urdf_static_tf_publisher') {
+    const p = node.params || {};
+    const urdfPath = p.urdfPath || '';
+    const summary = urdfPath ? `Publishing fixed joints to /tf_static from ${p.fileName || urdfPath}` : 'No URDF/Xacro selected';
+    return `<div class="node-actions tool-actions">
+      <label class="tool-field tool-field-wide"><span>URDF</span><input data-tool-urdf-path type="text" value="${escapeAttr(urdfPath)}" placeholder="/path/to/robot.urdf or robot.xacro"></label>
+      <button data-action="select-urdf-file">Select URDF/Xacro</button>
+      <div class="tool-summary">${escapeHtml(summary)}</div>
+    </div>`;
+  }
+  if (node.toolType === 'tf_merge') {
+    const topicCount = tfMergeTopicCount(node);
+    return `<div class="node-actions tool-actions">
+      <label class="tool-field"><span>Inputs</span><input data-tool-tf-merge-count type="number" min="1" max="64" step="1" value="${escapeAttr(topicCount)}"></label>
+      <div class="tool-summary">Graph-only TF aggregation edge node</div>
+    </div>`;
+  }
+  if (node.toolType === 'tf_viewer' || node.toolType === '3d_viewer') {
+    return `<div class="node-actions tool-actions">
+      <button data-action="tf-viewer-settings">Configure</button>
     </div>`;
   }
   if (node.toolType === 'mcap_record') {
@@ -1700,7 +1994,7 @@ function formatDuration(seconds) {
 }
 
 function viewNodeHtml(node) {
-  if (!['image_file_input', 'video_file_input', 'mcap_file_input', 'mcap_record', 'function_generator', 'image_view', 'string_view', 'image_file_save', 'graph_view', 'topic_hz_monitor'].includes(node.toolType)) return '';
+  if (!['image_file_input', 'video_file_input', 'mcap_file_input', 'urdf_static_tf_publisher', 'tf_merge', 'tf_viewer', '3d_viewer', 'mcap_record', 'function_generator', 'image_view', 'string_view', 'image_file_save', 'graph_view', 'topic_hz_monitor'].includes(node.toolType)) return '';
   const viewClass = node.toolType === 'video_file_input' ? ' node-view-video' : '';
   return `<div class="node-view${viewClass}" data-node-view="${escapeAttr(node.id)}">${renderViewContent(state.nodeViews[node.id])}</div>`;
 }
@@ -1831,6 +2125,42 @@ function bindToolActions(el, node) {
       } catch (err) {
         setExecutionStatus('error', `MCAP open failed: ${err.message}`);
       }
+    };
+  }
+  const selectUrdfFile = el.querySelector('[data-action="select-urdf-file"]');
+  if (selectUrdfFile) selectUrdfFile.onclick = async () => {
+    selectUrdfFile.disabled = true;
+    try {
+      const selected = await selectUrdfFileFromServer();
+      if (selected?.path) {
+        node.params = { ...(node.params || {}), urdfPath: selected.path, fileName: selected.fileName || selected.path.split(/[\\/]/).filter(Boolean).pop() || selected.path };
+        renderAll();
+        commitHistory();
+        scheduleRun();
+      }
+    } catch (err) {
+      setExecutionStatus('error', `URDF selection failed: ${err.message}`);
+    } finally {
+      selectUrdfFile.disabled = false;
+    }
+  };
+  const urdfPath = el.querySelector('[data-tool-urdf-path]');
+  if (urdfPath) {
+    urdfPath.onchange = (ev) => {
+      const path = String(ev.target.value || '').trim();
+      node.params = { ...(node.params || {}), urdfPath: path, fileName: path.split(/[\\/]/).filter(Boolean).pop() || path };
+      renderAll();
+      commitHistory();
+      scheduleRun();
+    };
+  }
+  const tfMergeCount = el.querySelector('[data-tool-tf-merge-count]');
+  if (tfMergeCount) {
+    tfMergeCount.onchange = (ev) => {
+      applyTfMergeTopicCount(node, ev.target.value);
+      renderAll();
+      commitHistory();
+      scheduleRun();
     };
   }
   const mcapRate = el.querySelector('[data-tool-mcap-rate]');
@@ -1995,6 +2325,13 @@ function bindToolActions(el, node) {
       openGraphDialog(node);
     };
   }
+  const tfViewerSettings = el.querySelector('[data-action="tf-viewer-settings"]');
+  if (tfViewerSettings) {
+    tfViewerSettings.onclick = (ev) => {
+      ev.stopPropagation();
+      openTfViewerDialog(node);
+    };
+  }
 }
 
 function renderPorts(container, node, ports, kind) {
@@ -2026,12 +2363,16 @@ function renderInspector() {
   const box = $('inspector-content');
   const link = state.links.find((item) => item.id === state.selectedLink);
   if (link) {
+    const fixedTopic = fixedTfTopicForOutput(link.fromNode, link.fromPort);
+    const topicValue = fixedTopic || link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort);
+    const tfVisual = isTfLink(link);
     box.innerHTML = `
       <div class="inspector-title">Edge</div>
       <div class="hint">${link.fromNode}.${link.fromPort} -> ${link.toNode}.${link.toPort}</div>
-      <label class="field"><span>Topic Name</span><input id="link-name" value="${escapeAttr(link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort))}"></label>
+      <label class="field"><span>${tfVisual ? 'TF' : 'Topic Name'}</span><input id="link-name" value="${escapeAttr(tfVisual ? 'TF' : topicValue)}" ${fixedTopic || tfVisual ? 'disabled' : ''}></label>
       <button id="delete-link">Delete Link</button>`;
     $('link-name').oninput = () => {
+      if (fixedTopic) return;
       const fallback = defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort);
       syncSourceTopicNames(link.fromNode, link.fromPort, $('link-name').value.trim() || fallback);
       renderLinks();
@@ -2049,6 +2390,7 @@ function renderInspector() {
     <div class="hint">${escapeHtml(inspectorHint(node))}</div>
     ${node.toolType === 'function_generator' ? `<div class="inspector-actions"><button id="inspect-signal-settings">Signal Settings</button></div>` : ''}
     ${node.toolType === 'graph_view' ? `<div class="inspector-actions"><button id="inspect-graph-settings">Graph Settings</button></div>` : ''}
+    ${node.toolType === 'tf_viewer' || node.toolType === '3d_viewer' ? `<div class="inspector-actions"><button id="inspect-tf-viewer-settings">Configure</button></div>` : ''}
     ${node.toolType ? '' : `<div class="inspector-actions">
         <button id="inspect-config">Configure Ports</button>
         <button id="inspect-export-custom-node">Export Custom Node</button>
@@ -2071,6 +2413,8 @@ function renderInspector() {
   if (inspectSignalSettings) inspectSignalSettings.onclick = () => openSignalDialog(node);
   const inspectGraphSettings = $('inspect-graph-settings');
   if (inspectGraphSettings) inspectGraphSettings.onclick = () => openGraphDialog(node);
+  const inspectTfViewerSettings = $('inspect-tf-viewer-settings');
+  if (inspectTfViewerSettings) inspectTfViewerSettings.onclick = () => openTfViewerDialog(node);
   const inspectCallback = $('inspect-callback');
   if (inspectCallback) inspectCallback.onclick = () => {
     const firstInput = node.inputs.find((input) => (input.receiveMode || 'callback') === 'callback');
@@ -2295,10 +2639,14 @@ function finishLinkDrag(ev, inputRow) {
     flashPort(inputRow, 'invalid');
     return;
   }
-  const defaultTopic = sourceTopicName(state.dragLink.fromNode, state.dragLink.fromPort) || defaultLinkTopic(state.dragLink.fromNode, state.dragLink.fromPort, inputRow.dataset.node, inputRow.dataset.port);
-  const topic = prompt('Topic name for this output topic', defaultTopic);
-  if (topic === null) return;
-  const topicName = normalizeTopic(topic.trim() || defaultTopic);
+  const fixedTopic = fixedTfTopicForOutput(state.dragLink.fromNode, state.dragLink.fromPort);
+  const defaultTopic = fixedTopic || sourceTopicName(state.dragLink.fromNode, state.dragLink.fromPort) || defaultLinkTopic(state.dragLink.fromNode, state.dragLink.fromPort, inputRow.dataset.node, inputRow.dataset.port);
+  let topicName = defaultTopic;
+  if (!fixedTopic) {
+    const topic = prompt('Topic name for this output topic', defaultTopic);
+    if (topic === null) return;
+    topicName = normalizeTopic(topic.trim() || defaultTopic);
+  }
   state.links = state.links.filter((link) => !(link.toNode === inputRow.dataset.node && link.toPort === inputRow.dataset.port));
   state.links.push({
     id: `l${Date.now()}${Math.random().toString(16).slice(2)}`,
@@ -2384,7 +2732,7 @@ function makeLinkLabel(a, b, link) {
   text.setAttribute('text-anchor', 'middle');
   text.setAttribute('dominant-baseline', 'middle');
   text.dataset.link = link.id;
-  text.textContent = link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort);
+  text.textContent = displayLinkName(link);
   text.onpointerdown = (ev) => {
     ev.stopPropagation();
     state.selectedLink = link.id;
@@ -3314,6 +3662,10 @@ function patchNodeViewEl(el, view) {
     patchPlotViewEl(el, view);
     return;
   }
+  if (view?.kind === 'tf3d') {
+    patchTf3dViewEl(el, view);
+    return;
+  }
   stopPlotAnimation(el);
   if (view?.kind === 'image' && (view.dataUrl || view.raw || view.frameRef)) {
     const existingFig = el.querySelector('figure.image-view');
@@ -3419,7 +3771,17 @@ function normalizedNodeView(nodeId, view) {
     if (localView?.dataUrl || localView?.raw) return { ...localView, status: videoStatus(controller) };
     return { kind: 'image', dataUrl: view?.dataUrl || '', status: videoStatus(controller) };
   }
+  if ((node?.toolType === 'tf_viewer' || node?.toolType === '3d_viewer') && view?.kind === 'tf3d') return withTfViewerParams(nodeId, view);
   return view;
+}
+
+function withTfViewerParams(nodeId, view) {
+  const node = nodeFor(nodeId);
+  if (!node || view?.kind !== 'tf3d') return view;
+  return {
+    ...view,
+    ...tfViewerDefaults(node.params || {}),
+  };
 }
 
 function renderViewContent(view) {
@@ -3435,7 +3797,604 @@ function renderViewContent(view) {
   if (view.kind === 'plot') {
     return renderPlot(view.series || [], view.status || '', view);
   }
+  if (view.kind === 'tf3d') {
+    return renderTf3d(view);
+  }
   return `<div class="view-empty">${escapeHtml(view.status || 'No data')}</div>`;
+}
+
+function renderTf3d(view) {
+  const frameNames = Array.isArray(view.frameNames) ? view.frameNames : [];
+  const rootFrame = String(view.rootFrame || '');
+  const options = frameNames.map((name) => `<option value="${escapeAttr(name)}" ${name === rootFrame ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
+  return `<div class="tf3d-view" data-tf3d-view>
+    <div class="tf3d-toolbar">
+      <label><span>Root</span><select data-tf-root>${options || '<option value="">No frames</option>'}</select></label>
+      <span data-tf-status>${escapeHtml(view.status || 'No TF frames')}</span>
+    </div>
+    <div class="tf3d-canvas" data-tf-canvas></div>
+  </div>`;
+}
+
+let threeModulePromise = null;
+let colladaLoaderPromise = null;
+let stlLoaderPromise = null;
+let objLoaderPromise = null;
+
+function loadThreeModule() {
+  if (!threeModulePromise) {
+    threeModulePromise = import('https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js');
+  }
+  return threeModulePromise;
+}
+
+function loadColladaLoader() {
+  if (!colladaLoaderPromise) colladaLoaderPromise = import('https://esm.sh/three@0.165.0/examples/jsm/loaders/ColladaLoader.js');
+  return colladaLoaderPromise;
+}
+
+function loadStlLoader() {
+  if (!stlLoaderPromise) stlLoaderPromise = import('https://esm.sh/three@0.165.0/examples/jsm/loaders/STLLoader.js');
+  return stlLoaderPromise;
+}
+
+function loadObjLoader() {
+  if (!objLoaderPromise) objLoaderPromise = import('https://esm.sh/three@0.165.0/examples/jsm/loaders/OBJLoader.js');
+  return objLoaderPromise;
+}
+
+function patchTf3dViewEl(el, view) {
+  stopPlotAnimation(el);
+  let container = el.querySelector('[data-tf3d-view]');
+  if (!container) {
+    el.innerHTML = renderTf3d(view);
+    container = el.querySelector('[data-tf3d-view]');
+  }
+  const statusEl = container?.querySelector('[data-tf-status]');
+  if (statusEl) statusEl.textContent = view?.status || 'No TF frames';
+  const select = container?.querySelector('[data-tf-root]');
+  const names = Array.isArray(view?.frameNames) ? view.frameNames : [];
+  const rootFrame = String(view?.rootFrame || '');
+  if (select) {
+    const signature = names.join('\n');
+    if (select.dataset.optionsSignature !== signature) {
+      select.innerHTML = names.length
+        ? names.map((name) => `<option value="${escapeAttr(name)}">${escapeHtml(name)}</option>`).join('')
+        : '<option value="">No frames</option>';
+      select.dataset.optionsSignature = signature;
+    }
+    if (select.value !== rootFrame) select.value = rootFrame;
+    if (!select._tfRootBound) {
+      select._tfRootBound = true;
+      select.onchange = () => {
+        const node = nodeFor(el.dataset.nodeView);
+        if (!node) return;
+        node.params = { ...(node.params || {}), rootFrame: select.value || '' };
+        scheduleRun();
+      };
+    }
+  }
+  const canvasHost = container?.querySelector('[data-tf-canvas]');
+  if (!canvasHost) return;
+  ensureTf3dRenderer(canvasHost).then((viewer) => {
+    viewer.view = view || {};
+    renderTf3dScene(viewer);
+  }).catch((err) => {
+    canvasHost.innerHTML = `<div class="view-empty">${escapeHtml(`Three.js load failed: ${err?.message || err}`)}</div>`;
+  });
+}
+
+async function ensureTf3dRenderer(host) {
+  if (host._tf3dViewer) return host._tf3dViewer;
+  const THREE = await loadThreeModule();
+  host.innerHTML = '';
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x050607);
+  const camera = new THREE.PerspectiveCamera(55, 1, 0.01, 1000);
+  camera.up.set(0, 0, 1);
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.domElement.className = 'tf3d-renderer';
+  host.appendChild(renderer.domElement);
+  const gridGroup = new THREE.Group();
+  scene.add(gridGroup);
+  const group = new THREE.Group();
+  scene.add(group);
+  const light = new THREE.DirectionalLight(0xffffff, 1.4);
+  light.position.set(3, 4, 5);
+  scene.add(light);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+  const viewer = {
+    THREE,
+    host,
+    scene,
+    camera,
+    renderer,
+    gridGroup,
+    group,
+    controls: { yaw: -0.8, pitch: 0.6, distance: 5, target: new THREE.Vector3(), dragging: false, lastX: 0, lastY: 0 },
+    view: {},
+  };
+  bindTf3dControls(viewer);
+  const resizeObserver = new ResizeObserver(() => drawTf3d(viewer));
+  resizeObserver.observe(host);
+  viewer.resizeObserver = resizeObserver;
+  host._tf3dViewer = viewer;
+  drawTf3d(viewer);
+  return viewer;
+}
+
+function bindTf3dControls(viewer) {
+  const canvas = viewer.renderer.domElement;
+  canvas.addEventListener('pointerdown', (ev) => {
+    viewer.controls.dragging = true;
+    viewer.controls.lastX = ev.clientX;
+    viewer.controls.lastY = ev.clientY;
+    canvas.setPointerCapture(ev.pointerId);
+  });
+  canvas.addEventListener('pointermove', (ev) => {
+    if (!viewer.controls.dragging) return;
+    const dx = ev.clientX - viewer.controls.lastX;
+    const dy = ev.clientY - viewer.controls.lastY;
+    viewer.controls.lastX = ev.clientX;
+    viewer.controls.lastY = ev.clientY;
+    if (ev.shiftKey || ev.buttons === 2) {
+      const scale = viewer.controls.distance * 0.0015;
+      const right = new viewer.THREE.Vector3().setFromMatrixColumn(viewer.camera.matrix, 0).multiplyScalar(-dx * scale);
+      const up = new viewer.THREE.Vector3().setFromMatrixColumn(viewer.camera.matrix, 1).multiplyScalar(dy * scale);
+      viewer.controls.target.add(right).add(up);
+    } else {
+      viewer.controls.yaw -= dx * 0.006;
+      viewer.controls.pitch = clamp(viewer.controls.pitch + dy * 0.006, -1.45, 1.45);
+    }
+    drawTf3d(viewer);
+  });
+  canvas.addEventListener('pointerup', (ev) => {
+    viewer.controls.dragging = false;
+    try { canvas.releasePointerCapture(ev.pointerId); } catch (_) {}
+  });
+  canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
+  canvas.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    viewer.controls.distance = clamp(viewer.controls.distance * (ev.deltaY > 0 ? 1.12 : 0.88), 0.2, 200);
+    drawTf3d(viewer);
+  }, { passive: false });
+}
+
+function renderTf3dScene(viewer) {
+  const { THREE, group, gridGroup } = viewer;
+  while (group.children.length) {
+    const child = group.children.pop();
+    child.traverse?.((item) => {
+      item.geometry?.dispose?.();
+      if (Array.isArray(item.material)) item.material.forEach((mat) => mat.dispose?.());
+      else item.material?.dispose?.();
+      if (item.material?.map && item.material.map !== tf3dCircleTexture) item.material.map.dispose?.();
+    });
+  }
+  while (gridGroup.children.length) {
+    const child = gridGroup.children.pop();
+    child.geometry?.dispose?.();
+    child.material?.dispose?.();
+  }
+  const model = tf3dWorldModel(viewer.view || {});
+  const settings = tf3dSettings(viewer.view || {});
+  const extent = Math.max(1, model.extent || 1);
+  const axisLen = settings.axisSize;
+  addTf3dRootGrid(THREE, gridGroup, settings.gridSize, settings.gridStep);
+  if (settings.occupancyGridDrawBehind) {
+    (viewer.view?.occupancyGrids || []).forEach((grid) => addTf3dOccupancyGrid(THREE, group, grid, model, settings));
+  }
+  if (settings.showRobotModel) addTf3dRobotModel(viewer, group, viewer.view?.robotModel, model, settings);
+  model.edges.forEach((edge) => addTf3dLine(THREE, group, edge.from, edge.to, edge.static ? 0x6aa6ff : 0xf6c14b));
+  model.frames.forEach((frame) => {
+    addTf3dAxes(THREE, group, frame.position, frame.rotation, axisLen);
+    if (settings.showLabels) group.add(makeTf3dLabel(THREE, frame.name, frame.position, axisLen));
+  });
+  (viewer.view?.pointClouds || []).forEach((cloud) => addTf3dPointCloud(THREE, group, cloud, model, settings));
+  if (!settings.occupancyGridDrawBehind) {
+    (viewer.view?.occupancyGrids || []).forEach((grid) => addTf3dOccupancyGrid(THREE, group, grid, model, settings));
+  }
+  if (!viewer._fitDone || viewer._fitRoot !== model.root) {
+    viewer.controls.target.set(0, 0, 0);
+    viewer.controls.distance = Math.max(2.5, extent * 2.2);
+    viewer._fitDone = true;
+    viewer._fitRoot = model.root;
+  }
+  drawTf3d(viewer);
+}
+
+function drawTf3d(viewer) {
+  const { host, camera, renderer, scene, controls } = viewer;
+  const width = Math.max(1, host.clientWidth || 320);
+  const height = Math.max(1, host.clientHeight || 220);
+  renderer.setSize(width, height, false);
+  camera.aspect = width / height;
+  const cp = Math.cos(controls.pitch);
+  camera.position.set(
+    controls.target.x + controls.distance * Math.cos(controls.yaw) * cp,
+    controls.target.y + controls.distance * Math.sin(controls.yaw) * cp,
+    controls.target.z + controls.distance * Math.sin(controls.pitch),
+  );
+  camera.lookAt(controls.target);
+  camera.updateProjectionMatrix();
+  renderer.render(scene, camera);
+}
+
+function tf3dWorldModel(view) {
+  const frames = Array.isArray(view.frames) ? view.frames : [];
+  const names = Array.isArray(view.frameNames) ? view.frameNames : [];
+  const root = String(view.rootFrame || names[0] || '');
+  const links = new Map();
+  frames.forEach((item) => {
+    const parent = String(item?.parent || '');
+    const child = String(item?.child || '');
+    if (!parent || !child) return;
+    const translation = vector3Array(item.translation);
+    const rotation = quatArray(item.rotation);
+    if (!links.has(parent)) links.set(parent, []);
+    if (!links.has(child)) links.set(child, []);
+    links.get(parent).push({ to: child, translation, rotation, static: Boolean(item.static), inverse: false });
+    links.get(child).push({ to: parent, translation, rotation, static: Boolean(item.static), inverse: true });
+  });
+  const world = new Map();
+  const queue = [];
+  if (root) {
+    world.set(root, { position: [0, 0, 0], rotation: [0, 0, 0, 1] });
+    queue.push(root);
+  }
+  while (queue.length) {
+    const current = queue.shift();
+    const base = world.get(current);
+    (links.get(current) || []).forEach((edge) => {
+      if (world.has(edge.to)) return;
+      const rel = edge.inverse ? invertTransform(edge.translation, edge.rotation) : { translation: edge.translation, rotation: edge.rotation };
+      const position = addVec3(base.position, rotateVec3(base.rotation, rel.translation));
+      const rotation = normalizeQuat(mulQuat(base.rotation, rel.rotation));
+      world.set(edge.to, { position, rotation });
+      queue.push(edge.to);
+    });
+  }
+  const modelFrames = [...world.entries()].map(([name, pose]) => ({ name, ...pose }));
+  const modelEdges = frames.map((item) => {
+    const parent = world.get(String(item?.parent || ''));
+    const child = world.get(String(item?.child || ''));
+    if (!parent || !child) return null;
+    return { from: parent.position, to: child.position, static: Boolean(item.static) };
+  }).filter(Boolean);
+  const extent = modelFrames.reduce((acc, frame) => Math.max(acc, Math.hypot(frame.position[0], frame.position[1], frame.position[2])), 1);
+  return { root, frames: modelFrames, edges: modelEdges, extent, world };
+}
+
+function tf3dSettings(view) {
+  const numberValue = (key, fallback, min) => {
+    const value = Number(view[key]);
+    return Number.isFinite(value) ? Math.max(min, value) : fallback;
+  };
+  return {
+    gridStep: numberValue('gridStep', 0.25, 0.01),
+    gridSize: numberValue('gridSize', 4, 0.1),
+    axisSize: numberValue('axisSize', 0.35, 0.01),
+    showLabels: view.showLabels !== false,
+    pointCloudStyle: view.pointCloudStyle === 'circle' ? 'circle' : 'square',
+    pointCloudSize: numberValue('pointCloudSize', 0.03, 0.001),
+    pointCloudColor: /^#[0-9a-fA-F]{6}$/.test(String(view.pointCloudColor || '')) ? String(view.pointCloudColor) : '#ffffff',
+    pointCloudOpacity: Math.max(0, Math.min(1, numberValue('pointCloudOpacity', 1, 0))),
+    occupancyGridColorScheme: ['map', 'costmap', 'raw'].includes(String(view.occupancyGridColorScheme || 'map')) ? String(view.occupancyGridColorScheme || 'map') : 'map',
+    occupancyGridAlpha: Math.max(0, Math.min(1, numberValue('occupancyGridAlpha', 0.7, 0))),
+    occupancyGridDrawBehind: view.occupancyGridDrawBehind !== false,
+    showRobotModel: view.showRobotModel === true,
+    robotModelColor: /^#[0-9a-fA-F]{6}$/.test(String(view.robotModelColor || '')) ? String(view.robotModelColor) : '#9aa4b2',
+    robotModelOpacity: Math.max(0, Math.min(1, numberValue('robotModelOpacity', 0.45, 0))),
+  };
+}
+
+function vector3Array(value) {
+  return [0, 1, 2].map((index) => Number(Array.isArray(value) ? value[index] : 0) || 0);
+}
+
+function quatArray(value) {
+  const q = [0, 1, 2, 3].map((index) => Number(Array.isArray(value) ? value[index] : (index === 3 ? 1 : 0)) || (index === 3 ? 1 : 0));
+  return normalizeQuat(q);
+}
+
+function normalizeQuat(q) {
+  const norm = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  return [q[0] / norm, q[1] / norm, q[2] / norm, q[3] / norm];
+}
+
+function mulQuat(a, b) {
+  return [
+    a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+    a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+    a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+  ];
+}
+
+function rotateVec3(q, v) {
+  const p = [v[0], v[1], v[2], 0];
+  const qi = [-q[0], -q[1], -q[2], q[3]];
+  const r = mulQuat(mulQuat(q, p), qi);
+  return [r[0], r[1], r[2]];
+}
+
+function addVec3(a, b) {
+  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+}
+
+function invertTransform(translation, rotation) {
+  const inverseRotation = [-rotation[0], -rotation[1], -rotation[2], rotation[3]];
+  return { translation: rotateVec3(inverseRotation, [-translation[0], -translation[1], -translation[2]]), rotation: inverseRotation };
+}
+
+function quatFromRpy(rpy) {
+  const roll = Number(rpy[0] || 0);
+  const pitch = Number(rpy[1] || 0);
+  const yaw = Number(rpy[2] || 0);
+  const cr = Math.cos(roll / 2);
+  const sr = Math.sin(roll / 2);
+  const cp = Math.cos(pitch / 2);
+  const sp = Math.sin(pitch / 2);
+  const cy = Math.cos(yaw / 2);
+  const sy = Math.sin(yaw / 2);
+  return normalizeQuat([
+    sr * cp * cy - cr * sp * sy,
+    cr * sp * cy + sr * cp * sy,
+    cr * cp * sy - sr * sp * cy,
+    cr * cp * cy + sr * sp * sy,
+  ]);
+}
+
+function addTf3dLine(THREE, group, from, to, color) {
+  const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...from), new THREE.Vector3(...to)]);
+  group.add(new THREE.Line(geometry, new THREE.LineBasicMaterial({ color })));
+}
+
+function addTf3dRootGrid(THREE, group, size, step) {
+  size = Math.max(0.1, Number(size || 4));
+  step = Math.max(0.01, Number(step || 0.25));
+  const points = [];
+  for (let value = -size; value <= size + 1e-6; value += step) {
+    points.push(new THREE.Vector3(-size, value, 0), new THREE.Vector3(size, value, 0));
+    points.push(new THREE.Vector3(value, -size, 0), new THREE.Vector3(value, size, 0));
+  }
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  const material = new THREE.LineBasicMaterial({ color: 0xb46cff, transparent: true, opacity: 0.82, depthWrite: false });
+  group.add(new THREE.LineSegments(geometry, material));
+}
+
+function addTf3dAxes(THREE, group, position, rotation, length) {
+  const thickness = Math.max(0.002, length * 0.1);
+  [
+    [0xff4d4d, [length / 2, 0, 0], [length, thickness, thickness]],
+    [0x4dd36f, [0, length / 2, 0], [thickness, length, thickness]],
+    [0x4d8dff, [0, 0, length / 2], [thickness, thickness, length]],
+  ].forEach(([color, localCenter, size]) => {
+    const center = addVec3(position, rotateVec3(rotation, localCenter));
+    const box = new THREE.Mesh(
+      new THREE.BoxGeometry(size[0], size[1], size[2]),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.0 }),
+    );
+    box.position.fromArray(center);
+    box.quaternion.fromArray(rotation);
+    group.add(box);
+  });
+}
+
+function addTf3dPointCloud(THREE, group, cloud, model, settings) {
+  const points = Array.isArray(cloud?.points) ? cloud.points : [];
+  if (!points.length) return;
+  const pose = model.world?.get?.(String(cloud.frameId || '')) || { position: [0, 0, 0], rotation: [0, 0, 0, 1] };
+  const positions = new Float32Array(points.length * 3);
+  points.forEach((point, index) => {
+    const rotated = rotateVec3(pose.rotation, vector3Array(point));
+    const world = addVec3(pose.position, rotated);
+    positions[index * 3] = world[0];
+    positions[index * 3 + 1] = world[1];
+    positions[index * 3 + 2] = world[2];
+  });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const material = new THREE.PointsMaterial({
+    color: new THREE.Color(settings.pointCloudColor),
+    size: settings.pointCloudSize,
+    sizeAttenuation: true,
+    transparent: settings.pointCloudOpacity < 1,
+    opacity: settings.pointCloudOpacity,
+    depthWrite: settings.pointCloudOpacity >= 1,
+  });
+  if (settings.pointCloudStyle === 'circle') {
+    material.map = circlePointTexture(THREE);
+    material.alphaTest = 0.05;
+  }
+  group.add(new THREE.Points(geometry, material));
+}
+
+function addTf3dOccupancyGrid(THREE, group, grid, model, settings) {
+  const width = Math.floor(Number(grid?.width || 0));
+  const height = Math.floor(Number(grid?.height || 0));
+  const resolution = Number(grid?.resolution || 0);
+  const data = Array.isArray(grid?.data) ? grid.data : [];
+  if (width <= 0 || height <= 0 || resolution <= 0 || !data.length) return;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const image = ctx.createImageData(width, height);
+  for (let row = 0; row < height; row += 1) {
+    const canvasRow = height - 1 - row;
+    for (let col = 0; col < width; col += 1) {
+      const sourceIndex = row * width + col;
+      const targetIndex = (canvasRow * width + col) * 4;
+      const [r, g, b, a] = occupancyGridCellColor(Number(data[sourceIndex] ?? -1), settings);
+      image.data[targetIndex] = r;
+      image.data[targetIndex + 1] = g;
+      image.data[targetIndex + 2] = b;
+      image.data[targetIndex + 3] = a;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    opacity: 1,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const geometry = new THREE.PlaneGeometry(width * resolution, height * resolution);
+  const mesh = new THREE.Mesh(geometry, material);
+  const framePose = model.world?.get?.(String(grid.frameId || '')) || { position: [0, 0, 0], rotation: [0, 0, 0, 1] };
+  const origin = grid.origin || {};
+  const originPosition = vector3Array(origin.position || [0, 0, 0]);
+  const originRotation = quatArray(origin.orientation || [0, 0, 0, 1]);
+  const rotation = normalizeQuat(mulQuat(framePose.rotation, originRotation));
+  const localCenter = [width * resolution * 0.5, height * resolution * 0.5, settings.occupancyGridDrawBehind ? -0.001 : 0.001];
+  const originWorld = addVec3(framePose.position, rotateVec3(framePose.rotation, originPosition));
+  const centerWorld = addVec3(originWorld, rotateVec3(rotation, localCenter));
+  mesh.position.fromArray(centerWorld);
+  mesh.quaternion.fromArray(rotation);
+  mesh.renderOrder = settings.occupancyGridDrawBehind ? -10 : 10;
+  group.add(mesh);
+}
+
+function occupancyGridCellColor(value, settings) {
+  const alpha = Math.round(255 * Math.max(0, Math.min(1, Number(settings.occupancyGridAlpha ?? 0.7))));
+  if (settings.occupancyGridColorScheme === 'raw') {
+    if (value < 0) return [80, 80, 80, alpha];
+    const shade = Math.round(255 * (1 - Math.max(0, Math.min(100, value)) / 100));
+    return [shade, shade, shade, alpha];
+  }
+  if (settings.occupancyGridColorScheme === 'costmap') {
+    if (value < 0) return [90, 90, 90, Math.round(alpha * 0.55)];
+    if (value <= 0) return [0, 0, 0, 0];
+    const t = Math.max(0, Math.min(100, value)) / 100;
+    const r = Math.round(255 * Math.min(1, t * 1.8));
+    const g = Math.round(210 * Math.max(0, 1 - Math.abs(t - 0.35) * 2.2));
+    const b = Math.round(255 * Math.max(0, 1 - t * 1.6));
+    return [r, g, b, alpha];
+  }
+  if (value < 0) return [0, 0, 0, 0];
+  if (value <= 0) return [245, 245, 245, Math.round(alpha * 0.45)];
+  const shade = Math.round(245 * (1 - Math.max(0, Math.min(100, value)) / 100));
+  return [shade, shade, shade, alpha];
+}
+
+function addTf3dRobotModel(viewer, group, robotModel, model, settings) {
+  const THREE = viewer.THREE;
+  const visuals = Array.isArray(robotModel?.visuals) ? robotModel.visuals : [];
+  if (!visuals.length) return;
+  viewer._robotModelToken = (viewer._robotModelToken || 0) + 1;
+  const token = viewer._robotModelToken;
+  const material = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(settings.robotModelColor),
+    transparent: settings.robotModelOpacity < 1,
+    opacity: settings.robotModelOpacity,
+    roughness: 0.55,
+  });
+  visuals.forEach((visual) => {
+    const linkPose = model.world?.get?.(String(visual.link || ''));
+    if (!linkPose) return;
+    let geometry = null;
+    if (visual.type === 'box') {
+      const size = vector3Array(visual.size || [1, 1, 1]);
+      geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
+    } else if (visual.type === 'cylinder') {
+      geometry = new THREE.CylinderGeometry(Number(visual.radius || 0.5), Number(visual.radius || 0.5), Number(visual.length || 1), 24);
+      geometry.rotateX(Math.PI / 2);
+    } else if (visual.type === 'sphere') {
+      geometry = new THREE.SphereGeometry(Number(visual.radius || 0.5), 24, 16);
+    } else if (visual.type === 'mesh') {
+      addTf3dRobotMesh(viewer, group, visual, linkPose, material, token);
+      return;
+    }
+    if (!geometry) return;
+    const mesh = new THREE.Mesh(geometry, material.clone());
+    const localTranslation = vector3Array(visual.xyz || [0, 0, 0]);
+    const localRotation = quatFromRpy(vector3Array(visual.rpy || [0, 0, 0]));
+    const worldPosition = addVec3(linkPose.position, rotateVec3(linkPose.rotation, localTranslation));
+    const worldRotation = normalizeQuat(mulQuat(linkPose.rotation, localRotation));
+    mesh.position.fromArray(worldPosition);
+    mesh.quaternion.fromArray(worldRotation);
+    group.add(mesh);
+  });
+}
+
+function addTf3dRobotMesh(viewer, group, visual, linkPose, material, token) {
+  const url = String(visual.url || '');
+  if (!url) return;
+  const extension = String(visual.extension || '').toLowerCase();
+  const localTranslation = vector3Array(visual.xyz || [0, 0, 0]);
+  const localRotation = quatFromRpy(vector3Array(visual.rpy || [0, 0, 0]));
+  const worldPosition = addVec3(linkPose.position, rotateVec3(linkPose.rotation, localTranslation));
+  const worldRotation = normalizeQuat(mulQuat(linkPose.rotation, localRotation));
+  const scale = vector3Array(visual.scale || [1, 1, 1]);
+  const applyObject = (object) => {
+    if (viewer._robotModelToken !== token) return;
+    object.position.fromArray(worldPosition);
+    object.quaternion.fromArray(worldRotation);
+    object.scale.set(scale[0], scale[1], scale[2]);
+    object.traverse?.((child) => {
+      if (child.isMesh) child.material = material.clone();
+    });
+    group.add(object);
+    drawTf3d(viewer);
+  };
+  if (extension === '.dae') {
+    loadColladaLoader().then(({ ColladaLoader }) => {
+      new ColladaLoader().load(url, (collada) => applyObject(collada.scene));
+    }).catch((err) => console.warn('DAE load failed', err));
+  } else if (extension === '.stl') {
+    loadStlLoader().then(({ STLLoader }) => {
+      new STLLoader().load(url, (geometry) => {
+        applyObject(new viewer.THREE.Mesh(geometry, material.clone()));
+      });
+    }).catch((err) => console.warn('STL load failed', err));
+  } else if (extension === '.obj') {
+    loadObjLoader().then(({ OBJLoader }) => {
+      new OBJLoader().load(url, applyObject);
+    }).catch((err) => console.warn('OBJ load failed', err));
+  }
+}
+
+let tf3dCircleTexture = null;
+
+function circlePointTexture(THREE) {
+  if (tf3dCircleTexture) return tf3dCircleTexture;
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, 64, 64);
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(32, 32, 28, 0, Math.PI * 2);
+  ctx.fill();
+  tf3dCircleTexture = new THREE.CanvasTexture(canvas);
+  return tf3dCircleTexture;
+}
+
+function makeTf3dLabel(THREE, text, position, scale) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = 256;
+  canvas.height = 64;
+  ctx.fillStyle = 'rgba(5, 6, 7, 0.72)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#e7edf3';
+  ctx.font = '24px ui-sans-serif, system-ui, sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(text).slice(0, 28), 10, 32);
+  const texture = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true }));
+  sprite.position.set(position[0] + scale * 0.18, position[1] + scale * 0.18, position[2]);
+  sprite.scale.set(scale * 1.5, scale * 0.38, 1);
+  return sprite;
 }
 
 function renderPlot(series, label, view = {}) {
@@ -3567,6 +4526,24 @@ async function selectVideoFileFromServer() {
   const data = await response.json();
   if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
   return data.canceled ? null : data;
+}
+
+async function selectUrdfFileFromServer() {
+  const response = await fetch('/api/select-urdf-file', { method: 'POST' });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+  return data.canceled ? null : data;
+}
+
+async function fetchRobotModel(path) {
+  const response = await fetch('/api/robot-model', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
 }
 
 async function selectMcapFileFromServer() {
@@ -5836,6 +6813,14 @@ function normalizeImportedNode(node) {
     }
     normalized.params = { ...(normalized.params || {}), outputType: videoType };
   }
+  if (!normalized.toolType) {
+    normalized.params = {
+      ...(normalized.params || {}),
+      tfInputEnabled: Boolean(normalized.params?.tfInputEnabled),
+      tfOutputEnabled: Boolean(normalized.params?.tfOutputEnabled),
+    };
+    applyCustomTfPorts(normalized);
+  }
   if (normalized.toolType === 'mcap_record') {
     const count = Math.max(1, Math.min(64, Math.floor(Number(normalized.params.topicCount || normalized.inputs.length || 1))));
     const splitSizeMb = Math.max(0, Number(normalized.params.splitSizeMb || 0));
@@ -5852,6 +6837,35 @@ function normalizeImportedNode(node) {
       receiveMode: 'manual',
       callbackCode: '',
     }));
+  }
+  if (normalized.toolType === 'urdf_static_tf_publisher') {
+    normalized.inputs = [];
+    normalized.outputs = [{ id: 'tf_static', name: 'TF', dataType: 'tf2_msgs/msg/TFMessage' }];
+    normalized.params = { ...(normalized.params || {}), urdfPath: String(normalized.params.urdfPath || ''), fileName: String(normalized.params.fileName || '') };
+  }
+  if (normalized.toolType === 'tf_merge') {
+    const count = Math.max(1, Math.min(64, Math.floor(Number(normalized.params.topicCount || normalized.inputs.length || 2))));
+    normalized.params = { ...(normalized.params || {}), topicCount: count };
+    while (normalized.inputs.length < count) {
+      const index = normalized.inputs.length;
+      normalized.inputs.push({ id: `in${index + 1}`, name: 'TF', dataType: 'tf2_msgs/msg/TFMessage', receiveMode: 'manual', callbackCode: '' });
+    }
+    normalized.inputs = normalized.inputs.slice(0, count).map((port, index) => ({
+      ...port,
+      id: port.id || `in${index + 1}`,
+      name: port.name || 'TF',
+      dataType: 'tf2_msgs/msg/TFMessage',
+      receiveMode: 'manual',
+      callbackCode: '',
+    }));
+    normalized.outputs = [
+      { id: 'tf', name: 'TF', dataType: 'tf2_msgs/msg/TFMessage' },
+    ];
+  }
+  if (normalized.toolType === 'tf_viewer' || normalized.toolType === '3d_viewer') {
+    if (normalized.toolType === 'tf_viewer') normalized.toolType = '3d_viewer';
+    normalized.params = { ...(normalized.params || {}), ...tfViewerDefaults(normalized.params || {}) };
+    apply3dViewerPorts(normalized, normalized.params, false);
   }
   return normalized;
 }
@@ -5988,8 +7002,30 @@ function canConnect(fromNodeId, fromPortId, toNodeId, toPortId) {
 }
 
 function defaultLinkTopic(fromNode, fromPort, toNode, toPort) {
+  const fixedTopic = fixedTfTopicForOutput(fromNode, fromPort);
+  if (fixedTopic) return fixedTopic;
   const src = nodeFor(fromNode)?.outputs.find((port) => port.id === fromPort);
   return normalizeTopic(src?.name || fromPort || 'topic');
+}
+
+function isTfLink(link) {
+  const src = nodeFor(link?.fromNode)?.outputs.find((port) => port.id === link?.fromPort);
+  const dst = nodeFor(link?.toNode)?.inputs.find((port) => port.id === link?.toPort);
+  return src?.dataType === 'tf2_msgs/msg/TFMessage' || dst?.dataType === 'tf2_msgs/msg/TFMessage';
+}
+
+function displayLinkName(link) {
+  if (isTfLink(link)) return 'TF';
+  return link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort);
+}
+
+function fixedTfTopicForOutput(fromNode, fromPort) {
+  const node = nodeFor(fromNode);
+  if (node?.toolType === 'urdf_static_tf_publisher') return '/tf_static';
+  const src = node?.outputs.find((port) => port.id === fromPort);
+  if (src?.dataType !== 'tf2_msgs/msg/TFMessage') return '';
+  const label = `${src.id || ''} ${src.name || ''}`.toLowerCase();
+  return label.includes('static') ? '/tf_static' : '/tf';
 }
 
 function sourceTopicKey(fromNode, fromPort) {
@@ -6003,7 +7039,7 @@ function sourceTopicName(fromNode, fromPort) {
 
 function syncSourceTopicNames(fromNode, fromPort, name) {
   const fallback = defaultLinkTopic(fromNode, fromPort, '', '');
-  const topic = normalizeTopic(name || fallback);
+  const topic = fixedTfTopicForOutput(fromNode, fromPort) || normalizeTopic(name || fallback);
   state.links.forEach((link) => {
     if (link.fromNode === fromNode && link.fromPort === fromPort) link.name = topic;
   });
@@ -6013,16 +7049,23 @@ function normalizeSourceTopicNames() {
   const topics = new Map();
   state.links.forEach((link) => {
     const key = sourceTopicKey(link.fromNode, link.fromPort);
-    if (!topics.has(key)) topics.set(key, normalizeTopic(link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort)));
+    if (!topics.has(key)) topics.set(key, fixedTfTopicForOutput(link.fromNode, link.fromPort) || normalizeTopic(link.name || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort)));
   });
   state.links.forEach((link) => {
-    link.name = normalizeTopic(topics.get(sourceTopicKey(link.fromNode, link.fromPort)) || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort));
+    link.name = fixedTfTopicForOutput(link.fromNode, link.fromPort) || normalizeTopic(topics.get(sourceTopicKey(link.fromNode, link.fromPort)) || defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort));
   });
 }
 
 function editLinkName(linkId) {
   const link = state.links.find((item) => item.id === linkId);
   if (!link) return;
+  if (fixedTfTopicForOutput(link.fromNode, link.fromPort)) {
+    syncSourceTopicNames(link.fromNode, link.fromPort, '');
+    renderLinks();
+    renderInspector();
+    scheduleRun();
+    return;
+  }
   const fallback = defaultLinkTopic(link.fromNode, link.fromPort, link.toNode, link.toPort);
   const next = prompt('Topic name for this output topic', link.name || fallback);
   if (next === null) return;

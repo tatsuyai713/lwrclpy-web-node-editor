@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<robot name="simple_mobile_robot">
+  <link name="base_link"/>
+  <link name="base_laser"/>
+  <link name="camera_link"/>
+  <link name="camera_optical_frame"/>
+  <link name="imu_link"/>
+
+  <joint name="base_to_laser" type="fixed">
+    <parent link="base_link"/>
+    <child link="base_laser"/>
+    <origin xyz="0.28 0.0 0.18" rpy="0 0 0"/>
+  </joint>
+
+  <joint name="base_to_camera" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <origin xyz="0.18 0.0 0.32" rpy="0 0 0"/>
+  </joint>
+
+  <joint name="camera_to_optical" type="fixed">
+    <parent link="camera_link"/>
+    <child link="camera_optical_frame"/>
+    <origin xyz="0 0 0" rpy="-1.57079632679 0 -1.57079632679"/>
+  </joint>
+
+  <joint name="base_to_imu" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="0.0 0.0 0.12" rpy="0 0 0"/>
+  </joint>
+</robot>

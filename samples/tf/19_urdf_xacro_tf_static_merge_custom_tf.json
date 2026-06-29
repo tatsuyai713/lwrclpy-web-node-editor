@@ -1,0 +1,235 @@
+{
+  "format": "lwrclpy-web-node-editor-project",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "urdf_static_tf_publisher",
+      "x": -1000,
+      "y": -170,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "tf_static",
+          "name": "TF",
+          "dataType": "tf2_msgs/msg/TFMessage"
+        }
+      ],
+      "params": {
+        "urdfPath": "samples/tf/simple_mobile_robot.urdf",
+        "fileName": "simple_mobile_robot.urdf"
+      },
+      "loopCode": "",
+      "toolType": "urdf_static_tf_publisher"
+    },
+    {
+      "id": "n2",
+      "name": "tf_merge",
+      "x": -520,
+      "y": -20,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "TF",
+          "dataType": "tf2_msgs/msg/TFMessage",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        },
+        {
+          "id": "in2",
+          "name": "TF",
+          "dataType": "tf2_msgs/msg/TFMessage",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [
+        {
+          "id": "tf",
+          "name": "TF",
+          "dataType": "tf2_msgs/msg/TFMessage"
+        }
+      ],
+      "params": {
+        "topicCount": 2
+      },
+      "loopCode": "",
+      "toolType": "tf_merge"
+    },
+    {
+      "id": "n3",
+      "name": "custom_tf2_ros_broadcaster",
+      "x": -1000,
+      "y": 130,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "tf",
+          "name": "TF",
+          "dataType": "tf2_msgs/msg/TFMessage"
+        }
+      ],
+      "loopCode": "broadcaster = ensure_tf_broadcaster(state, node)\nstate[\"angle\"] = state.get(\"angle\", 0.0) + 0.02\nx = 0.25 * math.cos(state[\"angle\"])\ny = 0.25 * math.sin(state[\"angle\"])\ntransform = make_transform(\"base_link\", \"custom_probe_frame\", (x, y, 0.45), (0.0, 0.0, 0.0, 1.0))\nbroadcaster.sendTransform(transform)\n",
+      "timers": [],
+      "timerEnabled": false,
+      "timerPeriodSec": 1.0,
+      "timerCode": "",
+      "importCode": "import math\n\nfrom geometry_msgs.msg import TransformStamped\nfrom tf2_ros.transform_broadcaster import TransformBroadcaster\n\n\ndef ensure_tf_broadcaster(state, node):\n    if \"tf_broadcaster\" not in state:\n        state[\"tf_broadcaster\"] = TransformBroadcaster(node)\n    return state[\"tf_broadcaster\"]\n\n\ndef _field(value, name, default=None):\n    attr = getattr(value, name, default)\n    if callable(attr):\n        try:\n            return attr()\n        except TypeError:\n            return attr\n    return attr\n\n\ndef _set_field(value, name, item):\n    attr = getattr(value, name, None)\n    if callable(attr):\n        try:\n            attr(item)\n            return\n        except TypeError:\n            pass\n    setattr(value, name, item)\n\n\ndef make_transform(parent, child, translation, rotation):\n    transform = TransformStamped()\n    header = _field(transform, \"header\")\n    stamp = _field(header, \"stamp\")\n    _set_field(stamp, \"sec\", 0)\n    _set_field(stamp, \"nanosec\", 0)\n    _set_field(header, \"frame_id\", str(parent))\n    _set_field(transform, \"child_frame_id\", str(child))\n    body = _field(transform, \"transform\")\n    trans = _field(body, \"translation\")\n    rot = _field(body, \"rotation\")\n    _set_field(trans, \"x\", float(translation[0]))\n    _set_field(trans, \"y\", float(translation[1]))\n    _set_field(trans, \"z\", float(translation[2]))\n    _set_field(rot, \"x\", float(rotation[0]))\n    _set_field(rot, \"y\", float(rotation[1]))\n    _set_field(rot, \"z\", float(rotation[2]))\n    _set_field(rot, \"w\", float(rotation[3]))\n    return transform\n",
+      "requirements": "",
+      "pythonVersion": "3.13",
+      "lwrclpyVersion": "0.6.1",
+      "params": {
+        "tfInputEnabled": false,
+        "tfOutputEnabled": true
+      },
+      "toolType": "",
+      "customNodeMeta": null
+    },
+    {
+      "id": "n7",
+      "name": "camera_x_topic_output",
+      "x": 580,
+      "y": 220,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "camera_x",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {},
+      "loopCode": "",
+      "toolType": "topic_output"
+    },
+    {
+      "id": "n8",
+      "name": "custom_tf2_ros_listener",
+      "x": -40,
+      "y": -20,
+      "inputs": [
+        {
+          "id": "tf_in",
+          "name": "TF",
+          "dataType": "tf2_msgs/msg/TFMessage",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [
+        {
+          "id": "camera_x",
+          "name": "camera_x",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "loopCode": "parent = str(params.get(\"sourceFrame\") or \"base_link\")\nchild = str(params.get(\"targetFrame\") or \"camera_link\")\ntranslation = lookup_with_tf2_ros(state, node, parent, child)\nif translation is not None:\n    publish(\"camera_x\", {\"data\": float(translation[0])})\n",
+      "timers": [],
+      "timerEnabled": false,
+      "timerPeriodSec": 1.0,
+      "timerCode": "",
+      "importCode": "import rclpy\nfrom rclpy.node import Node\nfrom rclpy.time import Time\nfrom tf2_ros import TransformException\nfrom tf2_ros.buffer import Buffer\nfrom tf2_ros.transform_listener import TransformListener\n\n\ndef ensure_tf_listener(state, node):\n    if \"tf_buffer\" not in state:\n        state[\"tf_buffer\"] = Buffer()\n        state[\"tf_listener\"] = TransformListener(state[\"tf_buffer\"], node)\n    return state[\"tf_buffer\"]\n\n\ndef _field(value, name, default=None):\n    attr = getattr(value, name, default)\n    if callable(attr):\n        try:\n            return attr()\n        except TypeError:\n            return attr\n    return attr\n\n\ndef lookup_with_tf2_ros(state, node, parent, child):\n    buffer = ensure_tf_listener(state, node)\n    try:\n        transform = buffer.lookup_transform(parent, child, Time())\n        trans = _field(_field(transform, \"transform\"), \"translation\")\n        return (\n            float(_field(trans, \"x\", 0.0)),\n            float(_field(trans, \"y\", 0.0)),\n            float(_field(trans, \"z\", 0.0)),\n        )\n    except TransformException as exc:\n        state[\"last_tf2_ros_error\"] = str(exc)\n        return None\n",
+      "requirements": "",
+      "pythonVersion": "3.13",
+      "lwrclpyVersion": "0.6.1",
+      "toolType": "",
+      "params": {
+        "tfInputEnabled": true,
+        "tfOutputEnabled": false,
+        "sourceFrame": "base_link",
+        "targetFrame": "camera_link"
+      },
+      "customNodeMeta": null
+    },
+    {
+      "id": "n9",
+      "name": "3d_viewer",
+      "x": 580,
+      "y": -120,
+      "inputs": [
+        {
+          "id": "tf_in",
+          "name": "TF",
+          "dataType": "tf2_msgs/msg/TFMessage",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "rootFrame": "base_link",
+        "enableTf": true,
+        "pointCloudCount": 0,
+        "pointCloudStyle": "square",
+        "pointCloudSize": 0.03,
+        "pointCloudColor": "#ffffff",
+        "pointCloudOpacity": 1,
+        "occupancyGridCount": 0,
+        "occupancyGridColorScheme": "map",
+        "occupancyGridAlpha": 0.7,
+        "occupancyGridDrawBehind": true,
+        "showRobotModel": false,
+        "robotModelPath": "samples/tf/simple_mobile_robot.urdf",
+        "robotModel": null,
+        "robotModelColor": "#9aa4b2",
+        "robotModelOpacity": 0.45,
+        "gridStep": 0.25,
+        "gridSize": 4,
+        "axisSize": 0.35,
+        "showLabels": true
+      },
+      "loopCode": "",
+      "toolType": "3d_viewer"
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "fromNode": "n1",
+      "fromPort": "tf_static",
+      "toNode": "n2",
+      "toPort": "in1",
+      "name": "/tf_static"
+    },
+    {
+      "id": "l2",
+      "fromNode": "n3",
+      "fromPort": "tf",
+      "toNode": "n2",
+      "toPort": "in2",
+      "name": "/tf"
+    },
+    {
+      "id": "l3",
+      "fromNode": "n2",
+      "fromPort": "tf",
+      "toNode": "n8",
+      "toPort": "tf_in",
+      "name": "/tf"
+    },
+    {
+      "id": "l4",
+      "fromNode": "n8",
+      "fromPort": "camera_x",
+      "toNode": "n7",
+      "toPort": "in1",
+      "name": "/camera_x"
+    },
+    {
+      "id": "l5",
+      "fromNode": "n2",
+      "fromPort": "tf",
+      "toNode": "n9",
+      "toPort": "tf_in",
+      "name": "/tf"
+    }
+  ],
+  "view": {
+    "x": 250,
+    "y": 210,
+    "scale": 0.78
+  },
+  "nextId": 10
+}

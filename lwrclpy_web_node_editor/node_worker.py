@@ -34,8 +34,20 @@ def split_kind(type_name: str) -> str:
     return type_name.split("/")[1]
 
 
-def topic_qos(data_type: str, depth: int = 1, reliable: bool = False) -> Any:
-    if data_type.replace(".", "/") not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
+def topic_qos(data_type: str, depth: int = 1, reliable: bool = False, topic: str = "") -> Any:
+    normalized = data_type.replace(".", "/")
+    if normalized == "tf2_msgs/msg/TFMessage" and str(topic or "").rstrip("/") == "/tf_static":
+        try:
+            qos = importlib.import_module("rclpy.qos")
+            return qos.QoSProfile(
+                history=qos.HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=qos.ReliabilityPolicy.RELIABLE,
+                durability=qos.DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+        except Exception:
+            return 1
+    if normalized not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
         return 10
     try:
         qos = importlib.import_module("rclpy.qos")
@@ -49,12 +61,12 @@ def topic_qos(data_type: str, depth: int = 1, reliable: bool = False) -> Any:
         return depth
 
 
-def publisher_qos(data_type: str, external: bool = False) -> Any:
-    return topic_qos(data_type, depth=5, reliable=False)
+def publisher_qos(data_type: str, external: bool = False, topic: str = "") -> Any:
+    return topic_qos(data_type, depth=5, reliable=False, topic=topic)
 
 
-def subscriber_qos(data_type: str) -> Any:
-    return topic_qos(data_type, depth=5, reliable=False)
+def subscriber_qos(data_type: str, topic: str = "") -> Any:
+    return topic_qos(data_type, depth=5, reliable=False, topic=topic)
 
 
 class LwrclpyWorkerNode:
@@ -93,7 +105,7 @@ class LwrclpyWorkerNode:
                         self.node.create_publisher(
                             type_cls,
                             topic,
-                            publisher_qos(output["dataType"], bool(self.config.get("externalDdsCompatible"))),
+                            publisher_qos(output["dataType"], bool(self.config.get("externalDdsCompatible")), topic),
                         )
                     )
                 else:
@@ -102,7 +114,7 @@ class LwrclpyWorkerNode:
             type_cls = import_type_class(input_port["dataType"])
             for topic in self.port_topics.get("inputs", {}).get(input_port["id"], []):
                 if split_kind(input_port["dataType"]) == "msg":
-                    self.subscriptions.append(self.node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port), subscriber_qos(input_port["dataType"])))
+                    self.subscriptions.append(self.node.create_subscription(type_cls, topic, self._make_subscription_callback(input_port), subscriber_qos(input_port["dataType"], topic)))
                 else:
                     self.services.append(self.node.create_service(type_cls, topic, self._make_service_callback(input_port)))
 
@@ -376,7 +388,7 @@ class LwrclpyWorkerNode:
 
     def _coerce_message(self, data_type: str, value: Any) -> Any:
         msg_cls = import_type_class(data_type)
-        if hasattr(value, "_fields_and_field_types"):
+        if isinstance(value, msg_cls) or hasattr(value, "_fields_and_field_types"):
             return value
         msg = msg_cls()
         self._populate_message(msg, value)

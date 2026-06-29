@@ -18,11 +18,12 @@ import sys
 import threading
 import time
 import urllib.request
+import xml.etree.ElementTree as ET
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from multiprocessing import shared_memory
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from . import graph as graph_module
 from .graph import GraphRuntime
 from .runtime_exec import (
@@ -208,6 +209,150 @@ def _select_video_file() -> dict[str, object]:
     except Exception as exc:
         result["probeError"] = str(exc)
     return result
+
+
+def _select_urdf_file() -> dict[str, object]:
+    if sys.platform == "darwin":
+        script = (
+            'set f to choose file with prompt "Select URDF or Xacro file" '
+            'of type {"urdf", "xacro", "xml"}\n'
+            "POSIX path of f"
+        )
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        if result.returncode != 0:
+            text = (result.stderr or result.stdout or "").strip()
+            if "User canceled" in text or result.returncode == 1:
+                return {"ok": True, "canceled": True}
+            raise RuntimeError(text or "URDF/Xacro file selection failed")
+        path = result.stdout.strip()
+    else:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            path = filedialog.askopenfilename(
+                title="Select URDF or Xacro file",
+                filetypes=[
+                    ("URDF/Xacro files", "*.urdf *.xacro *.xml"),
+                    ("All files", "*.*"),
+                ],
+            )
+        finally:
+            root.destroy()
+        if not path:
+            return {"ok": True, "canceled": True}
+    selected = Path(path).expanduser()
+    if not selected.is_file():
+        raise RuntimeError(f"selected file does not exist: {selected}")
+    if selected.suffix.lower() not in {".urdf", ".xacro", ".xml"}:
+        raise RuntimeError(f"selected file is not a URDF/Xacro file: {selected}")
+    return {"ok": True, "path": str(selected), "fileName": selected.name}
+
+
+def _load_urdf_or_xacro(path: Path) -> str:
+    if path.suffix.lower() == ".xacro":
+        try:
+            import xacro
+
+            return xacro.process_file(str(path)).toxml()
+        except Exception:
+            pass
+        try:
+            result = subprocess.run(["xacro", str(path)], capture_output=True, text=True, check=True)
+            return result.stdout
+        except Exception as exc:
+            raise RuntimeError(f"failed to process xacro: {exc}") from exc
+    return path.read_text(encoding="utf-8")
+
+
+def _float_list(text: str, count: int, default: float = 0.0) -> list[float]:
+    values = []
+    for part in str(text or "").replace(",", " ").split():
+        try:
+            values.append(float(part))
+        except Exception:
+            pass
+    while len(values) < count:
+        values.append(default)
+    return values[:count]
+
+
+def _robot_model_payload(path_text: str) -> dict[str, object]:
+    path = Path(str(path_text or "")).expanduser()
+    if not path.is_file():
+        raise RuntimeError(f"URDF/Xacro file not found: {path}")
+    root = ET.fromstring(_load_urdf_or_xacro(path))
+    visuals: list[dict[str, object]] = []
+    for link in root.findall("link"):
+        link_name = str(link.attrib.get("name") or "")
+        if not link_name:
+            continue
+        for visual in link.findall("visual"):
+            origin = visual.find("origin")
+            xyz = _float_list(origin.attrib.get("xyz", "") if origin is not None else "", 3, 0.0)
+            rpy = _float_list(origin.attrib.get("rpy", "") if origin is not None else "", 3, 0.0)
+            geometry = visual.find("geometry")
+            if geometry is None:
+                continue
+            item: dict[str, object] = {"link": link_name, "xyz": xyz, "rpy": rpy}
+            box = geometry.find("box")
+            cylinder = geometry.find("cylinder")
+            sphere = geometry.find("sphere")
+            mesh = geometry.find("mesh")
+            if box is not None:
+                item.update({"type": "box", "size": _float_list(box.attrib.get("size", ""), 3, 1.0)})
+            elif cylinder is not None:
+                item.update({"type": "cylinder", "radius": float(cylinder.attrib.get("radius") or 0.5), "length": float(cylinder.attrib.get("length") or 1.0)})
+            elif sphere is not None:
+                item.update({"type": "sphere", "radius": float(sphere.attrib.get("radius") or 0.5)})
+            elif mesh is not None:
+                filename = str(mesh.attrib.get("filename") or "")
+                mesh_path = _resolve_robot_mesh_path(path.parent, filename)
+                item.update({
+                    "type": "mesh",
+                    "filename": filename,
+                    "url": f"/api/robot-mesh?path={quote(str(mesh_path))}" if mesh_path and mesh_path.is_file() else "",
+                    "extension": mesh_path.suffix.lower() if mesh_path else Path(filename).suffix.lower(),
+                    "scale": _float_list(mesh.attrib.get("scale", ""), 3, 1.0),
+                })
+            else:
+                continue
+            visuals.append(item)
+    return {"ok": True, "path": str(path), "fileName": path.name, "visuals": visuals}
+
+
+def _resolve_robot_mesh_path(urdf_dir: Path, filename: str) -> Path | None:
+    if not filename:
+        return None
+    text = filename
+    if text.startswith("file://"):
+        return Path(text[7:]).expanduser().resolve()
+    if text.startswith("package://"):
+        rest = text[len("package://"):]
+        parts = rest.split("/", 1)
+        rel = parts[1] if len(parts) == 2 else ""
+        candidates = [
+            PROJECT_DIR / rest,
+            PROJECT_DIR / "src" / rest,
+            PROJECT_DIR / "install" / rest,
+        ]
+        if len(parts) == 2:
+            candidates.extend([
+                PROJECT_DIR / parts[0] / rel,
+                PROJECT_DIR / "src" / parts[0] / rel,
+                PROJECT_DIR / "install" / parts[0] / "share" / parts[0] / rel,
+            ])
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve()
+        return None
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (urdf_dir / path).resolve()
 
 
 def _select_mcap_file() -> dict[str, object]:
@@ -1721,6 +1866,10 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             self._send_node_frame_stream(str((query.get("nodeId") or [""])[0]))
             return
+        if path == "/api/robot-mesh":
+            query = parse_qs(parsed.query)
+            self._send_robot_mesh(str((query.get("path") or [""])[0]))
+            return
         self._send_static(path)
 
     def do_POST(self):
@@ -1728,6 +1877,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/select-video-file":
             try:
                 self._send_json(_select_video_file())
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=500)
+            return
+        if path == "/api/select-urdf-file":
+            try:
+                self._send_json(_select_urdf_file())
             except Exception as exc:
                 self._send_json({"error": str(exc)}, status=500)
             return
@@ -1755,6 +1910,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/custom-nodes/delete",
             "/api/custom-nodes/import",
             "/api/open-mcap-file",
+            "/api/robot-model",
             "/api/sample-project",
             "/api/export-cli",
             "/api/export-ros2-package",
@@ -1774,6 +1930,8 @@ class Handler(BaseHTTPRequestHandler):
                 result["customNodes"] = _read_custom_nodes()
             elif path == "/api/open-mcap-file":
                 result = _open_mcap_file(payload.get("path"))
+            elif path == "/api/robot-model":
+                result = _robot_model_payload(str(payload.get("path") or ""))
             elif path == "/api/sample-project":
                 result = _read_sample_project(payload.get("path"))
             elif path == "/api/export-cli":
@@ -2086,6 +2244,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(403)
             return
         if not target.exists() or not target.is_file():
+            self.send_error(404)
+            return
+        data = target.read_bytes()
+        self.send_response(200)
+        self.send_header("content-type", mimetypes.guess_type(str(target))[0] or "application/octet-stream")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_robot_mesh(self, path: str):
+        target = Path(unquote(path or "")).expanduser().resolve()
+        if not target.is_file():
             self.send_error(404)
             return
         data = target.read_bytes()

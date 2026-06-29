@@ -120,6 +120,16 @@
             <input id="config-output-count" type="number" min="0" max="16" value="1">
           </label>
         </div>
+        <div class="count-grid">
+          <label class="checkbox-field">
+            <input id="config-tf-input" type="checkbox">
+            <span>TF Input</span>
+          </label>
+          <label class="checkbox-field">
+            <input id="config-tf-output" type="checkbox">
+            <span>TF Output</span>
+          </label>
+        </div>
         <div class="timer-config">
           <label class="field">
             <span>Timer Count</span>
@@ -200,6 +210,132 @@
       </div>
       <footer class="dialog-footer">
         <button type="button" data-close-dialog="graph-dialog">Cancel</button>
+        <button type="submit">Apply</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="tf-viewer-dialog">
+    <form method="dialog" id="tf-viewer-form">
+      <header class="dialog-header">
+        <h2>3D Viewer Settings</h2>
+        <button type="button" class="icon-button" data-close-dialog="tf-viewer-dialog">x</button>
+      </header>
+      <div class="dialog-body">
+        <div class="viewer-config-fields">
+          <section class="viewer-config-section">
+            <h3>TF</h3>
+            <div class="viewer-config-grid">
+              <label class="checkbox-field">
+                <input id="viewer-enable-tf" type="checkbox" checked>
+                <span>Enable TF</span>
+              </label>
+              <label class="checkbox-field">
+                <input id="tf-viewer-labels" type="checkbox" checked>
+                <span>Show Labels</span>
+              </label>
+              <label class="field">
+                <span>Axis Size</span>
+                <input id="tf-viewer-axis-size" type="number" min="0.01" step="any" value="0.35">
+              </label>
+            </div>
+          </section>
+
+          <section class="viewer-config-section">
+            <h3>PointCloud</h3>
+            <div class="viewer-config-grid">
+              <label class="field">
+                <span>Topics</span>
+                <input id="viewer-pointcloud-count" type="number" min="0" max="16" step="1" value="0">
+              </label>
+              <label class="field">
+                <span>Shape</span>
+                <select id="viewer-pointcloud-style">
+                  <option value="square">Square</option>
+                  <option value="circle">Circle</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Size</span>
+                <input id="viewer-pointcloud-size" type="number" min="0.001" step="any" value="0.03">
+              </label>
+              <label class="field">
+                <span>Color</span>
+                <input id="viewer-pointcloud-color" type="color" value="#ffffff">
+              </label>
+              <label class="field">
+                <span>Opacity</span>
+                <input id="viewer-pointcloud-opacity" type="number" min="0" max="1" step="any" value="1">
+              </label>
+            </div>
+          </section>
+
+          <section class="viewer-config-section">
+            <h3>Occupancy Grid</h3>
+            <div class="viewer-config-grid">
+              <label class="field">
+                <span>Topics</span>
+                <input id="viewer-occupancy-grid-count" type="number" min="0" max="16" step="1" value="0">
+              </label>
+              <label class="field">
+                <span>Color Scheme</span>
+                <select id="viewer-occupancy-grid-color-scheme">
+                  <option value="map">Map</option>
+                  <option value="costmap">Costmap</option>
+                  <option value="raw">Raw</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Alpha</span>
+                <input id="viewer-occupancy-grid-alpha" type="number" min="0" max="1" step="any" value="0.7">
+              </label>
+              <label class="checkbox-field">
+                <input id="viewer-occupancy-grid-draw-behind" type="checkbox" checked>
+                <span>Draw Behind</span>
+              </label>
+            </div>
+          </section>
+
+          <section class="viewer-config-section">
+            <h3>Robot Model</h3>
+            <div class="viewer-config-grid">
+              <label class="checkbox-field">
+                <input id="viewer-robot-model" type="checkbox">
+                <span>Enable Robot Model</span>
+              </label>
+              <label class="field viewer-config-wide">
+                <span>URDF/Xacro</span>
+                <input id="viewer-robot-model-path" value="" placeholder="/path/to/robot.urdf or robot.xacro">
+              </label>
+              <button type="button" id="viewer-robot-model-select">Select URDF/Xacro</button>
+              <label class="field">
+                <span>Color</span>
+                <input id="viewer-robot-model-color" type="color" value="#9aa4b2">
+              </label>
+              <label class="field">
+                <span>Opacity</span>
+                <input id="viewer-robot-model-opacity" type="number" min="0" max="1" step="any" value="0.45">
+              </label>
+            </div>
+          </section>
+
+          <section class="viewer-config-section">
+            <h3>Grid</h3>
+            <div class="viewer-config-grid">
+              <label class="field">
+                <span>Step</span>
+                <input id="tf-viewer-grid-step" type="number" min="0.01" step="any" value="0.25">
+              </label>
+              <label class="field">
+                <span>Size</span>
+                <input id="tf-viewer-grid-size" type="number" min="0.1" step="any" value="4">
+              </label>
+            </div>
+          </section>
+        </div>
+      </div>
+      <footer class="dialog-footer">
+        <button type="button" data-close-dialog="tf-viewer-dialog">Cancel</button>
         <button type="submit">Apply</button>
       </footer>
     </form>

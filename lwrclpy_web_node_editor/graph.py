@@ -679,6 +679,12 @@ class CustomLwrclNodeInstance:
             self.last_outputs.clear()
             self.view = {"kind": "text", "status": "DDS topic is required; node execution is isolated in worker processes"}
             return True
+        if tool == "tf_merge":
+            self.last_outputs.clear()
+            input_count = len(self.config.inputs)
+            suffix = "" if input_count == 1 else "s"
+            self.view = {"kind": "text", "status": f"TF merge edge node ({input_count} input{suffix})"}
+            return True
         if tool == "image_file_input":
             image = self.config.params.get("imageMessage")
             if isinstance(image, dict):
@@ -737,6 +743,9 @@ class CustomLwrclNodeInstance:
         if tool == "graph_view":
             self._execute_graph_view_once()
             return True
+        if tool in {"tf_viewer", "3d_viewer"}:
+            self._execute_tf_viewer_worker_once()
+            return True
         return False
 
     def _builtin_runs_in_background(self) -> bool:
@@ -747,7 +756,7 @@ class CustomLwrclNodeInstance:
             return True
         if tool in {"video_file_input", "function_generator"}:
             return bool(self.publishers)
-        if tool in {"image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save"} and self._uses_dds_tap_worker():
+        if tool in {"image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save", "tf_viewer", "3d_viewer"} and self._uses_dds_tap_worker():
             return True
         if tool == "mcap_record" and self._uses_mcap_record_worker():
             return True
@@ -770,7 +779,7 @@ class CustomLwrclNodeInstance:
                 self._update_video_worker_view()
             else:
                 self._execute_source_worker_status_once()
-        elif tool in {"function_generator", "image_file_input"}:
+        elif tool in {"function_generator", "image_file_input", "urdf_static_tf_publisher"}:
             self._execute_source_worker_status_once()
         elif tool == "image_view":
             self._execute_image_view_worker_once()
@@ -780,6 +789,8 @@ class CustomLwrclNodeInstance:
             self._execute_topic_hz_monitor_worker_once()
         elif tool == "graph_view":
             self._execute_graph_view_worker_once()
+        elif tool in {"tf_viewer", "3d_viewer"}:
+            self._execute_tf_viewer_worker_once()
         elif tool == "image_file_save":
             self._execute_image_save_worker_once()
         elif tool == "mcap_record":
@@ -818,6 +829,8 @@ class CustomLwrclNodeInstance:
         )
 
     def _uses_dds_tap_worker(self) -> bool:
+        if self.config.tool_type in {"tf_viewer", "3d_viewer"}:
+            return True
         return self.config.tool_type in {"image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save"} and any(port.topics for port in self.config.inputs)
 
     def _uses_mcap_record_worker(self) -> bool:
@@ -826,7 +839,7 @@ class CustomLwrclNodeInstance:
     def _uses_builtin_source_worker(self) -> bool:
         if self.config.tool_type == "video_file_input" and self._uses_video_worker():
             return False
-        return self.config.tool_type in {"function_generator", "image_file_input", "video_file_input", "mcap_file_input"} and any(port.topics for port in self.config.outputs)
+        return self.config.tool_type in {"function_generator", "image_file_input", "video_file_input", "mcap_file_input", "urdf_static_tf_publisher"} and any(port.topics for port in self.config.outputs)
 
     def _ensure_builtin_source_worker(self) -> None:
         signature = self._builtin_source_worker_signature()
@@ -907,7 +920,7 @@ class CustomLwrclNodeInstance:
     def _builtin_source_worker_signature(self) -> tuple[Any, ...]:
         output = next((port for port in self.config.outputs if port.topics), None)
         return (
-            "builtin-source-v3",
+            "builtin-source-v5",
             self.config.id,
             self.config.tool_type,
             tuple((port.id, port.name, port.data_type, port.topics) for port in self.config.outputs if port.topics),
@@ -987,11 +1000,27 @@ class CustomLwrclNodeInstance:
     def _dds_tap_worker_signature(self) -> tuple[Any, ...]:
         input_port = next((port for port in self.config.inputs if port.topics), None)
         return (
-            "dds-tap-v16",
+            "dds-tap-v18",
             self.config.id,
             self.config.tool_type,
             input_port.data_type if input_port else "",
             input_port.topics if input_port else (),
+            str(self.config.params.get("rootFrame") or ""),
+            bool(self.config.params.get("enableTf", True)),
+            int(self.config.params.get("pointCloudCount") or 0),
+            int(self.config.params.get("occupancyGridCount") or 0),
+            tuple((port.id, port.data_type, port.topics) for port in self.config.inputs if normalize_type(port.data_type) == "sensor_msgs/msg/PointCloud2"),
+            tuple((port.id, port.data_type, port.topics) for port in self.config.inputs if normalize_type(port.data_type) == "nav_msgs/msg/OccupancyGrid"),
+            str(self.config.params.get("pointCloudStyle") or "square"),
+            float(self.config.params.get("pointCloudSize") or 0.03),
+            str(self.config.params.get("pointCloudColor") or "#ffffff"),
+            float(self.config.params.get("pointCloudOpacity") or 1.0),
+            str(self.config.params.get("occupancyGridColorScheme") or "map"),
+            float(self.config.params.get("occupancyGridAlpha") or 0.7),
+            bool(self.config.params.get("occupancyGridDrawBehind", True)),
+            bool(self.config.params.get("showRobotModel", False)),
+            str(self.config.params.get("robotModelColor") or "#9aa4b2"),
+            float(self.config.params.get("robotModelOpacity") or 0.45),
             float(self.config.params.get("windowSec") or 5.0),
             float(self.config.params.get("xAxisSeconds") or 10.0),
             int(self.config.params.get("sampleLimit") or 10000),
@@ -1006,13 +1035,25 @@ class CustomLwrclNodeInstance:
 
     def _dds_tap_worker_config(self, status_path: Path, frame_path: Path) -> dict[str, Any]:
         input_port = next((port for port in self.config.inputs if port.topics), None)
-        if input_port is None:
+        if input_port is None and self.config.tool_type not in {"tf_viewer", "3d_viewer"}:
             raise RuntimeError(f"{self.config.tool_type} has no DDS input topic")
+        topic = input_port.topics[0] if input_port is not None else "/tf"
+        data_type = input_port.data_type if input_port is not None else "tf2_msgs/msg/TFMessage"
+        point_cloud_topics = [
+            port.topics[0]
+            for port in self.config.inputs
+            if normalize_type(port.data_type) == "sensor_msgs/msg/PointCloud2" and port.topics
+        ]
+        occupancy_grid_topics = [
+            port.topics[0]
+            for port in self.config.inputs
+            if normalize_type(port.data_type) == "nav_msgs/msg/OccupancyGrid" and port.topics
+        ]
         return {
             "nodeId": self.config.id,
             "mode": self._dds_tap_mode(),
-            "topic": input_port.topics[0],
-            "dataType": input_port.data_type,
+            "topic": topic,
+            "dataType": data_type,
             "windowSec": max(0.5, float(self.config.params.get("windowSec") or 5.0)),
             "displayHz": self._run_hz(),
             "fieldPath": str(self.config.params.get("fieldPath") or "data"),
@@ -1030,6 +1071,10 @@ class CustomLwrclNodeInstance:
             "transport": self._dds_tap_transport(),
             "previewEncoding": "raw" if self.config.tool_type == "image_view" else "jpeg",
             "previewMaxSide": 640,
+            "enableTf": bool(self.config.params.get("enableTf", True)),
+            "pointCloudTopics": point_cloud_topics,
+            "occupancyGridTopics": occupancy_grid_topics,
+            "pointCloudMaxPoints": int(self.config.params.get("pointCloudMaxPoints") or 5000),
         }
 
     def _dds_tap_mode(self) -> str:
@@ -1041,6 +1086,10 @@ class CustomLwrclNodeInstance:
             return "graph"
         if self.config.tool_type == "image_file_save":
             return "save"
+        if self.config.tool_type == "tf_viewer":
+            return "tf"
+        if self.config.tool_type == "3d_viewer":
+            return "scene3d"
         return "hz"
 
     def _dds_tap_transport(self) -> str:
@@ -1371,6 +1420,9 @@ class CustomLwrclNodeInstance:
                         self._execute_graph_view_worker_once()
                     else:
                         self._execute_graph_view_once()
+                elif tool in {"tf_viewer", "3d_viewer"}:
+                    period = self._run_period()
+                    self._execute_tf_viewer_worker_once()
                 elif tool == "image_file_save":
                     period = 1.0 / 10.0
                     if self._uses_dds_tap_worker():
@@ -1720,6 +1772,85 @@ class CustomLwrclNodeInstance:
                 "min": float(self.config.params.get("yMin") if self.config.params.get("yMin") is not None else -1.0),
                 "max": float(self.config.params.get("yMax") if self.config.params.get("yMax") is not None else 1.0),
             },
+        }
+
+    def _execute_tf_viewer_worker_once(self) -> None:
+        status = self._read_dds_tap_status()
+        if not status:
+            self.view = {"kind": "tf3d", "frames": [], "roots": [], "frameNames": [], "rootFrame": "", "status": "DDS tap worker starting"}
+            return
+        if status.get("error"):
+            self.view = {"kind": "tf3d", "frames": [], "roots": [], "frameNames": [], "rootFrame": "", "status": str(status.get("error"))}
+            return
+        frames = status.get("frames")
+        if not isinstance(frames, list):
+            frames = []
+        roots = status.get("roots")
+        if not isinstance(roots, list):
+            roots = []
+        frame_names = status.get("frameNames")
+        if not isinstance(frame_names, list):
+            frame_names = []
+        configured_root = str(self.config.params.get("rootFrame") or "")
+        root_frame = configured_root if configured_root in frame_names else (roots[0] if roots else (frame_names[0] if frame_names else ""))
+        count = int(status.get("count") or 0)
+        hz = float(status.get("hz") or 0.0)
+        try:
+            grid_step = max(0.01, float(self.config.params.get("gridStep") or 0.25))
+        except Exception:
+            grid_step = 0.25
+        try:
+            grid_size = max(0.1, float(self.config.params.get("gridSize") or 4.0))
+        except Exception:
+            grid_size = 4.0
+        try:
+            axis_size = max(0.01, float(self.config.params.get("axisSize") or 0.35))
+        except Exception:
+            axis_size = 0.35
+        point_clouds = status.get("pointClouds")
+        if not isinstance(point_clouds, list):
+            point_clouds = []
+        occupancy_grids = status.get("occupancyGrids")
+        if not isinstance(occupancy_grids, list):
+            occupancy_grids = []
+        status_parts = []
+        if frames:
+            status_parts.append(f"{len(frames)} frames")
+        if point_clouds:
+            status_parts.append(f"{len(point_clouds)} pointclouds")
+        if occupancy_grids:
+            status_parts.append(f"{len(occupancy_grids)} occupancy grids")
+        status_text = f"{' / '.join(status_parts)} / {hz:.2f} Hz" if status_parts else "No 3D data"
+        self.view = {
+            "kind": "tf3d",
+            "frames": frames,
+            "pointClouds": point_clouds,
+            "occupancyGrids": occupancy_grids,
+            "roots": roots,
+            "frameNames": frame_names,
+            "rootFrame": root_frame,
+            "gridStep": grid_step,
+            "gridSize": grid_size,
+            "axisSize": axis_size,
+            "showLabels": bool(self.config.params.get("showLabels", True)),
+            "enableTf": bool(self.config.params.get("enableTf", True)),
+            "pointCloudStyle": str(self.config.params.get("pointCloudStyle") or "square"),
+            "pointCloudSize": max(0.001, float(self.config.params.get("pointCloudSize") or 0.03)),
+            "pointCloudColor": str(self.config.params.get("pointCloudColor") or "#ffffff"),
+            "pointCloudOpacity": max(0.0, min(1.0, float(self.config.params.get("pointCloudOpacity") or 1.0))),
+            "occupancyGridColorScheme": str(self.config.params.get("occupancyGridColorScheme") or "map"),
+            "occupancyGridAlpha": max(0.0, min(1.0, float(self.config.params.get("occupancyGridAlpha") or 0.7))),
+            "occupancyGridDrawBehind": bool(self.config.params.get("occupancyGridDrawBehind", True)),
+            "showRobotModel": bool(self.config.params.get("showRobotModel", False)),
+            "robotModel": self.config.params.get("robotModel") if isinstance(self.config.params.get("robotModel"), dict) else None,
+            "robotModelColor": str(self.config.params.get("robotModelColor") or "#9aa4b2"),
+            "robotModelOpacity": max(0.0, min(1.0, float(self.config.params.get("robotModelOpacity") or 0.45))),
+            "tfSeq": int(status.get("tfSeq") or 0),
+            "hz": hz,
+            "status": status_text,
+            "running": bool(status.get("running", True)),
+            "statusTime": float(status.get("time") or 0.0),
+            "count": count,
         }
 
     def _execute_image_save_worker_once(self) -> None:
@@ -2722,12 +2853,14 @@ class GraphRuntime:
 
     def _config_runs_in_background(self, config: CustomLwrclNodeConfig) -> bool:
         tool_type = config.tool_type
-        if tool_type in {"mcap_file_input", "image_file_input"}:
+        if tool_type in {"mcap_file_input", "image_file_input", "urdf_static_tf_publisher"}:
             return True
         if tool_type == "mcap_record":
             return True
         if tool_type in {"video_file_input", "function_generator"}:
             return bool(config.outputs)
+        if tool_type in {"tf_viewer", "3d_viewer"}:
+            return True
         if tool_type in {"image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save"}:
             return any(port.topic or port.topics for port in config.inputs)
         return False
@@ -3218,6 +3351,7 @@ class GraphRuntime:
 
     def _worker_signature(self, config: CustomLwrclNodeConfig) -> tuple[Any, ...]:
         return (
+            "node-worker-v3",
             config.id,
             config.name,
             config.loop_code,
@@ -3231,12 +3365,14 @@ class GraphRuntime:
         )
 
     def _worker_config(self, config: CustomLwrclNodeConfig) -> dict[str, Any]:
+        worker_inputs = [port for port in config.inputs if not self._is_visual_tf_port(config, port)]
+        worker_outputs = [port for port in config.outputs if not self._is_visual_tf_port(config, port)]
         return {
             "node": {
                 "id": config.id,
                 "name": config.name,
-                "inputs": [self._port_dict(port, include_callback=True) for port in config.inputs],
-                "outputs": [self._port_dict(port, include_callback=False) for port in config.outputs],
+                "inputs": [self._port_dict(port, include_callback=True) for port in worker_inputs],
+                "outputs": [self._port_dict(port, include_callback=False) for port in worker_outputs],
                 "loopCode": config.loop_code,
                 "timers": [self._timer_dict(timer) for timer in config.timers],
                 "timerEnabled": config.timer_enabled,
@@ -3248,11 +3384,14 @@ class GraphRuntime:
                 "params": config.params,
             },
             "portTopics": {
-                "inputs": {port.id: list(port.topics) for port in config.inputs if port.topics},
-                "outputs": {port.id: list(port.topics) for port in config.outputs if port.topics},
+                "inputs": {port.id: list(port.topics) for port in worker_inputs if port.topics},
+                "outputs": {port.id: list(port.topics) for port in worker_outputs if port.topics},
             },
             "externalDdsCompatible": bool(config.params.get("_externalDdsCompatible")),
         }
+
+    def _is_visual_tf_port(self, config: CustomLwrclNodeConfig, port: PortConfig) -> bool:
+        return not config.tool_type and normalize_type(port.data_type) == "tf2_msgs/msg/TFMessage"
 
     def _timer_dict(self, timer: TimerConfig) -> dict[str, Any]:
         return {"id": timer.id, "name": timer.name, "periodSec": timer.period_sec, "callbackCode": timer.callback_code}
@@ -3302,6 +3441,8 @@ class GraphRuntime:
             tool_type=tool_type,
             params=dict(node.get("params", {}) if isinstance(node.get("params", {}), dict) else {}),
         )
+        if not tool_type:
+            self._apply_custom_tf_ports(config)
         if tool_type == "image_crop_resize":
             config.import_code = IMAGE_CROP_RESIZE_IMPORT_CODE
             config.loop_code = ""
@@ -3336,7 +3477,113 @@ class GraphRuntime:
                 name="response",
                 data_type="std_msgs/msg/String",
             )]
+        if tool_type == "tf_merge":
+            count = max(1, min(int(config.params.get("topicCount") or len(config.inputs) or 2), 64))
+            config.params["topicCount"] = count
+            config.import_code = ""
+            config.loop_code = ""
+            config.timers = []
+            config.timer_enabled = False
+            config.inputs = [
+                PortConfig(
+                    id=f"in{index + 1}",
+                    name="TF",
+                    data_type="tf2_msgs/msg/TFMessage",
+                    receive_mode="manual",
+                    callback_code="",
+                )
+                for index in range(count)
+            ]
+            config.outputs = [
+                PortConfig(id="tf", name="TF", data_type="tf2_msgs/msg/TFMessage"),
+            ]
+        if tool_type == "urdf_static_tf_publisher":
+            config.inputs = []
+            config.outputs = [
+                PortConfig(id="tf_static", name="TF", data_type="tf2_msgs/msg/TFMessage"),
+            ]
+        if tool_type in {"tf_viewer", "3d_viewer"}:
+            point_cloud_count = max(0, min(int(config.params.get("pointCloudCount") or 0), 16))
+            occupancy_grid_count = max(0, min(int(config.params.get("occupancyGridCount") or 0), 16))
+            config.inputs = [
+                PortConfig(
+                    id="tf_in",
+                    name="TF",
+                    data_type="tf2_msgs/msg/TFMessage",
+                    receive_mode="manual",
+                    callback_code="",
+                )
+            ] if bool(config.params.get("enableTf", True)) else []
+            config.inputs.extend([
+                PortConfig(id=f"cloud{index + 1}", name=f"cloud{index + 1}", data_type="sensor_msgs/msg/PointCloud2", receive_mode="manual", callback_code="")
+                for index in range(point_cloud_count)
+            ])
+            config.inputs.extend([
+                PortConfig(id=f"grid{index + 1}", name=f"grid{index + 1}", data_type="nav_msgs/msg/OccupancyGrid", receive_mode="manual", callback_code="")
+                for index in range(occupancy_grid_count)
+            ])
+            config.outputs = []
+            config.params["pointCloudCount"] = point_cloud_count
+            config.params["occupancyGridCount"] = occupancy_grid_count
+            config.params["enableTf"] = bool(config.params.get("enableTf", True))
+            config.params["rootFrame"] = str(config.params.get("rootFrame") or "")
+            try:
+                config.params["gridStep"] = max(0.01, float(config.params.get("gridStep") or 0.25))
+            except Exception:
+                config.params["gridStep"] = 0.25
+            try:
+                config.params["gridSize"] = max(0.1, float(config.params.get("gridSize") or 4.0))
+            except Exception:
+                config.params["gridSize"] = 4.0
+            try:
+                config.params["axisSize"] = max(0.01, float(config.params.get("axisSize") or 0.35))
+            except Exception:
+                config.params["axisSize"] = 0.35
+            config.params["showLabels"] = bool(config.params.get("showLabels", True))
+            config.params["pointCloudStyle"] = str(config.params.get("pointCloudStyle") or "square")
+            config.params["pointCloudColor"] = str(config.params.get("pointCloudColor") or "#ffffff")
+            config.params["occupancyGridColorScheme"] = str(config.params.get("occupancyGridColorScheme") or "map")
+            config.params["occupancyGridDrawBehind"] = bool(config.params.get("occupancyGridDrawBehind", True))
+            config.params["showRobotModel"] = bool(config.params.get("showRobotModel", False))
+            config.params["robotModelColor"] = str(config.params.get("robotModelColor") or "#9aa4b2")
+            try:
+                config.params["pointCloudSize"] = max(0.001, float(config.params.get("pointCloudSize") or 0.03))
+            except Exception:
+                config.params["pointCloudSize"] = 0.03
+            try:
+                config.params["pointCloudOpacity"] = max(0.0, min(1.0, float(config.params.get("pointCloudOpacity") or 1.0)))
+            except Exception:
+                config.params["pointCloudOpacity"] = 1.0
+            try:
+                config.params["occupancyGridAlpha"] = max(0.0, min(1.0, float(config.params.get("occupancyGridAlpha") or 0.7)))
+            except Exception:
+                config.params["occupancyGridAlpha"] = 0.7
+            try:
+                config.params["robotModelOpacity"] = max(0.0, min(1.0, float(config.params.get("robotModelOpacity") or 0.45)))
+            except Exception:
+                config.params["robotModelOpacity"] = 0.45
         return config
+
+    def _apply_custom_tf_ports(self, config: CustomLwrclNodeConfig) -> None:
+        tf_type = "tf2_msgs/msg/TFMessage"
+        tf_input_enabled = bool(config.params.get("tfInputEnabled"))
+        tf_output_enabled = bool(config.params.get("tfOutputEnabled"))
+        config.params["tfInputEnabled"] = tf_input_enabled
+        config.params["tfOutputEnabled"] = tf_output_enabled
+        non_tf_inputs = [port for port in config.inputs if normalize_type(port.data_type) != tf_type]
+        non_tf_outputs = [port for port in config.outputs if normalize_type(port.data_type) != tf_type]
+        config.inputs = non_tf_inputs
+        config.outputs = non_tf_outputs
+        if tf_input_enabled:
+            config.inputs = [
+                PortConfig(id="tf_in", name="TF", data_type=tf_type, receive_mode="manual", callback_code=""),
+                *non_tf_inputs,
+            ]
+        if tf_output_enabled:
+            config.outputs = [
+                PortConfig(id="tf", name="TF", data_type=tf_type),
+                *non_tf_outputs,
+            ]
 
     def _parse_port(self, port: dict[str, Any], tool_type: str = "") -> PortConfig:
         data_type = str(port.get("dataType", "std_msgs/msg/String"))
@@ -3446,7 +3693,11 @@ class GraphRuntime:
                 continue
             output_topics.setdefault((str(link.get("fromNode")), str(link.get("fromPort"))), set()).add(topic)
             input_topics.setdefault((str(link.get("toNode")), str(link.get("toPort"))), set()).add(topic)
-            if dst is not None and dst.tool_type != "topic_output":
+            if (
+                dst is not None
+                and dst.tool_type not in {"topic_output", "tf_merge"}
+                and not (dst_port is not None and normalize_type(dst_port.data_type) == "tf2_msgs/msg/TFMessage")
+            ):
                 subscribers_by_output.setdefault((str(link.get("fromNode")), str(link.get("fromPort"))), set()).add((
                     str(link.get("toNode")),
                     str(link.get("toPort")),
@@ -3513,11 +3764,15 @@ class GraphRuntime:
             node.params["_runHz"] = run_hz
 
     def _link_topic(self, link: dict[str, Any], nodes: dict[str, CustomLwrclNodeConfig]) -> str:
+        src = nodes.get(str(link.get("fromNode")))
+        src_port = next((port for port in (src.outputs if src else []) if port.id == str(link.get("fromPort"))), None)
+        if src_port and normalize_type(src_port.data_type) == "tf2_msgs/msg/TFMessage":
+            if src and src.tool_type == "urdf_static_tf_publisher":
+                return "/tf_static"
+            label = f"{src_port.id} {src_port.name}".lower()
+            return "/tf_static" if "static" in label else "/tf"
         name = str(link.get("name") or "").strip()
         if not name:
-            src = nodes.get(str(link.get("fromNode")))
-            dst = nodes.get(str(link.get("toNode")))
-            src_port = next((port for port in (src.outputs if src else []) if port.id == str(link.get("fromPort"))), None)
             name = f"{src_port.name if src_port else link.get('fromPort') or 'topic'}"
         return f"/{name.lstrip('/') or 'topic'}"
 
