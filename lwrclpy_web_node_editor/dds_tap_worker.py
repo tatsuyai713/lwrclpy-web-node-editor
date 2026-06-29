@@ -236,6 +236,7 @@ class DdsTap:
             self._stream_memory = _create_shared_memory(self.stream_name, self.stream_size)
         self.field_path = str(config.get("fieldPath") or "data")
         self.text_mode = "append" if str(config.get("textMode") or "replace") == "append" else "replace"
+        self.text_separator = str(config.get("textSeparator") or "")
         self.max_chars = max(1, int(config.get("maxChars") or 20000))
         self.sample_limit = max(8, min(int(config.get("sampleLimit") or 10000), 100000))
         self.graph_window_sec = max(0.1, float(config.get("graphWindowSec") or 10.0))
@@ -449,6 +450,8 @@ class DdsTap:
             self._times.append(timestamp)
             del self._times[:-10000]
             if self.text_mode == "append":
+                if self.text_separator and self._text:
+                    self._text += self.text_separator
                 self._text += value
             else:
                 self._text = value

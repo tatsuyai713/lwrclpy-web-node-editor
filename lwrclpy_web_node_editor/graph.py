@@ -716,6 +716,9 @@ class CustomLwrclNodeInstance:
                 self.last_outputs.pop("out1", None)
                 self.view = {"kind": "empty", "status": "No media selected"}
             return True
+        if tool == "interactive_text_input":
+            self._execute_interactive_text_input_once()
+            return True
         if tool == "function_generator":
             value, status, should_publish = self._function_generator_value()
             if should_publish:
@@ -734,6 +737,9 @@ class CustomLwrclNodeInstance:
             return True
         if tool == "string_view":
             self._execute_string_view_once()
+            return True
+        if tool == "chat_string_view":
+            self._execute_chat_string_view_once()
             return True
         if tool == "image_file_save":
             image = self.take("in1", None) or self.last_inputs.get("in1")
@@ -754,9 +760,9 @@ class CustomLwrclNodeInstance:
             return True
         if tool == "video_file_input" and self._uses_video_worker():
             return True
-        if tool in {"video_file_input", "function_generator"}:
+        if tool in {"video_file_input", "function_generator", "interactive_text_input"}:
             return bool(self.publishers)
-        if tool in {"image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save", "tf_viewer", "3d_viewer"} and self._uses_dds_tap_worker():
+        if tool in {"image_view", "string_view", "chat_string_view", "topic_hz_monitor", "graph_view", "image_file_save", "tf_viewer", "3d_viewer"} and self._uses_dds_tap_worker():
             return True
         if tool == "mcap_record" and self._uses_mcap_record_worker():
             return True
@@ -781,10 +787,14 @@ class CustomLwrclNodeInstance:
                 self._execute_source_worker_status_once()
         elif tool in {"function_generator", "image_file_input", "urdf_static_tf_publisher"}:
             self._execute_source_worker_status_once()
+        elif tool == "interactive_text_input":
+            self._execute_interactive_text_input_once()
         elif tool == "image_view":
             self._execute_image_view_worker_once()
         elif tool == "string_view":
             self._execute_string_view_worker_once()
+        elif tool == "chat_string_view":
+            self._execute_chat_string_view_worker_once()
         elif tool == "topic_hz_monitor":
             self._execute_topic_hz_monitor_worker_once()
         elif tool == "graph_view":
@@ -831,7 +841,7 @@ class CustomLwrclNodeInstance:
     def _uses_dds_tap_worker(self) -> bool:
         if self.config.tool_type in {"tf_viewer", "3d_viewer"}:
             return True
-        return self.config.tool_type in {"image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save"} and any(port.topics for port in self.config.inputs)
+        return self.config.tool_type in {"image_view", "string_view", "chat_string_view", "topic_hz_monitor", "graph_view", "image_file_save"} and any(port.topics for port in self.config.inputs)
 
     def _uses_mcap_record_worker(self) -> bool:
         return self.config.tool_type == "mcap_record" and any(port.topics for port in self.config.inputs)
@@ -839,7 +849,7 @@ class CustomLwrclNodeInstance:
     def _uses_builtin_source_worker(self) -> bool:
         if self.config.tool_type == "video_file_input" and self._uses_video_worker():
             return False
-        return self.config.tool_type in {"function_generator", "image_file_input", "video_file_input", "mcap_file_input", "urdf_static_tf_publisher"} and any(port.topics for port in self.config.outputs)
+        return self.config.tool_type in {"function_generator", "image_file_input", "video_file_input", "mcap_file_input", "interactive_text_input", "urdf_static_tf_publisher"} and any(port.topics for port in self.config.outputs)
 
     def _ensure_builtin_source_worker(self) -> None:
         signature = self._builtin_source_worker_signature()
@@ -920,12 +930,19 @@ class CustomLwrclNodeInstance:
     def _builtin_source_worker_signature(self) -> tuple[Any, ...]:
         output = next((port for port in self.config.outputs if port.topics), None)
         return (
-            "builtin-source-v5",
+            "builtin-source-v6",
             self.config.id,
             self.config.tool_type,
             tuple((port.id, port.name, port.data_type, port.topics) for port in self.config.outputs if port.topics),
-            json.dumps(self.config.params, sort_keys=True, default=str),
+            json.dumps(self._builtin_source_signature_params(), sort_keys=True, default=str),
         )
+
+    def _builtin_source_signature_params(self) -> dict[str, Any]:
+        params = dict(self.config.params)
+        if self.config.tool_type == "interactive_text_input":
+            for key in ("draft", "messages", "nextSeq"):
+                params.pop(key, None)
+        return params
 
     def _builtin_source_worker_config(self, status_path: Path) -> dict[str, Any]:
         output = next((port for port in self.config.outputs if port.topics), None)
@@ -1058,7 +1075,8 @@ class CustomLwrclNodeInstance:
             "displayHz": self._run_hz(),
             "fieldPath": str(self.config.params.get("fieldPath") or "data"),
             "sampleLimit": int(self.config.params.get("sampleLimit") or 10000),
-            "textMode": str(self.config.params.get("mode") or "replace"),
+            "textMode": "append" if self.config.tool_type == "chat_string_view" else str(self.config.params.get("mode") or "replace"),
+            "textSeparator": "\n" if self.config.tool_type == "chat_string_view" else "",
             "maxChars": int(float(self.config.params.get("maxChars") or 20000)),
             "graphWindowSec": max(0.1, float(self.config.params.get("xAxisSeconds") or 10.0)),
             "graphDisplayLimit": 600,
@@ -1080,7 +1098,7 @@ class CustomLwrclNodeInstance:
     def _dds_tap_mode(self) -> str:
         if self.config.tool_type == "image_view":
             return "image"
-        if self.config.tool_type == "string_view":
+        if self.config.tool_type in {"string_view", "chat_string_view"}:
             return "text"
         if self.config.tool_type == "graph_view":
             return "graph"
@@ -1393,6 +1411,9 @@ class CustomLwrclNodeInstance:
                 elif tool == "function_generator":
                     period = self._run_period()
                     self._execute_source_worker_status_once()
+                elif tool == "interactive_text_input":
+                    period = self._run_period()
+                    self._execute_interactive_text_input_once()
                 elif tool == "image_file_input":
                     period = self._run_period()
                     self._execute_source_worker_status_once()
@@ -1408,6 +1429,12 @@ class CustomLwrclNodeInstance:
                         self._execute_string_view_worker_once()
                     else:
                         self._execute_string_view_once()
+                elif tool == "chat_string_view":
+                    period = self._run_period()
+                    if self._uses_dds_tap_worker():
+                        self._execute_chat_string_view_worker_once()
+                    else:
+                        self._execute_chat_string_view_once()
                 elif tool == "topic_hz_monitor":
                     period = self._run_period()
                     if self._uses_dds_tap_worker():
@@ -1608,6 +1635,101 @@ class CustomLwrclNodeInstance:
         if data is not None:
             return str(data)
         return "" if value is None else str(value)
+
+    def _chat_view_limits(self) -> tuple[int, int]:
+        try:
+            max_messages = max(1, min(int(float(self.config.params.get("maxMessages") or 100)), 1000))
+        except Exception:
+            max_messages = 100
+        try:
+            max_chars = max(1, int(float(self.config.params.get("maxChars") or 20000)))
+        except Exception:
+            max_chars = 20000
+        return max_messages, max_chars
+
+    def _execute_interactive_text_input_once(self) -> None:
+        params = self.config.params
+        messages = params.get("messages")
+        if not isinstance(messages, list):
+            messages = []
+        try:
+            max_messages = max(1, min(int(float(params.get("maxMessages") or 100)), 1000))
+        except Exception:
+            max_messages = 100
+        messages = [item for item in messages if isinstance(item, dict)][-max_messages:]
+        last_seq = int(self.state.get("interactive_text_last_seq") or 0)
+        published = 0
+        for item in messages:
+            seq = int(item.get("seq") or 0)
+            if seq <= last_seq:
+                continue
+            text = str(item.get("text") or "")
+            if not text:
+                last_seq = max(last_seq, seq)
+                continue
+            output = {"data": text}
+            self.last_outputs["out1"] = output
+            self.publish("out1", output)
+            last_seq = max(last_seq, seq)
+            published += 1
+        self.state["interactive_text_last_seq"] = last_seq
+        status = f"{len(messages)} sent / last seq {last_seq}"
+        if published:
+            status = f"published {published} message{'s' if published != 1 else ''}"
+        self.view = {
+            "kind": "text_input",
+            "draft": str(params.get("draft") or ""),
+            "messages": messages,
+            "status": status,
+        }
+
+    def _execute_chat_string_view_once(self) -> None:
+        max_messages, max_chars = self._chat_view_limits()
+        messages = self.state.get("chat_string_messages")
+        if not isinstance(messages, list):
+            messages = []
+        updated = False
+        while self.has_input("in1"):
+            text = self._message_text(self.take("in1"))
+            if text:
+                messages.append({"role": "assistant", "text": text, "t": time.time()})
+                updated = True
+        if len(messages) > max_messages:
+            messages = messages[-max_messages:]
+        total_chars = sum(len(str(item.get("text") or "")) for item in messages)
+        while total_chars > max_chars and messages:
+            removed = messages.pop(0)
+            total_chars -= len(str(removed.get("text") or ""))
+        self.state["chat_string_messages"] = messages
+        if updated or not self.view:
+            self.view = {
+                "kind": "chat",
+                "messages": messages,
+                "status": f"{len(messages)} messages / {total_chars} chars" if messages else "No chat messages",
+            }
+
+    def _execute_chat_string_view_worker_once(self) -> None:
+        status = self._read_dds_tap_status()
+        if not status:
+            self.view = {"kind": "chat", "messages": [], "status": "DDS tap worker starting"}
+            return
+        if status.get("error"):
+            self.view = {"kind": "chat", "messages": [], "status": str(status.get("error"))}
+            return
+        text = str(status.get("text") or "")
+        lines = [line for line in text.splitlines() if line]
+        max_messages, max_chars = self._chat_view_limits()
+        messages = [{"role": "assistant", "text": line} for line in lines[-max_messages:]]
+        total_chars = sum(len(item["text"]) for item in messages)
+        while total_chars > max_chars and messages:
+            removed = messages.pop(0)
+            total_chars -= len(removed["text"])
+        count = int(status.get("count") or 0)
+        self.view = {
+            "kind": "chat",
+            "messages": messages,
+            "status": f"{len(messages)} messages / {count} msgs" if messages else "No chat messages",
+        }
 
     def _execute_string_view_once(self) -> None:
         mode, max_chars = self._string_view_params()
@@ -2705,6 +2827,12 @@ class GraphRuntime:
                 instance = self.instances.get(node_id)
                 if instance is not None:
                     instance.config.params.update(params)
+                    if instance.config.tool_type == "interactive_text_input" and instance.worker_config_path:
+                        status_path = Path.cwd() / ".node_workers" / f"{instance.config.id}.source.status.json"
+                        try:
+                            write_json_atomic(instance.worker_config_path, instance._builtin_source_worker_config(status_path))
+                        except Exception as exc:
+                            instance.log(f"interactive text config update failed: {exc}")
                 updated += 1
             return updated
 
@@ -2857,11 +2985,11 @@ class GraphRuntime:
             return True
         if tool_type == "mcap_record":
             return True
-        if tool_type in {"video_file_input", "function_generator"}:
+        if tool_type in {"video_file_input", "function_generator", "interactive_text_input"}:
             return bool(config.outputs)
         if tool_type in {"tf_viewer", "3d_viewer"}:
             return True
-        if tool_type in {"image_view", "string_view", "topic_hz_monitor", "graph_view", "image_file_save"}:
+        if tool_type in {"image_view", "string_view", "chat_string_view", "topic_hz_monitor", "graph_view", "image_file_save"}:
             return any(port.topic or port.topics for port in config.inputs)
         return False
 
@@ -3477,6 +3605,39 @@ class GraphRuntime:
                 name="response",
                 data_type="std_msgs/msg/String",
             )]
+        if tool_type == "interactive_text_input":
+            config.inputs = []
+            config.outputs = [PortConfig(id="out1", name="text", data_type="std_msgs/msg/String")]
+            config.params["draft"] = str(config.params.get("draft") or "")
+            messages = config.params.get("messages")
+            if not isinstance(messages, list):
+                messages = []
+            config.params["messages"] = [item for item in messages if isinstance(item, dict)][-1000:]
+            try:
+                config.params["nextSeq"] = max(1, int(float(config.params.get("nextSeq") or 1)))
+            except Exception:
+                config.params["nextSeq"] = 1
+            try:
+                config.params["maxMessages"] = max(1, min(int(float(config.params.get("maxMessages") or 100)), 1000))
+            except Exception:
+                config.params["maxMessages"] = 100
+        if tool_type == "chat_string_view":
+            config.inputs = [PortConfig(
+                id="in1",
+                name="text",
+                data_type="std_msgs/msg/String",
+                receive_mode="manual",
+                callback_code="",
+            )]
+            config.outputs = []
+            try:
+                config.params["maxMessages"] = max(1, min(int(float(config.params.get("maxMessages") or 100)), 1000))
+            except Exception:
+                config.params["maxMessages"] = 100
+            try:
+                config.params["maxChars"] = max(1, int(float(config.params.get("maxChars") or 20000)))
+            except Exception:
+                config.params["maxChars"] = 20000
         if tool_type == "tf_merge":
             count = max(1, min(int(config.params.get("topicCount") or len(config.inputs) or 2), 64))
             config.params["topicCount"] = count

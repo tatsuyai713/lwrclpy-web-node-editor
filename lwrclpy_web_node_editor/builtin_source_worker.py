@@ -579,6 +579,43 @@ def _run_function_generator(config: dict[str, Any], publisher: Any) -> None:
         time.sleep(max(0.0, min(0.002, next_at - time.time())))
 
 
+def _run_interactive_text_input(config_path: Path, config: dict[str, Any], publisher: Any) -> None:
+    status_path = Path(config["statusPath"])
+    data_type = str(config.get("dataType") or "std_msgs/msg/String")
+    last_seq = 0
+    count = 0
+    last_mtime = 0.0
+    cached_config = config
+    _write_status(status_path, running=True, published=0, status="waiting for text input")
+    while RUNNING:
+        try:
+            stat = config_path.stat()
+            if stat.st_mtime != last_mtime:
+                last_mtime = stat.st_mtime
+                cached_config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            cached_config = config
+        params = cached_config.get("params") if isinstance(cached_config.get("params"), dict) else {}
+        messages = params.get("messages") if isinstance(params.get("messages"), list) else []
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            try:
+                seq = int(item.get("seq") or 0)
+            except Exception:
+                seq = 0
+            if seq <= last_seq:
+                continue
+            text = str(item.get("text") or "")
+            last_seq = max(last_seq, seq)
+            if not text:
+                continue
+            publisher.publish(_coerce_message(data_type, {"data": text}))
+            count += 1
+            _write_status(status_path, running=True, published=count, lastSeq=last_seq, status=f"published text message {count}")
+        time.sleep(0.03)
+
+
 def _run_urdf_static_tf(config: dict[str, Any], node: Any) -> None:
     params = config.get("params") or {}
     status_path = Path(config["statusPath"])
@@ -843,6 +880,10 @@ def main() -> int:
                 publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
                 _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_function_generator(config, publisher)
+            elif config.get("toolType") == "interactive_text_input":
+                publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
+                _run_interactive_text_input(config_path, config, publisher)
             elif config.get("toolType") == "urdf_static_tf_publisher":
                 _wait_for_expected_subscriptions(config, {}, Path(config["statusPath"]))
                 _run_urdf_static_tf(config, node)

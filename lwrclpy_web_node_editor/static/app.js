@@ -202,6 +202,18 @@ const INTERFACE_NODE_TEMPLATES = [
   },
   {
     category: 'AI',
+    label: 'Interactive Text Input',
+    toolType: 'interactive_text_input',
+    node: {
+      name: 'interactive_text_input',
+      inputs: [],
+      outputs: [{ id: 'out1', name: 'text', dataType: 'std_msgs/msg/String' }],
+      params: { draft: '', messages: [], promptHistory: [], historyCursor: -1, nextSeq: 1, maxMessages: 100 },
+      loopCode: '',
+    },
+  },
+  {
+    category: 'AI',
     label: 'LLM Text',
     toolType: 'llm_text',
     node: {
@@ -277,6 +289,18 @@ const INTERFACE_NODE_TEMPLATES = [
       inputs: [{ id: 'in1', name: 'text', dataType: 'std_msgs/msg/String', receiveMode: 'manual', callbackCode: '' }],
       outputs: [],
       params: { mode: 'replace', maxChars: 20000 },
+      loopCode: '',
+    },
+  },
+  {
+    category: 'Views',
+    label: 'Chat String Viewer',
+    toolType: 'chat_string_view',
+    node: {
+      name: 'chat_string_view',
+      inputs: [{ id: 'in1', name: 'text', dataType: 'std_msgs/msg/String', receiveMode: 'manual', callbackCode: '' }],
+      outputs: [],
+      params: { maxMessages: 100, maxChars: 20000 },
       loopCode: '',
     },
   },
@@ -475,7 +499,26 @@ function createNodeFromTemplate(template, pos = centerWorld()) {
   node.x = Math.round(pos.x);
   node.y = Math.round(pos.y);
   node.params = node.params || {};
-  return normalizeImportedNode(node);
+  const normalized = normalizeImportedNode(node);
+  const initialView = initialNodeView(normalized);
+  if (initialView) state.nodeViews[normalized.id] = initialView;
+  return normalized;
+}
+
+function initialNodeView(node) {
+  if (node?.toolType === 'interactive_text_input') {
+    return {
+      kind: 'text_input',
+      draft: String(node.params?.draft || ''),
+      messages: Array.isArray(node.params?.messages) ? node.params.messages : [],
+      promptHistory: Array.isArray(node.params?.promptHistory) ? node.params.promptHistory : [],
+      status: 'Ready to send',
+    };
+  }
+  if (node?.toolType === 'chat_string_view') {
+    return { kind: 'chat', messages: [], status: 'No chat messages' };
+  }
+  return null;
 }
 
 function renderInterfaceNodeList() {
@@ -656,8 +699,7 @@ function lwrclpyVersionsForPython(pythonVersion) {
 function nodeRuntimeSummary(node) {
   if (!node || node.toolType) return '';
   const py = node.pythonVersion || defaultPythonVersion();
-  const lw = node.lwrclpyVersion || defaultLwrclpyVersion();
-  return `${py ? `Python ${py}` : 'Python host'}${lw ? ` / lwrclpy ${lw}` : ''}`;
+  return py ? `Python ${py}` : 'Python host';
 }
 
 function customNodeMetadata(item) {
@@ -1994,9 +2036,11 @@ function formatDuration(seconds) {
 }
 
 function viewNodeHtml(node) {
-  if (!['image_file_input', 'video_file_input', 'mcap_file_input', 'urdf_static_tf_publisher', 'tf_merge', 'tf_viewer', '3d_viewer', 'mcap_record', 'function_generator', 'image_view', 'string_view', 'image_file_save', 'graph_view', 'topic_hz_monitor'].includes(node.toolType)) return '';
+  if (!['image_file_input', 'video_file_input', 'mcap_file_input', 'urdf_static_tf_publisher', 'tf_merge', 'tf_viewer', '3d_viewer', 'mcap_record', 'function_generator', 'interactive_text_input', 'image_view', 'string_view', 'chat_string_view', 'image_file_save', 'graph_view', 'topic_hz_monitor'].includes(node.toolType)) return '';
   const viewClass = node.toolType === 'video_file_input' ? ' node-view-video' : '';
-  return `<div class="node-view${viewClass}" data-node-view="${escapeAttr(node.id)}">${renderViewContent(state.nodeViews[node.id])}</div>`;
+  const view = state.nodeViews[node.id] || initialNodeView(node);
+  if (view && !state.nodeViews[node.id]) state.nodeViews[node.id] = view;
+  return `<div class="node-view${viewClass}" data-node-view="${escapeAttr(node.id)}">${renderViewContent(view)}</div>`;
 }
 
 function bindToolActions(el, node) {
@@ -3702,6 +3746,145 @@ function patchNodeViewEl(el, view) {
       }
     }
   }
+  bindInteractiveTextView(el);
+}
+
+function bindInteractiveTextView(el) {
+  const host = el.querySelector('[data-interactive-text-view]');
+  if (!host || host.dataset.bound === '1') return;
+  host.dataset.bound = '1';
+  host.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+  host.addEventListener('click', (ev) => ev.stopPropagation());
+  host.addEventListener('wheel', (ev) => ev.stopPropagation(), { passive: true });
+  const form = host.querySelector('[data-text-input-form]');
+  const textarea = host.querySelector('[data-text-input-draft]');
+  const nodeId = el.dataset.nodeView;
+  if (textarea) {
+    textarea.addEventListener('input', () => updateInteractiveTextDraft(nodeId, textarea.value));
+    textarea.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
+        ev.preventDefault();
+        form?.requestSubmit();
+      }
+    });
+  }
+  const prev = host.querySelector('[data-prompt-history-prev]');
+  if (prev) prev.onclick = () => stepInteractiveTextHistory(nodeId, -1);
+  const next = host.querySelector('[data-prompt-history-next]');
+  if (next) next.onclick = () => stepInteractiveTextHistory(nodeId, 1);
+  const clear = host.querySelector('[data-prompt-history-clear]');
+  if (clear) clear.onclick = () => clearInteractiveTextHistory(nodeId);
+  if (form) {
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      sendInteractiveTextMessage(nodeId);
+    });
+  }
+}
+
+function updateInteractiveTextDraft(nodeId, value) {
+  const node = nodeFor(nodeId);
+  if (!node || node.toolType !== 'interactive_text_input') return;
+  node.params = { ...(node.params || {}), draft: String(value || '') };
+  const existing = state.nodeViews[node.id];
+  state.nodeViews[node.id] = {
+    kind: 'text_input',
+    ...(existing?.kind === 'text_input' ? existing : {}),
+    draft: String(value || ''),
+    messages: Array.isArray(node.params.messages) ? node.params.messages : [],
+    promptHistory: Array.isArray(node.params.promptHistory) ? node.params.promptHistory : [],
+  };
+}
+
+function setInteractiveTextDraft(node, value, historyCursor = node.params?.historyCursor ?? -1) {
+  node.params = { ...(node.params || {}), draft: String(value || ''), historyCursor };
+  const existing = state.nodeViews[node.id];
+  state.nodeViews[node.id] = {
+    kind: 'text_input',
+    ...(existing?.kind === 'text_input' ? existing : {}),
+    draft: String(value || ''),
+    messages: Array.isArray(node.params.messages) ? node.params.messages : [],
+    promptHistory: Array.isArray(node.params.promptHistory) ? node.params.promptHistory : [],
+  };
+  const viewEl = [...document.querySelectorAll('[data-node-view]')].find((item) => item.dataset.nodeView === node.id);
+  const textarea = viewEl?.querySelector('[data-text-input-draft]');
+  if (textarea) textarea.value = String(value || '');
+}
+
+function stepInteractiveTextHistory(nodeId, direction) {
+  const node = nodeFor(nodeId);
+  if (!node || node.toolType !== 'interactive_text_input') return;
+  const history = Array.isArray(node.params?.promptHistory) ? node.params.promptHistory : [];
+  if (!history.length) return;
+  const current = Number.isFinite(Number(node.params.historyCursor)) && Number(node.params.historyCursor) >= 0
+    ? Number(node.params.historyCursor)
+    : history.length;
+  const next = Math.max(0, Math.min(history.length - 1, current + direction));
+  setInteractiveTextDraft(node, history[next], next);
+}
+
+function clearInteractiveTextHistory(nodeId) {
+  const node = nodeFor(nodeId);
+  if (!node || node.toolType !== 'interactive_text_input') return;
+  node.params = { ...(node.params || {}), promptHistory: [], historyCursor: -1 };
+  const existing = state.nodeViews[node.id];
+  state.nodeViews[node.id] = {
+    kind: 'text_input',
+    ...(existing?.kind === 'text_input' ? existing : {}),
+    promptHistory: [],
+    status: 'History cleared',
+  };
+  const viewEl = [...document.querySelectorAll('[data-node-view]')].find((item) => item.dataset.nodeView === node.id);
+  if (viewEl) patchNodeViewEl(viewEl, state.nodeViews[node.id]);
+}
+
+async function sendInteractiveTextMessage(nodeId) {
+  const node = nodeFor(nodeId);
+  if (!node || node.toolType !== 'interactive_text_input') return;
+  const params = node.params || {};
+  const text = String(params.draft || '').trim();
+  if (!text) return;
+  const nextSeq = Math.max(1, Math.floor(Number(params.nextSeq || 1)));
+  const maxMessages = Math.max(1, Math.min(1000, Math.floor(Number(params.maxMessages || 100))));
+  const messages = Array.isArray(params.messages) ? params.messages.slice() : [];
+  const promptHistory = Array.isArray(params.promptHistory) ? params.promptHistory.slice() : [];
+  if (!promptHistory.length || promptHistory[promptHistory.length - 1] !== text) promptHistory.push(text);
+  messages.push({ seq: nextSeq, role: 'user', text, t: Date.now() / 1000 });
+  const nextMessages = messages.slice(-maxMessages);
+  const nextHistory = promptHistory.slice(-maxMessages);
+  node.params = {
+    ...params,
+    draft: '',
+    messages: nextMessages,
+    promptHistory: nextHistory,
+    historyCursor: -1,
+    nextSeq: nextSeq + 1,
+    maxMessages,
+  };
+  state.nodeViews[node.id] = {
+    kind: 'text_input',
+    draft: '',
+    messages: nextMessages,
+    promptHistory: nextHistory,
+    status: state.autoTimer ? 'Queued' : 'Ready to send',
+  };
+  const viewEl = [...document.querySelectorAll('[data-node-view]')].find((item) => item.dataset.nodeView === node.id);
+  if (viewEl) {
+    const textarea = viewEl.querySelector('[data-text-input-draft]');
+    if (textarea) textarea.value = '';
+    patchNodeViewEl(viewEl, state.nodeViews[node.id]);
+  }
+  if (state.autoTimer || state.ready) {
+    try {
+      await fetch('/api/update-node-params', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ updates: [{ nodeId: node.id, params: node.params }] }),
+      });
+    } catch (err) {
+      setExecutionStatus('error', `Text send failed: ${err.message}`);
+    }
+  }
 }
 
 function stopPlotAnimation(el) {
@@ -3771,6 +3954,14 @@ function normalizedNodeView(nodeId, view) {
     if (localView?.dataUrl || localView?.raw) return { ...localView, status: videoStatus(controller) };
     return { kind: 'image', dataUrl: view?.dataUrl || '', status: videoStatus(controller) };
   }
+  if (node?.toolType === 'interactive_text_input' && view?.kind === 'text_input') {
+    return {
+      ...view,
+      draft: String(node.params?.draft || ''),
+      messages: Array.isArray(node.params?.messages) ? node.params.messages : [],
+      promptHistory: Array.isArray(node.params?.promptHistory) ? node.params.promptHistory : [],
+    };
+  }
   if ((node?.toolType === 'tf_viewer' || node?.toolType === '3d_viewer') && view?.kind === 'tf3d') return withTfViewerParams(nodeId, view);
   return view;
 }
@@ -3794,6 +3985,12 @@ function renderViewContent(view) {
     const status = view.status || (text ? `${text.length} chars` : 'No text');
     return `<div class="string-view"><pre>${escapeHtml(text)}</pre><span>${escapeHtml(status)}</span></div>`;
   }
+  if (view.kind === 'text_input') {
+    return renderTextInputView(view);
+  }
+  if (view.kind === 'chat') {
+    return renderChatView(view);
+  }
   if (view.kind === 'plot') {
     return renderPlot(view.series || [], view.status || '', view);
   }
@@ -3801,6 +3998,41 @@ function renderViewContent(view) {
     return renderTf3d(view);
   }
   return `<div class="view-empty">${escapeHtml(view.status || 'No data')}</div>`;
+}
+
+function renderTextInputView(view) {
+  const history = Array.isArray(view.promptHistory) ? view.promptHistory : [];
+  return `<div class="interactive-text-view" data-interactive-text-view>
+    <form data-text-input-form>
+      <input data-text-input-draft type="text" value="${escapeAttr(view.draft || '')}" placeholder="Message">
+      <div class="prompt-controls">
+        <button type="button" data-prompt-history-prev title="Previous prompt">&lt;</button>
+        <button type="button" data-prompt-history-next title="Next prompt">&gt;</button>
+        <button type="button" data-prompt-history-clear>Clear History</button>
+        <button type="submit">Send</button>
+      </div>
+    </form>
+    <span>${escapeHtml(view.status || 'Ready')}${history.length ? ` / ${history.length} history` : ''}</span>
+  </div>`;
+}
+
+function renderChatView(view) {
+  const messages = Array.isArray(view.messages) ? view.messages : [];
+  return `<div class="chat-view">
+    <div class="chat-messages">
+      ${messages.map((message) => chatMessageHtml(message)).join('') || '<div class="chat-empty">No chat messages</div>'}
+    </div>
+    <span>${escapeHtml(view.status || 'No chat messages')}</span>
+  </div>`;
+}
+
+function chatMessageHtml(message) {
+  const role = String(message?.role || 'assistant') === 'user' ? 'user' : 'assistant';
+  const label = role === 'user' ? 'You' : 'LLM';
+  return `<div class="chat-message ${role}">
+    <b>${label}</b>
+    <p>${escapeHtml(message?.text || '')}</p>
+  </div>`;
 }
 
 function renderTf3d(view) {
@@ -6866,6 +7098,30 @@ function normalizeImportedNode(node) {
     if (normalized.toolType === 'tf_viewer') normalized.toolType = '3d_viewer';
     normalized.params = { ...(normalized.params || {}), ...tfViewerDefaults(normalized.params || {}) };
     apply3dViewerPorts(normalized, normalized.params, false);
+  }
+  if (normalized.toolType === 'interactive_text_input') {
+    const messages = Array.isArray(normalized.params.messages) ? normalized.params.messages.filter((item) => item && typeof item === 'object') : [];
+    const promptHistory = Array.isArray(normalized.params.promptHistory) ? normalized.params.promptHistory.map((item) => String(item || '')).filter(Boolean) : [];
+    normalized.inputs = [];
+    normalized.outputs = [{ id: 'out1', name: 'text', dataType: 'std_msgs/msg/String' }];
+    normalized.params = {
+      ...(normalized.params || {}),
+      draft: String(normalized.params.draft || ''),
+      messages,
+      promptHistory,
+      historyCursor: Number.isFinite(Number(normalized.params.historyCursor)) ? Number(normalized.params.historyCursor) : -1,
+      nextSeq: Math.max(1, Math.floor(Number(normalized.params.nextSeq || 1))),
+      maxMessages: Math.max(1, Math.min(1000, Math.floor(Number(normalized.params.maxMessages || 100)))),
+    };
+  }
+  if (normalized.toolType === 'chat_string_view') {
+    normalized.inputs = [{ id: 'in1', name: 'text', dataType: 'std_msgs/msg/String', receiveMode: 'manual', callbackCode: '' }];
+    normalized.outputs = [];
+    normalized.params = {
+      ...(normalized.params || {}),
+      maxMessages: Math.max(1, Math.min(1000, Math.floor(Number(normalized.params.maxMessages || 100)))),
+      maxChars: Math.max(1, Math.floor(Number(normalized.params.maxChars || 20000))),
+    };
   }
   return normalized;
 }

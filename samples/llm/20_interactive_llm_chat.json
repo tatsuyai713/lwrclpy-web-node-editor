@@ -1,0 +1,114 @@
+{
+  "format": "lwrclpy-web-node-editor-project",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "chat_prompt_input",
+      "x": -620,
+      "y": -80,
+      "width": 380,
+      "height": 260,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out1",
+          "name": "text",
+          "dataType": "std_msgs/msg/String"
+        }
+      ],
+      "params": {
+        "draft": "ROS 2のノードグラフで画像処理を作る利点を短く説明してください。",
+        "messages": [],
+        "promptHistory": [],
+        "historyCursor": -1,
+        "nextSeq": 1,
+        "maxMessages": 100
+      },
+      "loopCode": "",
+      "toolType": "interactive_text_input"
+    },
+    {
+      "id": "n2",
+      "name": "llm_text",
+      "x": -120,
+      "y": -80,
+      "inputs": [
+        {
+          "id": "prompt",
+          "name": "prompt",
+          "dataType": "std_msgs/msg/String",
+          "receiveMode": "callback",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [
+        {
+          "id": "response",
+          "name": "response",
+          "dataType": "std_msgs/msg/String"
+        }
+      ],
+      "params": {
+        "provider": "ollama",
+        "model": "llama3.2",
+        "apiBase": "",
+        "apiKeyEnv": "OPENAI_API_KEY",
+        "systemPrompt": "You are a concise robotics software assistant. Answer in the same language as the user.",
+        "temperature": 0.2,
+        "maxTokens": 512,
+        "timeoutSec": 120
+      },
+      "loopCode": "",
+      "toolType": "llm_text"
+    },
+    {
+      "id": "n3",
+      "name": "chat_response_view",
+      "x": 380,
+      "y": -80,
+      "width": 460,
+      "height": 320,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "text",
+          "dataType": "std_msgs/msg/String",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "maxMessages": 100,
+        "maxChars": 20000
+      },
+      "loopCode": "",
+      "toolType": "chat_string_view"
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "fromNode": "n1",
+      "fromPort": "out1",
+      "toNode": "n2",
+      "toPort": "prompt",
+      "name": "/sample20/llm_prompt"
+    },
+    {
+      "id": "l2",
+      "fromNode": "n2",
+      "fromPort": "response",
+      "toNode": "n3",
+      "toPort": "in1",
+      "name": "/sample20/llm_response"
+    }
+  ],
+  "view": {
+    "x": 120,
+    "y": 260,
+    "scale": 0.82
+  },
+  "nextId": 4
+}

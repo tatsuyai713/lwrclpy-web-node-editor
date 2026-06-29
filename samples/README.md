@@ -26,6 +26,7 @@ Image samples contain an embedded image. Video samples contain an embedded base 
 - `deep_learning/13_ultralytics_yolo_detection_segmentation.json`: platform-neutral Ultralytics YOLO detection and instance segmentation overlays.
 - `deep_learning/17_sam_midas_segmentation_depth.json`: Segment Anything automatic masks and MiDaS depth overlay.
 - `llm/18_ollama_llm_string_view.json`: one-shot prompt publisher into built-in LLM Text, with the response shown in String Viewer.
+- `llm/20_interactive_llm_chat.json`: interactive text input into built-in LLM Text, with responses shown in Chat String Viewer.
 - `signals/07_function_generator_wave_suite.json`: four built-in Function Generator nodes for sine, step, chirp, and white-noise signals.
 
 ## Image And Video Processing
@@ -64,6 +65,7 @@ Image samples contain an embedded image. Video samples contain an embedded base 
 ## LLM
 
 - `llm/18_ollama_llm_string_view.json`: a custom prompt node publishes one `std_msgs/msg/String` prompt to the built-in `LLM Text` node. The response is displayed by `String Viewer` and exposed through a Topic Output on `/sample18/llm_response`. Start Ollama locally and pull the configured model, for example `ollama pull llama3.2`, before running.
+- `llm/20_interactive_llm_chat.json`: `Interactive Text Input` publishes each submitted prompt as `std_msgs/msg/String` to `LLM Text`, and `Chat String Viewer` displays each response as a chat message. Start Ollama locally and pull the configured model, for example `ollama pull llama3.2`, before running.
 
 ## Regenerate
 
