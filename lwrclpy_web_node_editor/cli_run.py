@@ -136,6 +136,7 @@ def run_project(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, request_stop)
 
     try:
+        payload["runHz"] = max(0.1, float(args.hz))
         if not args.no_prepare:
             print(f"[lwrclpy-web-node-editor-cli] Preparing {project_path}", flush=True)
             prepared = runtime.prepare(payload)
@@ -148,6 +149,7 @@ def run_project(args: argparse.Namespace) -> int:
                 return 1
 
         hz = max(0.1, float(args.hz))
+        payload["runHz"] = hz
         period = 1.0 / hz
         duration = None if args.duration is None else max(0.0, float(args.duration))
         status_period = max(0.1, float(args.status_interval))

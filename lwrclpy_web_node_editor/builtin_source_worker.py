@@ -87,6 +87,15 @@ def _import_type_class(type_name: str):
     return getattr(module, name)
 
 
+def _sanitize_node_name(name: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_]", "_", str(name or "").strip())
+    if not text:
+        return "lwrclpy_node"
+    if text[0].isdigit():
+        text = f"node_{text}"
+    return text
+
+
 def _topic_qos(data_type: str, external: bool = False, topic: str = "") -> Any:
     normalized = str(data_type).replace(".", "/")
     topic_name = str(topic or "")
@@ -485,6 +494,31 @@ def _synthetic_video_frame(base_frame: dict[str, Any], params: dict[str, Any], s
     frame_index = int(elapsed * fps)
     shift = frame_index % max(1, width)
     band = (frame_index * 3) % max(1, width + height)
+    return {
+        "width": width,
+        "height": height,
+        "encoding": "rgb8",
+        "is_bigendian": 0,
+        "step": width * 3,
+        "data": _render_synthetic_frame(width, height, source, shift, band),
+        "dataEncoding": "bytes",
+    }, elapsed, ended
+
+
+def _render_synthetic_frame(width: int, height: int, source: bytes, shift: int, band: int) -> bytes:
+    try:
+        import numpy as np
+
+        array = np.frombuffer(source, dtype=np.uint8).reshape((height, width, 3)).astype(np.int16)
+        array = np.roll(array, -shift, axis=1)
+        xs = np.arange(width, dtype=np.int32)
+        ys = np.arange(height, dtype=np.int32).reshape(-1, 1)
+        highlight = ((np.abs((xs + ys) - band) < 4).astype(np.int16)) * 34
+        array[:, :, 0] += highlight
+        array[:, :, 1] += highlight // 2
+        return np.clip(array, 0, 255).astype(np.uint8).tobytes()
+    except Exception:
+        pass
     output = bytearray(width * height * 3)
     for y in range(height):
         row = y * width
@@ -496,29 +530,27 @@ def _synthetic_video_frame(base_frame: dict[str, Any], params: dict[str, Any], s
             output[dst] = max(0, min(255, int(source[src]) + highlight))
             output[dst + 1] = max(0, min(255, int(source[src + 1]) + highlight // 2))
             output[dst + 2] = max(0, min(255, int(source[src + 2])))
-    return {
-        "width": width,
-        "height": height,
-        "encoding": "rgb8",
-        "is_bigendian": 0,
-        "step": width * 3,
-        "data": bytes(output),
-        "dataEncoding": "bytes",
-    }, elapsed, ended
+    return bytes(output)
 
 
 def _signal_value(params: dict[str, Any], elapsed: float, rng: random.Random) -> float:
+    # Keep this in sync with graph.py _function_generator_raw_value: the UI
+    # exposes "Phase rad", so phase is interpreted as radians here too.
     signal_type = str(params.get("signalType") or "sine")
     amplitude = float(params.get("amplitude") if params.get("amplitude") is not None else 1.0)
     bias = float(params.get("bias") if params.get("bias") is not None else 0.0)
     frequency = float(params.get("frequency") if params.get("frequency") is not None else 1.0)
     phase = float(params.get("phase") if params.get("phase") is not None else 0.0)
     if signal_type == "step":
-        step_time = float(params.get("stepTime") if params.get("stepTime") is not None else 1.0)
-        return float(params.get("finalValue") if elapsed >= step_time else params.get("initialValue") or 0.0)
+        step_time = max(0.0, float(params.get("stepTime") if params.get("stepTime") is not None else 1.0))
+        initial = float(params.get("initialValue") if params.get("initialValue") is not None else 0.0)
+        final = float(params.get("finalValue") if params.get("finalValue") is not None else 0.0)
+        return final if elapsed >= step_time else initial
     if signal_type == "square":
         duty = max(0.0, min(100.0, float(params.get("dutyCycle") if params.get("dutyCycle") is not None else 50.0))) / 100.0
-        pos = ((elapsed * frequency) + phase / 360.0) % 1.0
+        if frequency <= 0:
+            return bias + amplitude
+        pos = ((elapsed * frequency) + phase / (2.0 * math.pi)) % 1.0
         return bias + (amplitude if pos < duty else -amplitude)
     if signal_type == "ramp":
         return bias + float(params.get("rampSlope") if params.get("rampSlope") is not None else 1.0) * elapsed
@@ -527,13 +559,14 @@ def _signal_value(params: dict[str, Any], elapsed: float, rng: random.Random) ->
         end = float(params.get("chirpEndFrequency") if params.get("chirpEndFrequency") is not None else 10.0)
         duration = max(0.001, float(params.get("chirpDuration") if params.get("chirpDuration") is not None else 10.0))
         k = (end - start) / duration
-        angle = 2.0 * math.pi * (start * elapsed + 0.5 * k * min(elapsed, duration) ** 2) + math.radians(phase)
+        t = min(elapsed, duration)
+        angle = 2.0 * math.pi * (start * t + 0.5 * k * t * t) + phase
         return bias + amplitude * math.sin(angle)
     if signal_type == "white_noise":
         mean = float(params.get("noiseMean") if params.get("noiseMean") is not None else 0.0)
-        std = float(params.get("noiseStd") if params.get("noiseStd") is not None else 1.0)
-        return bias + mean + rng.gauss(0.0, std)
-    angle = 2.0 * math.pi * frequency * elapsed + math.radians(phase)
+        std = max(0.0, float(params.get("noiseStd") if params.get("noiseStd") is not None else 1.0))
+        return bias + rng.gauss(mean, std)
+    angle = 2.0 * math.pi * frequency * elapsed + phase
     return bias + amplitude * math.sin(angle)
 
 
@@ -549,6 +582,7 @@ def _run_function_generator(config: dict[str, Any], publisher: Any) -> None:
     last_sample_at = 0.0
     last_value = 0.0
     count = 0
+    next_status_at = 0.0
     _write_status(
         status_path,
         running=True,
@@ -574,7 +608,11 @@ def _run_function_generator(config: dict[str, Any], publisher: Any) -> None:
                 )
             publisher.publish(_coerce_message(data_type, {"data": float(last_value)}))
             count += 1
-            _write_status(status_path, running=True, published=count, status=f"{params.get('signalType', 'sine')} {publish_hz:g}Hz published t={elapsed:.3f}s y={last_value:.5g}")
+            # Throttle status-file writes: at high publish rates a write per
+            # publish becomes disk-bound and drags the publish timing.
+            if count == 1 or now >= next_status_at:
+                _write_status(status_path, running=True, published=count, status=f"{params.get('signalType', 'sine')} {publish_hz:g}Hz published t={elapsed:.3f}s y={last_value:.5g}")
+                next_status_at = now + 0.2
             next_at += 1.0 / publish_hz if next_at else now + 1.0 / publish_hz
         time.sleep(max(0.0, min(0.002, next_at - time.time())))
 
@@ -691,6 +729,7 @@ def _run_video_input(config: dict[str, Any], publisher: Any) -> None:
     started = time.time()
     next_at = 0.0
     count = 0
+    next_status_at = 0.0
     time.sleep(0.25)
     ended = False
     while RUNNING:
@@ -701,13 +740,15 @@ def _run_video_input(config: dict[str, Any], publisher: Any) -> None:
         frame, elapsed, ended = _synthetic_video_frame(base, params, started, now)
         publisher.publish(_coerce_message(data_type, frame))
         count += 1
-        _write_status(
-            status_path,
-            running=not ended,
-            published=count,
-            ended=ended,
-            status=f"{params.get('fileName') or 'embedded video'} {elapsed:.2f}/{duration:.2f}s @ {publish_hz:g}Hz",
-        )
+        if count == 1 or ended or now >= next_status_at:
+            _write_status(
+                status_path,
+                running=not ended,
+                published=count,
+                ended=ended,
+                status=f"{params.get('fileName') or 'embedded video'} {elapsed:.2f}/{duration:.2f}s @ {publish_hz:g}Hz",
+            )
+            next_status_at = now + 0.2
         if ended and not loop:
             break
         next_at = next_at + (1.0 / publish_hz) if next_at else now + (1.0 / publish_hz)
@@ -799,28 +840,22 @@ def _run_mcap_input(config: dict[str, Any], publishers: dict[str, Any]) -> None:
                 plain_msg = _plain_value(item.ros_msg)
                 item_topic = str(getattr(item.channel, "topic", ""))
                 for port_id in ports_by_topic.get(item_topic, []):
-                    _write_status(
-                        status_path,
-                        running=True,
-                        phase="first_publish" if count == 0 else "",
-                        published=count,
-                        status=f"starting: publishing first {item_topic}" if count == 0 else f"publishing {item_topic}",
-                        currentFile=str(file_path),
-                        fileIndex=file_index,
-                        fileCount=len(mcap_files),
-                    )
-                    publishers[port_id].publish(_coerce_message(data_types_by_port[port_id], plain_msg))
-                    count += 1
-                    if count == 1:
+                    # Do not write the status file per published message: that
+                    # disk I/O throttles MCAP playback throughput. Status is
+                    # written on the first publish and then periodically below.
+                    if count == 0:
                         _write_status(
                             status_path,
                             running=True,
+                            phase="first_publish",
                             published=count,
-                            status=f"publishing {item_topic}",
+                            status=f"starting: publishing first {item_topic}",
                             currentFile=str(file_path),
                             fileIndex=file_index,
                             fileCount=len(mcap_files),
                         )
+                    publishers[port_id].publish(_coerce_message(data_types_by_port[port_id], plain_msg))
+                    count += 1
                 played_any = True
                 if count == 1 or count % 30 == 0:
                     elapsed = ((log_time - first_log_time) / 1e9) if first_log_time is not None else 0.0
@@ -846,13 +881,14 @@ def main() -> int:
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
-    config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    config_path = Path(args.config)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
     _configure_fastdds_transport(config)
     import rclpy
 
     if not rclpy.ok():
         rclpy.init(args=None)
-    node = rclpy.create_node(f"ipn_builtin_source_{config.get('nodeId', 'source')}".replace("-", "_")[:80])
+    node = rclpy.create_node(_sanitize_node_name(f"ipn_builtin_source_{config.get('nodeId', 'source')}")[:80])
     _write_status(Path(config["statusPath"]), running=True, status="starting")
     had_error = False
     try:

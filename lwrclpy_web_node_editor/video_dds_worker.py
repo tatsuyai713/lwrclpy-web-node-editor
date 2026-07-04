@@ -4,6 +4,7 @@ import argparse
 import io
 import json
 import os
+import re
 import signal
 import struct
 import threading
@@ -41,6 +42,36 @@ def _import_type_class(type_name: str):
     package, kind, name = [part for part in str(type_name).split("/") if part]
     module = __import__(f"{package}.{kind}", fromlist=[name])
     return getattr(module, name)
+
+
+def _sanitize_node_name(name: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_]", "_", str(name or "").strip())
+    if not text:
+        return "lwrclpy_node"
+    if text[0].isdigit():
+        text = f"node_{text}"
+    return text
+
+
+def _stamp_header(msg: Any, node: Any) -> None:
+    """Best-effort: set header.stamp from the node clock (ROS 2 convention)."""
+    if node is None:
+        return
+    try:
+        header = getattr(msg, "header", None)
+        if callable(header):
+            header = header()
+        if header is None:
+            return
+        stamp = node.get_clock().now().to_msg()
+        try:
+            header.stamp = stamp
+        except Exception:
+            stamp_field = getattr(header, "stamp", None)
+            if callable(stamp_field):
+                stamp_field(stamp)
+    except Exception:
+        pass
 
 
 def _topic_qos(data_type: str, external: bool = False) -> Any:
@@ -100,8 +131,10 @@ def _coerce_image(type_name: str, width: int, height: int, frame: bytes, output_
     return msg
 
 
-def _publish_frame(publisher: Any, type_name: str, width: int, height: int, frame: bytes, output_encoding: str) -> None:
-    publisher.publish(_coerce_image(type_name, width, height, frame, output_encoding))
+def _publish_frame(publisher: Any, type_name: str, width: int, height: int, frame: bytes, output_encoding: str, node: Any = None) -> None:
+    msg = _coerce_image(type_name, width, height, frame, output_encoding)
+    _stamp_header(msg, node)
+    publisher.publish(msg)
 
 
 def _matched_subscriptions(publisher: Any) -> int:
@@ -481,7 +514,7 @@ def main() -> int:
         if not rclpy.ok():
             rclpy.init(args=None)
         _write_status(status_path, running=True, phase="create_node", error="", videoPath=str(video_path))
-        node = rclpy.create_node(f"ipn_video_dds_{config.get('nodeId', 'video')}".replace("-", "_")[:80])
+        node = rclpy.create_node(_sanitize_node_name(f"ipn_video_dds_{config.get('nodeId', 'video')}")[:80])
         _write_status(status_path, running=True, phase="create_publisher", error="", videoPath=str(video_path))
         publisher = node.create_publisher(_import_type_class(type_name), topic, _topic_qos(type_name, bool(config.get("externalDdsCompatible"))))
     count = 0
@@ -562,7 +595,7 @@ def main() -> int:
                         break
                     frame = _jpeg_from_rgb(width, height, rgb_frame) if output_encoding == "jpeg" else rgb_frame
                     if publisher is not None:
-                        _publish_frame(publisher, type_name, width, height, frame, output_encoding)
+                        _publish_frame(publisher, type_name, width, height, frame, output_encoding, node)
                     published_at = time.perf_counter()
                     next_publish_at += period_sec
                     if next_publish_at < published_at:

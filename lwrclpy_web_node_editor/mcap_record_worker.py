@@ -67,6 +67,15 @@ def _import_type_class(type_name: str):
     return getattr(module, name)
 
 
+def _sanitize_node_name(name: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_]", "_", str(name or "").strip())
+    if not text:
+        return "lwrclpy_node"
+    if text[0].isdigit():
+        text = f"node_{text}"
+    return text
+
+
 def _record_qos(data_type: str, depth: int = 4096) -> Any:
     depth = max(1, int(depth or 4096))
     try:
@@ -613,7 +622,7 @@ def main() -> int:
 
         if not rclpy.ok():
             rclpy.init(args=None)
-        node = rclpy.create_node(f"ipn_mcap_record_{config.get('nodeId', 'sink')}".replace("-", "_")[:80])
+        node = rclpy.create_node(_sanitize_node_name(f"ipn_mcap_record_{config.get('nodeId', 'sink')}")[:80])
         try:
             split_size_mb = max(0.0, float(params.get("splitSizeMb") or 0))
         except Exception:

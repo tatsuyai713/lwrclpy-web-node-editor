@@ -4,6 +4,7 @@ import importlib
 import json
 import keyword
 import os
+import re
 import sys
 import builtins
 import time
@@ -23,6 +24,16 @@ def configure_fastdds_transport(config: dict[str, Any]) -> None:
         os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = EXTERNAL_FASTDDS_TRANSPORTS
     else:
         os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
+
+def sanitize_node_name(name: str) -> str:
+    """Make *name* a valid ROS 2 node name ([A-Za-z0-9_], not starting with a digit)."""
+    text = re.sub(r"[^A-Za-z0-9_]", "_", str(name or "").strip())
+    if not text:
+        return "lwrclpy_node"
+    if text[0].isdigit():
+        text = f"node_{text}"
+    return text
+
 
 def import_type_class(type_name: str):
     package, kind, name = type_name.split("/")
@@ -85,6 +96,7 @@ class LwrclpyWorkerNode:
         self.last_outputs: dict[str, Any] = {}
         self.next_timer_at = 0.0
         self.next_timer_by_id: dict[str, float] = {}
+        self.next_loop_at = 0.0
         self.publishers: dict[str, list[Any]] = {}
         self.clients: dict[str, list[Any]] = {}
         self.subscriptions: list[Any] = []
@@ -92,7 +104,7 @@ class LwrclpyWorkerNode:
         self._globals_cache: dict[str, Any] | None = None
         if not self.rclpy.ok():
             self.rclpy.init(args=None)
-        self.node = self.rclpy.create_node(self.node_config["name"])
+        self.node = self.rclpy.create_node(sanitize_node_name(self.node_config["name"]))
         self._setup_transport()
         self.executor.add_node(self.node)
 
@@ -151,8 +163,49 @@ class LwrclpyWorkerNode:
         outputs: dict[str, Any] = {}
         inputs = dict(self.last_inputs)
         self._execute_timer_if_due(inputs, outputs)
-        self._execute_loop(inputs, outputs)
+        if self._loop_due():
+            self._execute_loop(inputs, outputs)
         self._flush_outputs(outputs)
+
+    def _run_hz(self) -> float:
+        try:
+            return max(1.0, min(float(self.node_config.get("params", {}).get("_runHz") or 60.0), 120.0))
+        except Exception:
+            return 60.0
+
+    def _loop_due(self) -> bool:
+        # Main Loop code runs at the configured tick frequency (Run Hz), not at
+        # the raw executor spin rate.
+        now = time.time()
+        if now < self.next_loop_at:
+            return False
+        period = 1.0 / self._run_hz()
+        next_at = (self.next_loop_at if self.next_loop_at > 0 else now) + period
+        while next_at <= now:
+            next_at += period
+        self.next_loop_at = next_at
+        return True
+
+    def next_event_delay(self, max_delay: float = 0.02) -> float:
+        """Spin timeout until the next timer/loop deadline.
+
+        Subscription callbacks wake the executor immediately, so a longer idle
+        timeout only reduces busy-loop CPU without delaying message handling.
+        """
+        now = time.time()
+        candidates: list[float] = []
+        if str(self.node_config.get("loopCode", "")).strip():
+            candidates.append(self.next_loop_at)
+        for timer in self._timers():
+            if str(timer.get("callbackCode") or "").strip():
+                timer_id = str(timer.get("id") or "timer1")
+                candidates.append(self.next_timer_by_id.get(timer_id, 0.0))
+        if not candidates:
+            return max_delay
+        next_at = min(candidates)
+        if next_at <= now:
+            return 0.001
+        return max(0.001, min(max_delay, next_at - now))
 
     def _make_subscription_callback(self, input_port: dict[str, Any]):
         def callback(msg):
@@ -208,7 +261,10 @@ class LwrclpyWorkerNode:
             period = max(0.001, float(timer.get("periodSec", 1.0) or 1.0))
             next_at = self.next_timer_by_id.get(timer_id, 0.0)
             if next_at <= 0:
-                next_at = now
+                # Match ROS 2 timer semantics: first callback fires one period
+                # after the timer starts, not immediately.
+                self.next_timer_by_id[timer_id] = now + period
+                continue
             if now < next_at:
                 self.next_timer_by_id[timer_id] = next_at
                 continue
@@ -431,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
     worker = LwrclpyWorkerNode(config)
     try:
         while worker.rclpy.ok():
-            worker.executor.spin_once(timeout_sec=0.001)
+            worker.executor.spin_once(timeout_sec=worker.next_event_delay())
             worker.spin_tick()
     finally:
         worker.close()

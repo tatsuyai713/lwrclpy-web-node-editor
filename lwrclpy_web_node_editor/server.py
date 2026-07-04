@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import errno
 import hashlib
 import io
 import importlib
@@ -1206,19 +1207,18 @@ if __name__ == "__main__":
 
 def _build_ros2_export_zip(payload: dict) -> tuple[str, bytes]:
     project_name = _cli_export_project_name(payload)
-    package_name = _safe_archive_name(f"{project_name}_runner").replace("-", "_")
+    # ROS 2 package names may only contain [a-z0-9_] and must start with a letter.
+    package_name = re.sub(r"[^a-z0-9_]", "_", _safe_archive_name(f"{project_name}_runner")).strip("_") or "exported_runner"
+    if package_name[0].isdigit():
+        package_name = f"pkg_{package_name}"
     project_payload = _export_runtime_payload(payload)
     root = f"{project_name}_ros2"
     runner_text = (PROJECT_DIR / "lwrclpy_web_node_editor" / "cli_export_runner.py").read_text(encoding="utf-8")
-    runner_text = runner_text.replace(
-        'PROJECT_PATH = Path(__file__).with_name("project.json")',
-        'PROJECT_PATH = Path(__file__).with_name("project.json")',
-    )
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         base = f"{root}/{package_name}"
         archive.writestr(f"{root}/README.md", _render_ros2_export_readme(project_name, package_name))
-        archive.writestr(f"{base}/package.xml", _render_ros2_runner_package_xml(package_name))
+        archive.writestr(f"{base}/package.xml", _render_ros2_runner_package_xml(package_name, _export_message_packages(project_payload)))
         archive.writestr(f"{base}/setup.py", _render_ros2_runner_setup_py(package_name))
         archive.writestr(f"{base}/setup.cfg", _render_ros2_setup_cfg(package_name))
         archive.writestr(f"{base}/resource/{package_name}", "")
@@ -1259,7 +1259,32 @@ External image/video paths stored in `project.json` must exist on the target mac
 """
 
 
-def _render_ros2_runner_package_xml(package_name: str) -> str:
+def _export_message_packages(project_payload: dict) -> list[str]:
+    """Collect ROS message/service packages referenced by exported node ports."""
+    packages: set[str] = set()
+    for node in (project_payload.get("nodes") if isinstance(project_payload.get("nodes"), list) else []):
+        if not isinstance(node, dict):
+            continue
+        for direction in ("inputs", "outputs"):
+            ports = node.get(direction)
+            if not isinstance(ports, list):
+                continue
+            for port in ports:
+                if not isinstance(port, dict):
+                    continue
+                data_type = str(port.get("dataType") or "").replace(".", "/")
+                parts = data_type.split("/")
+                if len(parts) == 3 and parts[1] in {"msg", "srv"} and re.fullmatch(r"[a-z][a-z0-9_]*", parts[0]):
+                    packages.add(parts[0])
+    return sorted(packages)
+
+
+def _render_ros2_runner_package_xml(package_name: str, message_packages: list[str] | None = None) -> str:
+    depends = ["rclpy", "std_msgs", "sensor_msgs"]
+    for package in message_packages or []:
+        if package not in depends:
+            depends.append(package)
+    depend_lines = "\n".join(f"  <exec_depend>{package}</exec_depend>" for package in depends)
     return f"""<?xml version="1.0"?>
 <package format="3">
   <name>{package_name}</name>
@@ -1268,9 +1293,7 @@ def _render_ros2_runner_package_xml(package_name: str) -> str:
   <maintainer email="user@example.com">user</maintainer>
   <license>TODO</license>
   <buildtool_depend>ament_python</buildtool_depend>
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
+{depend_lines}
   <export>
     <build_type>ament_python</build_type>
   </export>
@@ -2253,8 +2276,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    ROBOT_MESH_EXTENSIONS = {".stl", ".dae", ".obj", ".ply", ".glb", ".gltf"}
+
     def _send_robot_mesh(self, path: str):
         target = Path(unquote(path or "")).expanduser().resolve()
+        # Only serve mesh file types; this endpoint must not become an
+        # arbitrary file read.
+        if target.suffix.lower() not in self.ROBOT_MESH_EXTENSIONS:
+            self.send_error(403)
+            return
         if not target.is_file():
             self.send_error(404)
             return
@@ -2307,7 +2337,7 @@ def main(argv: list[str] | None = None):
     try:
         server = ReusableThreadingHTTPServer((args.host, args.port), Handler)
     except OSError as exc:
-        if exc.errno == 48:
+        if exc.errno == errno.EADDRINUSE:
             print(f"Port {args.port} is already in use. Stop the existing server or run with --port {args.port + 1}.", file=sys.stderr)
             return 1
         raise

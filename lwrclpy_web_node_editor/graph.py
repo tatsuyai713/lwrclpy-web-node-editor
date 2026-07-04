@@ -278,6 +278,34 @@ def lwrclpy_install_marker() -> str:
         return f"local-wheel:{wheel}"
 
 
+def _render_synthetic_frame(width: int, height: int, source: bytes, shift: int, band: int) -> bytes:
+    try:
+        import numpy as np
+
+        array = np.frombuffer(source, dtype=np.uint8).reshape((height, width, 3)).astype(np.int16)
+        array = np.roll(array, -shift, axis=1)
+        xs = np.arange(width, dtype=np.int32)
+        ys = np.arange(height, dtype=np.int32).reshape(-1, 1)
+        highlight = ((np.abs((xs + ys) - band) < 4).astype(np.int16)) * 34
+        array[:, :, 0] += highlight
+        array[:, :, 1] += highlight // 2
+        return np.clip(array, 0, 255).astype(np.uint8).tobytes()
+    except Exception:
+        pass
+    output = bytearray(width * height * 3)
+    for y in range(height):
+        row = y * width
+        for x in range(width):
+            src_x = (x + shift) % width
+            src = (row + src_x) * 3
+            dst = (row + x) * 3
+            highlight = 34 if abs((x + y) - band) < 4 else 0
+            output[dst] = max(0, min(255, int(source[src]) + highlight))
+            output[dst + 1] = max(0, min(255, int(source[src + 1]) + highlight // 2))
+            output[dst + 2] = max(0, min(255, int(source[src + 2])))
+    return bytes(output)
+
+
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
@@ -332,7 +360,25 @@ def normalize_topic(topic: str) -> str:
     text = str(topic or "").strip()
     if not text:
         return ""
-    return text if text.startswith("/") else f"/{text}"
+    return sanitize_topic(text)
+
+
+def sanitize_topic(topic: str) -> str:
+    """Return an absolute ROS 2-compliant topic name.
+
+    Each name token may only contain [A-Za-z0-9_] and must not start with a
+    digit; invalid characters (spaces, dashes, ...) are replaced with '_'.
+    """
+    tokens = [token for token in str(topic or "").strip().split("/") if token]
+    cleaned: list[str] = []
+    for token in tokens:
+        token = re.sub(r"[^A-Za-z0-9_]", "_", token)
+        if token and token[0].isdigit():
+            token = f"t_{token}"
+        cleaned.append(token or "_")
+    if not cleaned:
+        return ""
+    return "/" + "/".join(cleaned)
 
 
 def split_type(type_name: str) -> tuple[str, str, str]:
@@ -1680,6 +1726,8 @@ class CustomLwrclNodeInstance:
             "kind": "text_input",
             "draft": str(params.get("draft") or ""),
             "messages": messages,
+            "promptHistory": params.get("promptHistory") if isinstance(params.get("promptHistory"), list) else [],
+            "historyCursor": int(params.get("historyCursor") or -1),
             "status": status,
         }
 
@@ -2161,23 +2209,13 @@ class CustomLwrclNodeInstance:
         frame_index = int(elapsed * fps) * (self._video_frame_skip() + 1)
         shift = frame_index % max(1, width)
         band = (frame_index * 3) % max(1, width + height)
-        output = bytearray(width * height * 3)
-        for y in range(height):
-            for x in range(width):
-                src_x = (x + shift) % width
-                src = (y * width + src_x) * 3
-                dst = (y * width + x) * 3
-                highlight = 34 if abs((x + y) - band) < 4 else 0
-                output[dst] = max(0, min(255, int(source[src]) + highlight))
-                output[dst + 1] = max(0, min(255, int(source[src + 1]) + highlight // 2))
-                output[dst + 2] = max(0, min(255, int(source[src + 2])))
         return {
             "width": width,
             "height": height,
             "encoding": "rgb8",
             "is_bigendian": 0,
             "step": width * 3,
-            "data": bytes(output),
+            "data": _render_synthetic_frame(width, height, source, shift, band),
             "dataEncoding": "bytes",
         }
 
@@ -2259,7 +2297,7 @@ class CustomLwrclNodeInstance:
                 self.state["function_generator_noise_rng"] = rng
             mean = float(p.get("noiseMean") or 0.0)
             std = max(0.0, float(p.get("noiseStd") or 0.0))
-            return rng.gauss(mean, std)
+            return bias + rng.gauss(mean, std)
         return bias + amplitude * math.sin((2.0 * math.pi * frequency * elapsed) + phase)
 
     def _function_generator_status(self, value: float, elapsed: float, held: bool, should_publish: bool, publish_hz: float) -> str:
@@ -2411,18 +2449,37 @@ class CustomLwrclNodeInstance:
             raw = bytes(max(0, min(255, int(value))) for value in data)
         pixel_count = width * height
         if encoding in {"rgb8", "bgr8"}:
+            raw = raw[:pixel_count * 3]
             if encoding == "bgr8":
-                raw = bytes(v for i in range(0, len(raw), 3) for v in raw[i:i + 3][::-1])
-            return raw[:pixel_count * 3].ljust(pixel_count * 3, b"\x00")
+                usable = len(raw) - (len(raw) % 3)
+                aligned = raw[:usable]
+                flipped = bytearray(usable)
+                flipped[0::3] = aligned[2::3]
+                flipped[1::3] = aligned[1::3]
+                flipped[2::3] = aligned[0::3]
+                raw = bytes(flipped)
+            return raw.ljust(pixel_count * 3, b"\x00")
         elif encoding in {"rgba8", "bgra8"}:
-            rgb = bytearray()
-            for i in range(0, min(len(raw), pixel_count * 4), 4):
-                px = raw[i:i + 4]
-                rgb.extend((px[2], px[1], px[0]) if encoding == "bgra8" else px[:3])
+            usable = min(len(raw), pixel_count * 4)
+            usable -= usable % 4
+            raw = raw[:usable]
+            rgb = bytearray((usable // 4) * 3)
+            if encoding == "bgra8":
+                rgb[0::3] = raw[2::4]
+                rgb[1::3] = raw[1::4]
+                rgb[2::3] = raw[0::4]
+            else:
+                rgb[0::3] = raw[0::4]
+                rgb[1::3] = raw[1::4]
+                rgb[2::3] = raw[2::4]
             return bytes(rgb).ljust(pixel_count * 3, b"\x00")
         elif encoding in {"mono8", "8uc1"}:
             gray = raw[:pixel_count]
-            return bytes(value for value in gray for _ in range(3)).ljust(pixel_count * 3, b"\x00")
+            rgb = bytearray(len(gray) * 3)
+            rgb[0::3] = gray
+            rgb[1::3] = gray
+            rgb[2::3] = gray
+            return bytes(rgb).ljust(pixel_count * 3, b"\x00")
         return None
 
     def _normalize_image_message(self, image: dict[str, Any]) -> dict[str, Any]:
@@ -2482,7 +2539,8 @@ class CustomLwrclNodeInstance:
         payload = data_url.split(",", 1)[1]
         out_dir = Path.cwd() / "saved_images"
         out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"{self.config.name}_{int(time.time() * 1000)}.bmp"
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", str(self.config.name or "image")) or "image"
+        path = out_dir / f"{safe_name}_{int(time.time() * 1000)}.bmp"
         path.write_bytes(base64.b64decode(payload))
         self._last_saved_signature = signature
         self.config.params["lastSavedPath"] = str(path)
@@ -2494,7 +2552,8 @@ class CustomLwrclNodeInstance:
             if isinstance(current, dict):
                 current = current.get(part)
             elif isinstance(current, (list, tuple)) and part.isdigit():
-                current = current[int(part)]
+                index = int(part)
+                current = current[index] if index < len(current) else None
             else:
                 current = getattr(current, part, None)
                 if callable(current):
@@ -2618,7 +2677,10 @@ class CustomLwrclNodeInstance:
             period = max(0.001, float(timer.period_sec or 1.0))
             next_at = self._next_timer_by_id.get(timer.id, 0.0)
             if next_at <= 0:
-                next_at = now
+                # Match ROS 2 timer semantics: first callback fires one period
+                # after the timer starts, not immediately.
+                self._next_timer_by_id[timer.id] = now + period
+                continue
             if now < next_at:
                 self._next_timer_by_id[timer.id] = next_at
                 continue
@@ -3904,11 +3966,9 @@ class GraphRuntime:
         for node in nodes:
             if node.tool_type != "function_generator":
                 continue
-            topic = str(node.params.get("ddsTopic") or "").strip()
+            topic = sanitize_topic(str(node.params.get("ddsTopic") or ""))
             if not topic:
                 continue
-            if not topic.startswith("/"):
-                topic = f"/{topic}"
             output = next((port for port in node.outputs if port.id == "out1"), None)
             if output is None:
                 continue
@@ -3935,7 +3995,7 @@ class GraphRuntime:
         name = str(link.get("name") or "").strip()
         if not name:
             name = f"{src_port.name if src_port else link.get('fromPort') or 'topic'}"
-        return f"/{name.lstrip('/') or 'topic'}"
+        return sanitize_topic(name) or "/topic"
 
     def _sort(self, nodes: list[CustomLwrclNodeConfig], links: list[dict[str, Any]]) -> list[CustomLwrclNodeConfig]:
         by_id = {node.id: node for node in nodes}

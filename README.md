@@ -9,10 +9,14 @@ ROS 2本体のインストールは不要です。`lwrclpy` が提供する `rcl
 - ブラウザでノードを作成し、入力・処理・表示・グラフ化・topic出力を接続できます。
 - `Image File Input` で画像を読み込み、`sensor_msgs/msg/Image` として処理できます。
 - `Video File Input` で動画ファイルを選択し、Run中に `sensor_msgs/msg/Image` として流せます。
+- `MCAP File Input` / `MCAP Record` でROS 2 MCAP/rosbagの再生と記録ができます。
 - `Image Viewer` で画像を表示できます。
-- `String Viewer` で `std_msgs/msg/String` の最新内容を表示したり、LLMのストリーミング断片のような文字列を追記表示できます。
+- `String Viewer` / `Chat String Viewer` で `std_msgs/msg/String` の最新内容や、LLM応答をチャット形式で表示できます。
 - `Graph Viewer` で `std_msgs/msg/Float32` などの数値や、メッセージ内の数値フィールドをプロットできます。
+- `3D Viewer` でTF、PointCloud2、OccupancyGrid、URDF/Xacro由来のRobot Modelを3D表示できます。
+- `Interactive Text Input` でRun中に文字列promptを入力し、送信ボタンで `std_msgs/msg/String` としてpublishできます。
 - `LLM Text` で `std_msgs/msg/String` のpromptをOllama/OpenAI/OpenAI互換API/LM Studioへ渡し、responseをtopicとして出力できます。
+- `URDF Static TF` と `TF Merge` で、URDF/Xacroからの静的TFと複数ノードのTF入出力をグラフ上で接続できます。
 - `Topic Input` / `Topic Output` で、グラフ外部とのtopic境界を表現できます。
 - カスタムノードごとに `requirements.txt` を持たせ、実行前に `.node_envs/<node-id>` のvenvへ依存をセットアップできます。
 - プロジェクト全体をJSONとしてSave/Loadできます。
@@ -178,7 +182,7 @@ dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe --server --host 127.0.0
 5. Video入力、処理後画像、motion scoreのグラフが動くことを確認します。
 6. 止めるときは `Stop` を押します。
 
-`Run Hz` で連続実行時のtick周波数を設定できます。デフォルトは30Hzです。`Run` の連続実行ループはサーバー側で動くため、ブラウザタブがフォーカスを失ってもTopic出力は継続します。`Duration sec` に秒数を入力して `Run For` を使うと、指定秒数だけ実行して自動停止できます。
+連続実行時のtick周波数は60Hzです。`Run` の連続実行ループはサーバー側で動くため、ブラウザタブがフォーカスを失ってもTopic出力は継続します。`Duration sec` に秒数を入力して `Run For` を使うと、指定秒数だけ実行して自動停止できます。
 
 ## ショートカット
 
@@ -191,7 +195,7 @@ dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe --server --host 127.0.0
 
 ## サンプルプロジェクト
 
-`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/`, `deep_learning/`, `llm/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
+`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/`, `deep_learning/`, `tf/`, `llm/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
 
 - `image_video/01_image_edge_topic_graph.json`: 画像入力、グレースケール化、エッジ抽出、画像表示、エッジ強度グラフ、topic出力。
 - `image_video/02_video_motion_topic_graph.json`: 動画フレーム入力、フレーム差分によるmotion mask、overlay表示、motion scoreグラフ、topic出力。
@@ -205,13 +209,14 @@ dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe --server --host 127.0.0
 - `custom_runtime/10_multi_timer_counter_graph.json`: 1つのカスタムノードに複数Timerを持たせ、別々の周期で値をpublish。
 - `custom_runtime/11_manual_subscriber_timer_sampler.json`: Subscriber callbackをOFFにし、Timer callbackから `latest()` で入力を読む例。
 - `image_video/12_image_view_save_topic_output.json`: 埋め込み画像を表示、保存、topic出力境界へ接続。
-- `deep_learning/13_mac_yolo_mps_detection_segmentation.json`: Video File Inputを2つのYOLOノードへ分岐し、検出とセグメンテーションの結果を表示。
 - `deep_learning/13_ultralytics_yolo_detection_segmentation.json`: Video File InputをUltralytics YOLOの検出・インスタンスセグメンテーションノードへ分岐して表示。
 - `deep_learning/14_ultralytics_yolo_pose_depth_anything.json`: Ultralytics YOLO PoseとDepth Anything V2の深度推定を表示。
 - `deep_learning/15_cuda_ultralytics_yolo_detection_segmentation.json`: CUDA環境向けのUltralytics YOLO検出・インスタンスセグメンテーション。
 - `deep_learning/16_tensorrt_ultralytics_yolo_engine_detection.json`: TensorRT engine向けのUltralytics YOLO検出。ノードの `weights` に `.engine` ファイルを指定します。
 - `deep_learning/17_sam_midas_segmentation_depth.json`: Segment Anythingの自動マスクとMiDaS深度推定を表示。標準SAM checkpointは未配置の場合に自動取得します。
 - `llm/18_ollama_llm_string_view.json`: promptを一度publishし、OllamaのLLM応答をString Viewerとtopic outputへ表示・出力します。Ollamaと `llama3.2` などのローカルモデルが必要です。
+- `tf/19_urdf_xacro_tf_static_merge_custom_tf.json`: URDFからの静的TF、カスタムノードのTF出力、TF Merge、3D Viewerを組み合わせて表示します。
+- `llm/20_interactive_llm_chat.json`: Run中にInteractive Text Inputからpromptを送信し、`LLM Text` の応答をChat String Viewerに表示します。
 
 詳しい分類は `samples/README.md` を参照してください。カスタムノードを含むサンプルは、実行時にノードごとのvenvとworker processを使います。
 
@@ -229,7 +234,7 @@ Webプレビューは、リンクごとのtopic名を使ってlwrclpy topic経�
 - カスタムノードのコードは `lwrclpy` のcallbackに近いスコープで実行されます。
 - `Topic Input` と `Topic Output` は、グラフ外部との境界マーカーです。実際のPub/Subは接続された処理・表示ノードが行います。
 - 画像入力は小さな埋め込みデータとして扱えます。動画入力はブラウザからアップロードせず、サーバー側のファイル選択ダイアログで選んだローカルファイルを独立workerがデコードしてDDS publishします。
-- 連続実行のtick周波数は `Run Hz` で設定します。Run中のtickループはサーバー側threadで動くため、ブラウザのtimer throttlingには依存しません。設定値が高い場合でも、実効周波数はノード処理時間やlwrclpy/DDS処理時間に制限されます。
+- 連続実行のtick周波数は60Hzです。Run中のtickループはサーバー側threadで動くため、ブラウザのtimer throttlingには依存しません。実効周波数はノード処理時間やlwrclpy/DDS処理時間に制限されます。
 
 つまり、Webプレビューでもノード間通信の意味論はlwrclpy topicに寄せています。
 
@@ -243,6 +248,7 @@ Webプレビューは、リンクごとのtopic名を使ってlwrclpy topic経�
 - `Outputs`: 出力ポートです。
 - `Callback Code`: 入力を受け取ったときに実行するコードです。通常の画像処理・動画処理はここに書きます。
 - `Timer Callback`: 一定周期で実行したいコードです。`Timer Count` で複数のTimerを作成でき、各Timerは常にcallbackとして実行されます。
+- `TF Input` / `TF Output`: カスタムノードでTF機能を使う場合に明示的に有効化します。TFの送受信は `tf2_ros` の `TransformListener` / `TransformBroadcaster` / `StaticTransformBroadcaster` を使います。
 - `Import Code`: `import cv2` や `import numpy as np` など、ノード専用のimportを書きます。
 - `requirements.txt`: ノード専用venvに入れる依存パッケージを書きます。
 
@@ -326,7 +332,7 @@ publish("out_alert", is_alert)
 
 ## Timer CallbackとMain Loop
 
-Timer Callbackは、Run中に設定周期へ到達したときに実行されます。1ノードに複数のTimerを設定でき、Timerごとに `timer_id`, `timer_name`, `period` が渡されます。
+Timer Callbackは、Run中に設定周期へ到達したときに実行されます。1ノードに複数のTimerを設定でき、Timerごとに `timer_id`, `timer_name`, `period` が渡されます。ROS 2の `create_timer` に合わせ、初回callbackはRun開始直後ではなく1周期後に実行されます。
 
 ```python
 state["count"] = state.get("count", 0) + 1
@@ -349,13 +355,43 @@ if state.get("enabled", True):
 
 `Video File Input` はノード上の `Select Video` で動画ファイルを選択します。Path欄は選択結果の表示専用で、直接入力はできません。Run中は独立した `video_dds_worker.py` プロセスがOpenCVで動画をデコードし、動画ファイルのsource fpsに合わせて `sensor_msgs/msg/Image` としてTopic出力します。サンプルJSONの動画入力は実動画ファイルを持たないため、埋め込みフレームからサーバー側で簡易的な動画フレームを生成します。
 
+Image/Videoの実データはノード間で勝手に縮小しません。Web上のPreview/Image Viewer表示だけ、表示負荷を抑えるため横幅最大640pxを目安にアスペクト比維持で表示用変換されます。
+
 `Image File Save` は接続された画像を `saved_images/` にBMPとして保存します。
+
+## MCAP / rosbag
+
+`MCAP File Input` は `Select MCAP/Bag` で `.mcap` ファイルまたはROS 2 bagディレクトリを選択し、含まれるROS 2 topicを出力ポートとして展開します。`Rate` で再生倍率を指定でき、`Loop` を有効にすると末尾まで再生した後に繰り返します。
+
+`MCAP Record` は複数入力topicをROS 2 bag形式で記録します。`Topics` で入力ポート数を指定し、`Split MB` に0より大きい値を設定すると指定サイズごとに分割します。
 
 ## 信号生成ノード
 
-`Function Generator` は `std_msgs/msg/Float32` の `data` として信号を出力します。ノード上の設定で `Step`, `Sine`, `Square`, `Ramp`, `Chirp`, `White Noise` を選べます。`Publish Hz` で出力周期を設定し、`Sample Time sec` で信号値のサンプル保持周期を設定できます。`DDS Topic` を設定すると、リンクやTopic Outputとは別に、そのDDS/lwrclpy topicへ直接publishします。`Graph Viewer` に接続し、`Field Path` を `data` にすると波形を確認できます。
+`Function Generator` は `std_msgs/msg/Float32` の `data` として信号を出力します。ノード上の設定で `Step`, `Sine`, `Square`, `Ramp`, `Chirp`, `White Noise` を選べます。`Phase` はラジアンです。`Bias` はSine/Square/Ramp/Chirp/White Noiseへ加算されます。`Publish Hz` で出力周期を設定し、`Sample Time sec` で信号値のサンプル保持周期を設定できます。`DDS Topic` を設定すると、リンクやTopic Outputとは別に、そのDDS/lwrclpy topicへ直接publishします。`Graph Viewer` に接続し、`Field Path` を `data` にすると波形を確認できます。
 
 `Graph Viewer` の `Graph Settings` では、保持サンプル数、表示する横軸の秒数、縦軸を `Auto` にするか固定範囲にするかを設定できます。保持サンプル数のデフォルトは10000です。
+
+## TF / 3D Viewer
+
+`URDF Static TF` はURDF/Xacroのfixed jointを読み取り、`tf2_ros.StaticTransformBroadcaster` で `/tf_static` へpublishします。グラフ上のTFポートは見た目上は `TF` の1本の線として扱いますが、実際のROS 2 topicは `/tf` と `/tf_static` の固定名を使います。
+
+`TF Merge` は複数のTF出力を1つのTF入力へ接続するためのグラフ上の集約ノードです。実データを加工するノードではなく、複数ノードがTFを出力できることをグラフで表現するために使います。
+
+`3D Viewer` は `Configure` から次を設定できます。
+
+- TF表示の有効/無効、原点フレーム。
+- XY平面グリッドの間隔とサイズ、座標軸サイズ、座標系ラベル表示。
+- PointCloud2入力数、点形状、点サイズ、色、透明度、最大点数。
+- OccupancyGrid入力数、表示カラースキーム、透明度、背面描画。
+- Robot Model表示、URDF/Xacroパス、モデル色、透明度。
+
+3D表示はマウスで回転・移動・ズームできます。3D Viewer上でのホイール操作はNode Editor全体のズームには伝播しません。
+
+## LLM / Chat
+
+`Interactive Text Input` はRun中でも入力欄を編集でき、`Send` で入力文字列を `std_msgs/msg/String` としてpublishします。送信後は入力欄をクリアします。送信履歴はノード内に保持され、左右ボタンで過去promptを呼び出せます。`Clear History` で履歴を消せます。
+
+`LLM Text` はprompt topicを受け取り、Ollama/OpenAI/OpenAI互換API/LM Studioへ問い合わせ、応答を `std_msgs/msg/String` としてpublishします。`Chat String Viewer` は受け取った文字列をチャット形式で蓄積表示します。
 
 ## Topic Input / Topic Output
 
@@ -370,17 +406,20 @@ if state.get("enabled", True):
 
 `Export Python Node` は、選択したカスタムノードを単体のPythonファイルとして保存します。後から `Import Python Node` で読み戻せます。
 
-`Export ROS 2 Package` は、プロジェクト内のカスタムノードをノードごとのPythonファイルに分け、Python package形式のzipとして出力します。zipには次のファイルが含まれます。
+`Export ROS 2 Package` は、プロジェクトを通常のROS 2 `rclpy` 環境で実行するPython package形式のzipとして出力します。カスタムノードに加えて、Function Generator、Image/Video File Input、LLM Text、MCAP Recordなど対応済みの組み込み実行ノードもrunnerから実行されます。`Image Viewer`, `String Viewer`, `Graph Viewer`, `Topic Hz Monitor`, `Topic Input`, `Topic Output` のようなWeb表示・境界ノードは実行対象から除外され、Topic Input/Outputは接続先/接続元ノードの外部topicとして反映されます。
+
+ROS 2 package zipには次のファイルが含まれます。
 
 - `package.xml`
 - `setup.py`
 - `setup.cfg`
-- `<package>/<node>.py`
-- `<package>/runtime.py`
-- `launch/project.launch.py`
-- `requirements.txt` が必要な場合は同梱
+- `<package>/runner.py`
+- `<package>/project.json`
+- `launch/<project>.launch.py`
 
-ブラウザ専用の組み込みツールノード、たとえば `Image File Input` や `Image Viewer` はエクスポート対象外です。エクスポートされるのは、ユーザーが作成したカスタムノードです。
+`package.xml` の `exec_depend` は、プロジェクト内で使うメッセージ型に合わせて `std_msgs`, `sensor_msgs`, `geometry_msgs`, `tf2_msgs`, `nav_msgs` などを動的に追加します。package名とノード名はROS 2の命名規則に合うようにサニタイズされます。
+
+`Export CLI Package` は、ROS 2 packageではなく、このWeb Node Editorのrunner一式、`project.json`、必要なruntimeファイルをまとめたzipを出力します。展開後に同梱の `run_project.py` を使って、保存済みプロジェクトをCLIから実行できます。
 
 ## 依存関係とvenv
 

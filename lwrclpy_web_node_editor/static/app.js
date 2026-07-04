@@ -5965,6 +5965,7 @@ if __name__ == '__main__':
 function renderRos2RuntimePy() {
   return `import importlib
 import keyword
+import re
 import sys
 import time
 
@@ -5982,6 +5983,15 @@ def split_kind(type_name):
   return type_name.split('/')[1]
 
 
+def sanitize_node_name(name):
+  text = re.sub(r'[^A-Za-z0-9_]', '_', str(name or '').strip())
+  if not text:
+    return 'exported_node'
+  if text[0].isdigit():
+    text = f'node_{text}'
+  return text
+
+
 class ExportedNode:
   def __init__(self, config):
     self.config = config
@@ -5992,12 +6002,13 @@ class ExportedNode:
     self.input_queues = {}
     self.last_outputs = {}
     self.next_timer_at = 0.0
+    self.next_timer_by_id = {}
     self.publishers = {}
     self.clients = {}
     self.subscriptions = []
     self.services = []
     self._globals_cache = None
-    self.node = rclpy.create_node(self.node_config['name'])
+    self.node = rclpy.create_node(sanitize_node_name(self.node_config.get('name') or self.node_config.get('id') or 'exported_node'))
     self._setup_transport()
 
   def _setup_transport(self):
@@ -6077,30 +6088,52 @@ class ExportedNode:
     if not code:
       return
     local = self._locals({'input_id': input_port['id'], 'msg': msg, 'request': msg, 'response': response, 'outputs': outputs})
-    exec(code, self._globals(), local)
+    try:
+      exec(code, self._globals(), local)
+    except Exception as exc:
+      self.log(f'{input_port["id"]} callback error: {exc}')
 
   def _execute_loop(self, inputs, outputs):
     code = self.node_config.get('loopCode', '').strip()
     if not code:
       return
     local = self._locals({'inputs': inputs, 'outputs': outputs, 'now': time.time(), 'latest': self.latest, 'take': self.take, 'has_input': self.has_input})
-    exec(code, self._globals(), local)
+    try:
+      exec(code, self._globals(), local)
+    except Exception as exc:
+      self.log(f'loop error: {exc}')
 
   def _execute_timer_if_due(self, inputs, outputs):
-    if not self.node_config.get('timerEnabled', False):
-      return
-    code = self.node_config.get('timerCode', '').strip()
-    if not code:
-      return
     now = time.time()
-    period = max(0.001, float(self.node_config.get('timerPeriodSec', 1.0) or 1.0))
-    if self.next_timer_at <= 0:
-      self.next_timer_at = now
-    if now < self.next_timer_at:
-      return
-    self.next_timer_at = now + period
-    local = self._locals({'inputs': inputs, 'outputs': outputs, 'now': now, 'period': period, 'latest': self.latest, 'take': self.take, 'has_input': self.has_input})
-    exec(code, self._globals(), local)
+    for timer in self._timers():
+      code = str(timer.get('callbackCode') or '').strip()
+      if not code:
+        continue
+      timer_id = str(timer.get('id') or 'timer1')
+      period = max(0.001, float(timer.get('periodSec', 1.0) or 1.0))
+      next_at = self.next_timer_by_id.get(timer_id, 0.0)
+      if next_at <= 0:
+        self.next_timer_by_id[timer_id] = now + period
+        continue
+      if now < next_at:
+        continue
+      next_due = next_at + period
+      while next_due <= now:
+        next_due += period
+      self.next_timer_by_id[timer_id] = next_due
+      local = self._locals({'timer_id': timer_id, 'timer_name': str(timer.get('name') or timer_id), 'inputs': inputs, 'outputs': outputs, 'now': now, 'period': period, 'latest': self.latest, 'take': self.take, 'has_input': self.has_input})
+      try:
+        exec(code, self._globals(), local)
+      except Exception as exc:
+        self.log(f'{timer_id} timer callback error: {exc}')
+
+  def _timers(self):
+    timers = self.node_config.get('timers')
+    if isinstance(timers, list):
+      return [timer for timer in timers if isinstance(timer, dict)]
+    if self.node_config.get('timerEnabled', False):
+      return [{'id': 'timer1', 'name': 'timer1', 'periodSec': self.node_config.get('timerPeriodSec', 1.0), 'callbackCode': self.node_config.get('timerCode', '')}]
+    return []
 
   def _flush_outputs(self, outputs):
     for key, value in outputs.items():
@@ -6359,6 +6392,7 @@ import importlib
 import hashlib
 import json
 import keyword
+import re
 import shutil
 import subprocess
 import sys
@@ -6383,6 +6417,15 @@ def split_kind(type_name):
     return type_name.split("/")[1]
 
 
+def sanitize_node_name(name):
+    text = re.sub(r"[^A-Za-z0-9_]", "_", str(name or "").strip())
+    if not text:
+        return "exported_node"
+    if text[0].isdigit():
+        text = f"node_{text}"
+    return text
+
+
 class ProjectNode:
     def __init__(self, config):
         self.config = config
@@ -6393,13 +6436,14 @@ class ProjectNode:
         self.input_queues = {}
         self.last_outputs = {}
         self.next_timer_at = 0.0
+        self.next_timer_by_id = {}
         self.publishers = {}
         self.clients = {}
         self.subscriptions = []
         self.services = []
         self.env_path = None
         self.env_site_packages = None
-        self.node = rclpy.create_node(self.node_config["name"])
+        self.node = rclpy.create_node(sanitize_node_name(self.node_config.get("name") or self.node_config.get("id") or "exported_node"))
         self._setup_environment()
         self._setup_transport()
 
@@ -6513,30 +6557,52 @@ class ProjectNode:
         if not code:
             return
         local = self._locals({"input_id": input_port["id"], "msg": msg, "request": msg, "response": response, "outputs": outputs})
-        exec(code, self._globals(), local)
+        try:
+            exec(code, self._globals(), local)
+        except Exception as exc:
+            self.log(f"{input_port['id']} callback error: {exc}")
 
     def _execute_loop(self, inputs, outputs):
         code = self.node_config.get("loopCode", "").strip()
         if not code:
             return
         local = self._locals({"inputs": inputs, "outputs": outputs, "now": time.time(), "latest": self.latest, "take": self.take, "has_input": self.has_input})
-        exec(code, self._globals(), local)
+        try:
+            exec(code, self._globals(), local)
+        except Exception as exc:
+            self.log(f"loop error: {exc}")
 
     def _execute_timer_if_due(self, inputs, outputs):
-        if not self.node_config.get("timerEnabled", False):
-            return
-        code = self.node_config.get("timerCode", "").strip()
-        if not code:
-            return
         now = time.time()
-        period = max(0.001, float(self.node_config.get("timerPeriodSec", 1.0) or 1.0))
-        if self.next_timer_at <= 0:
-            self.next_timer_at = now
-        if now < self.next_timer_at:
-            return
-        self.next_timer_at = now + period
-        local = self._locals({"inputs": inputs, "outputs": outputs, "now": now, "period": period, "latest": self.latest, "take": self.take, "has_input": self.has_input})
-        exec(code, self._globals(), local)
+        for timer in self._timers():
+            code = str(timer.get("callbackCode") or "").strip()
+            if not code:
+                continue
+            timer_id = str(timer.get("id") or "timer1")
+            period = max(0.001, float(timer.get("periodSec", 1.0) or 1.0))
+            next_at = self.next_timer_by_id.get(timer_id, 0.0)
+            if next_at <= 0:
+                self.next_timer_by_id[timer_id] = now + period
+                continue
+            if now < next_at:
+                continue
+            next_due = next_at + period
+            while next_due <= now:
+                next_due += period
+            self.next_timer_by_id[timer_id] = next_due
+            local = self._locals({"timer_id": timer_id, "timer_name": str(timer.get("name") or timer_id), "inputs": inputs, "outputs": outputs, "now": now, "period": period, "latest": self.latest, "take": self.take, "has_input": self.has_input})
+            try:
+                exec(code, self._globals(), local)
+            except Exception as exc:
+                self.log(f"{timer_id} timer callback error: {exc}")
+
+    def _timers(self):
+        timers = self.node_config.get("timers")
+        if isinstance(timers, list):
+            return [timer for timer in timers if isinstance(timer, dict)]
+        if self.node_config.get("timerEnabled", False):
+            return [{"id": "timer1", "name": "timer1", "periodSec": self.node_config.get("timerPeriodSec", 1.0), "callbackCode": self.node_config.get("timerCode", "")}]
+        return []
 
     def _flush_outputs(self, outputs):
         for key, value in outputs.items():
@@ -6692,6 +6758,7 @@ ${metadata.split('\n').map((line) => `# ${line}`).join('\n')}
 import importlib
 import json
 import keyword
+import re
 import time
 
 import rclpy
@@ -6712,6 +6779,15 @@ def split_kind(type_name):
     return type_name.split("/")[1]
 
 
+def sanitize_node_name(name):
+    text = re.sub(r"[^A-Za-z0-9_]", "_", str(name or "").strip())
+    if not text:
+        return "exported_node"
+    if text[0].isdigit():
+        text = f"node_{text}"
+    return text
+
+
 class ExportedNode:
     def __init__(self, config):
         self.config = config
@@ -6722,11 +6798,12 @@ class ExportedNode:
         self.input_queues = {}
         self.last_outputs = {}
         self.next_timer_at = 0.0
+        self.next_timer_by_id = {}
         self.publishers = {}
         self.clients = {}
         self.subscriptions = []
         self.services = []
-        self.node = rclpy.create_node(self.node_config["name"])
+        self.node = rclpy.create_node(sanitize_node_name(self.node_config.get("name") or self.node_config.get("id") or "exported_node"))
         self._setup_transport()
 
     def _setup_transport(self):
@@ -6811,7 +6888,10 @@ class ExportedNode:
             "response": response,
             "outputs": outputs,
         })
-        exec(code, self._globals(), local)
+        try:
+            exec(code, self._globals(), local)
+        except Exception as exc:
+            self.log(f"{input_port['id']} callback error: {exc}")
 
     def _execute_loop(self, inputs, outputs):
         code = self.node_config.get("loopCode", "").strip()
@@ -6825,31 +6905,52 @@ class ExportedNode:
             "take": self.take,
             "has_input": self.has_input,
         })
-        exec(code, self._globals(), local)
+        try:
+            exec(code, self._globals(), local)
+        except Exception as exc:
+            self.log(f"loop error: {exc}")
 
     def _execute_timer_if_due(self, inputs, outputs):
-        if not self.node_config.get("timerEnabled", False):
-            return
-        code = self.node_config.get("timerCode", "").strip()
-        if not code:
-            return
         now = time.time()
-        period = max(0.001, float(self.node_config.get("timerPeriodSec", 1.0) or 1.0))
-        if self.next_timer_at <= 0:
-            self.next_timer_at = now
-        if now < self.next_timer_at:
-            return
-        self.next_timer_at = now + period
-        local = self._locals({
-            "inputs": inputs,
-            "outputs": outputs,
-            "now": now,
-            "period": period,
-            "latest": self.latest,
-            "take": self.take,
-            "has_input": self.has_input,
-        })
-        exec(code, self._globals(), local)
+        for timer in self._timers():
+            code = str(timer.get("callbackCode") or "").strip()
+            if not code:
+                continue
+            timer_id = str(timer.get("id") or "timer1")
+            period = max(0.001, float(timer.get("periodSec", 1.0) or 1.0))
+            next_at = self.next_timer_by_id.get(timer_id, 0.0)
+            if next_at <= 0:
+                self.next_timer_by_id[timer_id] = now + period
+                continue
+            if now < next_at:
+                continue
+            next_due = next_at + period
+            while next_due <= now:
+                next_due += period
+            self.next_timer_by_id[timer_id] = next_due
+            local = self._locals({
+                "timer_id": timer_id,
+                "timer_name": str(timer.get("name") or timer_id),
+                "inputs": inputs,
+                "outputs": outputs,
+                "now": now,
+                "period": period,
+                "latest": self.latest,
+                "take": self.take,
+                "has_input": self.has_input,
+            })
+            try:
+                exec(code, self._globals(), local)
+            except Exception as exc:
+                self.log(f"{timer_id} timer callback error: {exc}")
+
+    def _timers(self):
+        timers = self.node_config.get("timers")
+        if isinstance(timers, list):
+            return [timer for timer in timers if isinstance(timer, dict)]
+        if self.node_config.get("timerEnabled", False):
+            return [{"id": "timer1", "name": "timer1", "periodSec": self.node_config.get("timerPeriodSec", 1.0), "callbackCode": self.node_config.get("timerCode", "")}]
+        return []
 
     def _flush_outputs(self, outputs):
         for key, value in outputs.items():
@@ -7136,10 +7237,15 @@ function uniqueNodeId(preferred) {
 }
 
 function normalizeTopic(name) {
-  let topic = String(name || '').trim();
-  if (!topic) return '/topic';
-  topic = topic.replace(/^\/+/, '');
-  return `/${topic}`;
+  // Keep in sync with the server's sanitize_topic(): ROS 2 topic tokens may
+  // only contain [A-Za-z0-9_] and must not start with a digit.
+  const tokens = String(name || '').trim().split('/').filter(Boolean).map((token) => {
+    let clean = token.replace(/[^A-Za-z0-9_]/g, '_');
+    if (clean && /^[0-9]/.test(clean)) clean = `t_${clean}`;
+    return clean || '_';
+  });
+  if (!tokens.length) return '/topic';
+  return `/${tokens.join('/')}`;
 }
 
 function portDisplayName(name) {

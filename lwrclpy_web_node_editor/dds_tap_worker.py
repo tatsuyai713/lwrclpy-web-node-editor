@@ -6,6 +6,7 @@ import io
 import json
 import math
 import os
+import re
 import signal
 import struct
 import threading
@@ -56,6 +57,15 @@ def _import_type_class(type_name: str):
     package, kind, name = [part for part in str(type_name).split("/") if part]
     module = __import__(f"{package}.{kind}", fromlist=[name])
     return getattr(module, name)
+
+
+def _sanitize_node_name(name: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_]", "_", str(name or "").strip())
+    if not text:
+        return "lwrclpy_node"
+    if text[0].isdigit():
+        text = f"node_{text}"
+    return text
 
 
 def _topic_qos(data_type: str, topic: str = "") -> Any:
@@ -515,6 +525,12 @@ class DdsTap:
             traceback.print_exc()
 
     def _matched_publishers_cached(self) -> int:
+        subscription = self.subscription
+        if subscription is not None:
+            try:
+                self._matched_publishers_count = int(subscription.get_publisher_count())
+            except Exception:
+                pass
         return int(self._matched_publishers_count)
 
     def _current_times(self, now: float) -> tuple[list[float], int]:
@@ -681,15 +697,16 @@ class DdsTap:
         data, status = frame
         self.output_dir.mkdir(parents=True, exist_ok=True)
         path = self.output_dir / f"image_save_{int(time.time() * 1000)}.bmp"
-        if status.get("encoding") in {"jpeg", "jpg"}:
-            path = path.with_suffix(".jpg")
+        encoding = str(status.get("encoding") or "rgb8").lower()
+        if encoding in {"jpeg", "jpg", "png"}:
+            path = path.with_suffix(".png" if encoding == "png" else ".jpg")
             path.write_bytes(data)
         else:
             width = int(status.get("width") or 0)
             height = int(status.get("height") or 0)
             if width <= 0 or height <= 0:
                 return
-            path.write_bytes(_bmp_bytes(width, height, data))
+            path.write_bytes(_bmp_bytes(width, height, _rgb_preview_bytes(data, encoding)))
         self._last_saved_seq = seq
         _write_json(
             self.status_path,
@@ -710,13 +727,14 @@ class DdsTap:
             data = _bytes_field(msg, "data")
             if data is None:
                 return None
+            format_text = str(_field(msg, "format") or "")
             return _bytes_payload(data), {
                 "mode": self.mode,
                 "topic": self.topic,
                 "dataType": self.data_type,
-                "encoding": "jpeg",
-                "width": _format_int(str(_field(msg, "format") or ""), "width") or 0,
-                "height": _format_int(str(_field(msg, "format") or ""), "height") or 0,
+                "encoding": "png" if "png" in format_text.lower() else "jpeg",
+                "width": _format_int(format_text, "width") or 0,
+                "height": _format_int(format_text, "height") or 0,
             }
         width = int(_field(msg, "width") or 0)
         height = int(_field(msg, "height") or 0)
@@ -1045,7 +1063,7 @@ def main() -> int:
 
     if not rclpy.ok():
         rclpy.init(args=None)
-    node = rclpy.create_node(f"ipn_dds_tap_{config.get('nodeId', 'tap')}".replace("-", "_")[:80])
+    node = rclpy.create_node(_sanitize_node_name(f"ipn_dds_tap_{config.get('nodeId', 'tap')}")[:80])
     subscriptions = []
     tf_poll_subscriptions: list[tuple[Any, bool]] = []
     if tap.mode in {"tf", "scene3d"}:

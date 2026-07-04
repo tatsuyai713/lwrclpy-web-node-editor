@@ -21,7 +21,6 @@
         "detectedFps": 0,
         "nativeFps": 0,
         "sourceFps": 0,
-        "maxSide": 0,
         "frameSkip": 0,
         "outputType": "sensor_msgs/msg/Image"
       },

@@ -181,6 +181,16 @@ def latest_lwrclpy_wheel_url() -> str:
     return selected[2]
 
 
+def sanitize_node_name(name: str) -> str:
+    """Make *name* a valid ROS 2 node name ([A-Za-z0-9_], not starting with a digit)."""
+    text = re.sub(r"[^A-Za-z0-9_]", "_", str(name or "").strip())
+    if not text:
+        return "exported_node"
+    if text[0].isdigit():
+        text = f"node_{text}"
+    return text
+
+
 def valid_data_type(type_name: object) -> bool:
     parts = str(type_name or "").split("/")
     return len(parts) == 3 and all(parts)
@@ -299,10 +309,17 @@ def coerce_message(data_type: str, value: Any) -> Any:
 
 
 def normalize_topic(name: str) -> str:
-    text = str(name or "").strip()
-    if not text:
+    """Return an absolute ROS 2-compliant topic name (invalid chars -> '_')."""
+    tokens = [token for token in str(name or "").strip().split("/") if token]
+    cleaned: list[str] = []
+    for token in tokens:
+        token = re.sub(r"[^A-Za-z0-9_]", "_", token)
+        if token and token[0].isdigit():
+            token = f"t_{token}"
+        cleaned.append(token or "_")
+    if not cleaned:
         return ""
-    return text if text.startswith("/") else f"/{text}"
+    return "/" + "/".join(cleaned)
 
 
 def default_topic(src: str, src_port: str, dst: str, dst_port: str) -> str:
@@ -360,12 +377,13 @@ class RuntimeNode:
         self.config = config
         self.params = config.get("params") if isinstance(config.get("params"), dict) else {}
         self.tool = str(config.get("toolType") or "")
-        self.node = rclpy.create_node(str(config.get("name") or config.get("id") or "exported_node"))
+        self.node = rclpy.create_node(sanitize_node_name(str(config.get("name") or config.get("id") or "exported_node")))
         self.state: dict[str, Any] = {}
         self.last_inputs: dict[str, Any] = {}
         self.input_queues: dict[str, list[Any]] = {}
         self.publishers: dict[str, list[Any]] = {}
         self.next_timer_at = 0.0
+        self.next_timer_by_id: dict[str, float] = {}
         self.next_builtin_at = 0.0
         self.video_capture = None
         self.mcap_thread: threading.Thread | None = None
@@ -457,7 +475,11 @@ class RuntimeNode:
                 outputs: dict[str, Any] = {}
                 code = str(input_port.get("callbackCode") or "").strip()
                 if code:
-                    exec(code, self._globals(), self._locals({"msg": value, "input_id": input_port["id"], "outputs": outputs}))
+                    try:
+                        exec(code, self._globals(), self._locals({"msg": value, "input_id": input_port["id"], "outputs": outputs}))
+                    except Exception as exc:
+                        print(f"[{self.config.get('name')}] {input_port['id']} callback error: {exc}")
+                        return
                     for key, item in outputs.items():
                         self.publish(key, item)
         return callback
@@ -494,28 +516,62 @@ class RuntimeNode:
         self._tick_timer(now)
         self._tick_loop()
 
+    def _timers(self) -> list[dict[str, Any]]:
+        timers = self.config.get("timers")
+        if isinstance(timers, list):
+            return [timer for timer in timers if isinstance(timer, dict)]
+        if self.config.get("timerEnabled"):
+            return [{
+                "id": "timer1",
+                "name": "timer1",
+                "periodSec": self.config.get("timerPeriodSec", 1.0),
+                "callbackCode": self.config.get("timerCode", ""),
+            }]
+        return []
+
     def _tick_timer(self, now: float) -> None:
-        if not self.config.get("timerEnabled"):
-            return
-        period = max(0.001, float(self.config.get("timerPeriodSec") or 1.0))
-        if self.next_timer_at <= 0:
-            self.next_timer_at = now
-        if now < self.next_timer_at:
-            return
-        self.next_timer_at = now + period
-        outputs: dict[str, Any] = {}
-        code = str(self.config.get("timerCode") or "").strip()
-        if code:
-            exec(code, self._globals(), self._locals({"outputs": outputs, "now": now, "period": period}))
-        for key, item in outputs.items():
-            self.publish(key, item)
+        for timer in self._timers():
+            code = str(timer.get("callbackCode") or "").strip()
+            if not code:
+                continue
+            timer_id = str(timer.get("id") or "timer1")
+            period = max(0.001, float(timer.get("periodSec", 1.0) or 1.0))
+            next_at = self.next_timer_by_id.get(timer_id, 0.0)
+            if next_at <= 0:
+                # ROS 2 timers fire their first callback one period after start.
+                self.next_timer_by_id[timer_id] = now + period
+                continue
+            if now < next_at:
+                continue
+            next_due = next_at + period
+            while next_due <= now:
+                next_due += period
+            self.next_timer_by_id[timer_id] = next_due
+            outputs: dict[str, Any] = {}
+            try:
+                exec(code, self._globals(), self._locals({
+                    "outputs": outputs,
+                    "now": now,
+                    "period": period,
+                    "timer_id": timer_id,
+                    "timer_name": str(timer.get("name") or timer_id),
+                }))
+            except Exception as exc:
+                print(f"[{self.config.get('name')}] {timer_id} timer callback error: {exc}")
+                continue
+            for key, item in outputs.items():
+                self.publish(key, item)
 
     def _tick_loop(self) -> None:
         code = str(self.config.get("loopCode") or "").strip()
         if not code:
             return
         outputs: dict[str, Any] = {}
-        exec(code, self._globals(), self._locals({"inputs": dict(self.last_inputs), "outputs": outputs, "now": time.time()}))
+        try:
+            exec(code, self._globals(), self._locals({"inputs": dict(self.last_inputs), "outputs": outputs, "now": time.time()}))
+        except Exception as exc:
+            print(f"[{self.config.get('name')}] loop error: {exc}")
+            return
         for key, item in outputs.items():
             self.publish(key, item)
 
@@ -523,18 +579,56 @@ class RuntimeNode:
         hz = max(0.1, float(self.params.get("publishHz") or 10.0))
         self.next_builtin_at = now + 1.0 / hz
         elapsed = now - float(self.state.setdefault("started_at", now))
-        amp = float(self.params.get("amplitude") or 1.0)
-        freq = float(self.params.get("frequency") or 1.0)
-        offset = float(self.params.get("offset") or 0.0)
-        signal_type = str(self.params.get("signalType") or "sine")
-        phase = 2.0 * math.pi * freq * elapsed
-        if signal_type == "square":
-            value = offset + amp * (1.0 if math.sin(phase) >= 0 else -1.0)
-        elif signal_type == "triangle":
-            value = offset + amp * (2.0 / math.pi) * math.asin(math.sin(phase))
-        else:
-            value = offset + amp * math.sin(phase)
+        sample_time = max(0.0, float(self.params.get("sampleTime") or 0.0))
+        if sample_time > 0:
+            last_sample_at = self.state.get("fg_last_sample_at")
+            if last_sample_at is not None and now - float(last_sample_at) < sample_time:
+                self.publish("out1", {"data": float(self.state.get("fg_last_value") or 0.0)})
+                return
+            self.state["fg_last_sample_at"] = now
+        value = self._function_generator_value(elapsed)
+        self.state["fg_last_value"] = float(value)
         self.publish("out1", {"data": float(value)})
+
+    def _function_generator_value(self, elapsed: float) -> float:
+        # Matches the editor's Function Generator semantics (phase in radians).
+        p = self.params
+        signal_type = str(p.get("signalType") or "sine")
+        amplitude = float(p.get("amplitude") if p.get("amplitude") is not None else 1.0)
+        bias = float(p.get("bias") if p.get("bias") is not None else 0.0)
+        frequency = float(p.get("frequency") if p.get("frequency") is not None else 1.0)
+        phase = float(p.get("phase") if p.get("phase") is not None else 0.0)
+        if signal_type == "step":
+            step_time = max(0.0, float(p.get("stepTime") if p.get("stepTime") is not None else 1.0))
+            initial = float(p.get("initialValue") if p.get("initialValue") is not None else 0.0)
+            final = float(p.get("finalValue") if p.get("finalValue") is not None else 0.0)
+            return final if elapsed >= step_time else initial
+        if signal_type == "square":
+            duty = max(0.0, min(100.0, float(p.get("dutyCycle") if p.get("dutyCycle") is not None else 50.0))) / 100.0
+            if frequency <= 0:
+                return bias + amplitude
+            pos = ((elapsed * frequency) + phase / (2.0 * math.pi)) % 1.0
+            return bias + (amplitude if pos < duty else -amplitude)
+        if signal_type == "ramp":
+            return bias + float(p.get("rampSlope") if p.get("rampSlope") is not None else 1.0) * elapsed
+        if signal_type == "chirp":
+            start = float(p.get("chirpStartFrequency") if p.get("chirpStartFrequency") is not None else 0.1)
+            end = float(p.get("chirpEndFrequency") if p.get("chirpEndFrequency") is not None else 10.0)
+            duration = max(0.001, float(p.get("chirpDuration") if p.get("chirpDuration") is not None else 10.0))
+            k = (end - start) / duration
+            t = min(elapsed, duration)
+            return bias + amplitude * math.sin(2.0 * math.pi * (start * t + 0.5 * k * t * t) + phase)
+        if signal_type == "white_noise":
+            import random as _random
+
+            rng = self.state.get("fg_noise_rng")
+            if not isinstance(rng, _random.Random):
+                rng = _random.Random(int(float(p.get("noiseSeed") or 0.0)))
+                self.state["fg_noise_rng"] = rng
+            mean = float(p.get("noiseMean") if p.get("noiseMean") is not None else 0.0)
+            std = max(0.0, float(p.get("noiseStd") if p.get("noiseStd") is not None else 1.0))
+            return bias + rng.gauss(mean, std)
+        return bias + amplitude * math.sin(2.0 * math.pi * frequency * elapsed + phase)
 
     def _tick_video(self) -> None:
         import cv2
