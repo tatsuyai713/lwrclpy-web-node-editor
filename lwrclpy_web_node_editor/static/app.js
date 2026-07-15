@@ -3167,8 +3167,12 @@ function updateRunStatus(data) {
     return;
   }
   updateStatus(data);
-  updateNodeViews(data.nodes || {});
   const run = data.run || {};
+  const stopRequested = state.runState === 'stopping' || state.runState === 'stopped';
+  if (stopRequested && run.running) {
+    return;
+  }
+  updateNodeViews(data.nodes || {});
   state.tickCount = Number(run.tickCount || 0);
   if (run.error) {
     setExecutionStatus('error', `Server run error: ${run.error}`);
@@ -3238,6 +3242,7 @@ async function stopWorkers(force = false) {
       setExecutionStatus('stopping', 'Stop is taking too long, escalating to force stop');
       return await stopWorkers(true);
     }
+    freezeAllPlotViews();
     setExecutionStatus('stopped', `${force ? 'Force stopped' : 'Stopped'} ${count} worker process${count === 1 ? '' : 'es'}`);
     return data;
   } catch (err) {
