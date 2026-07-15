@@ -27,6 +27,7 @@ Image samples contain an embedded image. Video samples contain an embedded base 
 - `llm/18_ollama_llm_string_view.json`: one-shot prompt publisher into built-in LLM Text, with the response shown in String Viewer.
 - `llm/20_interactive_llm_chat.json`: run-time prompt entry through Interactive Text Input into built-in LLM Text, with responses shown in Chat String Viewer.
 - `signals/07_function_generator_wave_suite.json`: four built-in Function Generator nodes for sine, step, chirp, and white-noise signals.
+- `cpp/21_cpp_low_pass_filter.json`: C++ custom node that low-pass filters a noisy `Float32` stream in the Subscribe Callback and publishes the result to Graph Viewer.
 
 ## Image And Video Processing
 
@@ -51,6 +52,16 @@ Image samples contain an embedded image. Video samples contain an embedded base 
 
 - `custom_runtime/10_multi_timer_counter_graph.json`: one custom node with two Timer callbacks. The fast timer publishes `/sample10/fast_count`, and the slow timer publishes `/sample10/slow_count`.
 - `custom_runtime/11_manual_subscriber_timer_sampler.json`: Function Generator publishes a square wave. A custom node has Subscriber callback disabled, reads the latest input from a Timer callback, and publishes raw and filtered signals.
+
+## C++ Custom Nodes
+
+These samples require `lwrcl` with the FastDDS backend plus `cmake` and a C++ compiler. During Web `Run`, each C++ node is generated and built under `.node_workers/cpp/<node-id>/`, then launched as a worker process.
+
+In C++ custom nodes, `Header` is inserted after generated includes and can contain extra includes, helper functions, class definitions, structs, and static objects. `Initialize Code` runs once before Loop/Timer callbacks start, while Callback/Loop/Timer code runs in generated methods.
+
+- `cpp/21_cpp_low_pass_filter.json`: Function Generator publishes white noise into a C++ low-pass filter node whose Subscribe Callback publishes the filtered value.
+- `cpp/22_cpp_signal_mixer.json`: two Function Generator sources feed a C++ mixer node that publishes sum and difference streams.
+- `cpp/23_cpp_image_threshold.json`: embedded image input feeds a C++ threshold node that publishes an image mask and a bright-pixel ratio.
 
 ## Deep Learning
 

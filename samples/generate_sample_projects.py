@@ -11,6 +11,10 @@ from pathlib import Path
 OUT_DIR = Path(__file__).resolve().parent
 DEFAULT_PYTHON_VERSION = "3.13"
 DEFAULT_LWRCLPY_VERSION = "0.5.1"
+DEFAULT_CPP_NOOP_LOOP = """rclcpp::spin_some(node);
+// No periodic work by default.
+loop_rate.sleep();
+"""
 
 
 def png_data_url(width: int, height: int, rgb: list[int]) -> str:
@@ -286,6 +290,80 @@ else:
 	publish("filtered", {"data": float(state["filtered"])})
 """
 
+CPP_LOW_PASS_HEADER = """class LowPassFilter {
+public:
+  void configure(double alpha) {
+    alpha_ = alpha;
+    initialized_ = false;
+    value_ = 0.0;
+  }
+
+  double update(double raw) {
+    if (!initialized_) {
+      value_ = raw;
+      initialized_ = true;
+      return value_;
+    }
+    value_ = value_ * (1.0 - alpha_) + raw * alpha_;
+    return value_;
+  }
+
+private:
+  double alpha_ = 0.1;
+  double value_ = 0.0;
+  bool initialized_ = false;
+};
+
+static LowPassFilter filter;
+"""
+
+CPP_LOW_PASS_INIT_CODE = """filter.configure(0.08);
+"""
+
+CPP_LOW_PASS_CODE = """const double raw = static_cast<double>(msg.data);
+const double filtered = filter.update(raw);
+std_msgs::msg::Float32 out;
+out.data = static_cast<float>(filtered);
+publish_filtered(out);
+"""
+
+CPP_SIGNAL_MIXER_CODE = """rclcpp::spin_some(node);
+if (has_a() && has_b()) {
+  const double a = static_cast<double>(latest_a()->data);
+  const double b = static_cast<double>(latest_b()->data);
+  std_msgs::msg::Float32 sum;
+  sum.data = static_cast<float>(a + b);
+  publish_sum(sum);
+  std_msgs::msg::Float32 diff;
+  diff.data = static_cast<float>(a - b);
+  publish_difference(diff);
+}
+loop_rate.sleep();
+"""
+
+CPP_IMAGE_THRESHOLD_CODE = """const auto* src = &msg;
+sensor_msgs::msg::Image mask = *src;
+mask.encoding = "rgb8";
+mask.step = src->width * 3;
+mask.data.resize(static_cast<size_t>(src->width) * static_cast<size_t>(src->height) * 3);
+double bright_pixels = 0.0;
+for (size_t i = 0; i + 2 < src->data.size() && i + 2 < mask.data.size(); i += 3) {
+  const int y = (static_cast<int>(src->data[i]) + static_cast<int>(src->data[i + 1]) + static_cast<int>(src->data[i + 2])) / 3;
+  const uint8_t v = y >= 120 ? 255 : 0;
+  mask.data[i] = v;
+  mask.data[i + 1] = v;
+  mask.data[i + 2] = v;
+  if (v) {
+    bright_pixels += 1.0;
+  }
+}
+publish_mask(mask);
+std_msgs::msg::Float32 ratio;
+const double pixel_count = static_cast<double>(src->width) * static_cast<double>(src->height);
+ratio.data = static_cast<float>(bright_pixels / (pixel_count > 0.0 ? pixel_count : 1.0));
+publish_bright_ratio(ratio);
+"""
+
 
 def image_input(node_id: str, name: str, x: int, y: int, image: dict, video: bool = False) -> dict:
 	params_key = "frameMessage" if video else "imageMessage"
@@ -440,6 +518,32 @@ def custom_node(
 		"lwrclpyVersion": DEFAULT_LWRCLPY_VERSION,
 		"params": params or {},
 	}
+
+
+def cpp_custom_node(
+	node_id: str,
+	name: str,
+	x: int,
+	y: int,
+	inputs: list[tuple[str, str, str]],
+	outputs: list[tuple[str, str, str]],
+	cpp_code: str,
+	params: dict | None = None,
+	code_kind: str = "loop",
+	header_code: str = "",
+	initialize_code: str = "",
+) -> dict:
+	node = custom_node(node_id, name, x, y, inputs, outputs, "", params=params)
+	node["language"] = "cpp"
+	node["cppCode"] = initialize_code
+	node["loopCode"] = cpp_code if code_kind == "loop" else DEFAULT_CPP_NOOP_LOOP
+	node["importCode"] = header_code
+	node["requirements"] = ""
+	node["timers"] = []
+	node["timerEnabled"] = False
+	if code_kind == "callback" and node["inputs"]:
+		node["inputs"][0]["callbackCode"] = cpp_code
+	return node
 
 
 def link(link_id: str, a: str, ap: str, b: str, bp: str, name: str) -> dict:
@@ -675,6 +779,49 @@ def build_projects() -> dict[str, dict]:
 		link("l3", "n1", "out1", "n4", "in1", "/sample12/save_input_image"),
 	]
 	projects["image_video/12_image_view_save_topic_output.json"] = project(nodes, links, 5)
+
+	nodes = [
+		function_generator("n1", -520, -110, "noisy_signal", {"signalType": "white_noise", "noiseMean": 0, "noiseStd": 0.35, "noiseSeed": 21, "publishHz": 100}),
+		cpp_custom_node("n2", "cpp_low_pass_filter", -145, -110, [("in", "signal", "std_msgs/msg/Float32")], [("filtered", "filtered", "std_msgs/msg/Float32")], CPP_LOW_PASS_CODE, code_kind="callback", header_code=CPP_LOW_PASS_HEADER, initialize_code=CPP_LOW_PASS_INIT_CODE),
+		graph_view("n3", 245, -205, x_axis_seconds=8, y_axis_mode="fixed", y_min=-1.0, y_max=1.0),
+		topic_output("n4", 575, -205, "std_msgs/msg/Float32"),
+	]
+	links = [
+		link("l1", "n1", "out1", "n2", "in", "/sample21/noisy_signal"),
+		link("l2", "n2", "filtered", "n3", "in1", "/sample21/filtered_signal"),
+		link("l3", "n2", "filtered", "n4", "in1", "/sample21/filtered_signal"),
+	]
+	projects["cpp/21_cpp_low_pass_filter.json"] = project(nodes, links, 5)
+
+	nodes = [
+		function_generator("n1", -560, -210, "sine_source", {"signalType": "sine", "frequency": 1.0, "amplitude": 1.0, "publishHz": 100}),
+		function_generator("n2", -560, 20, "step_source", {"signalType": "step", "stepTime": 2.0, "initialValue": -0.4, "finalValue": 0.6, "publishHz": 100}),
+		cpp_custom_node("n3", "cpp_signal_mixer", -160, -100, [("a", "a", "std_msgs/msg/Float32"), ("b", "b", "std_msgs/msg/Float32")], [("sum", "sum", "std_msgs/msg/Float32"), ("difference", "difference", "std_msgs/msg/Float32")], CPP_SIGNAL_MIXER_CODE),
+		graph_view("n4", 250, -210, x_axis_seconds=8, y_axis_mode="fixed", y_min=-1.8, y_max=1.8),
+		graph_view("n5", 250, 40, x_axis_seconds=8, y_axis_mode="fixed", y_min=-1.8, y_max=1.8),
+	]
+	links = [
+		link("l1", "n1", "out1", "n3", "a", "/sample22/sine"),
+		link("l2", "n2", "out1", "n3", "b", "/sample22/step"),
+		link("l3", "n3", "sum", "n4", "in1", "/sample22/sum"),
+		link("l4", "n3", "difference", "n5", "in1", "/sample22/difference"),
+	]
+	projects["cpp/22_cpp_signal_mixer.json"] = project(nodes, links, 6)
+
+	nodes = [
+		image_input("n1", "embedded_cpp_threshold_input", -540, -130, img_c),
+		cpp_custom_node("n2", "cpp_image_threshold", -175, -160, [("image", "image", "sensor_msgs/msg/Image")], [("mask", "mask", "sensor_msgs/msg/Image"), ("bright_ratio", "bright_ratio", "std_msgs/msg/Float32")], CPP_IMAGE_THRESHOLD_CODE, code_kind="callback"),
+		image_view("n3", 250, -230),
+		graph_view("n4", 250, 35, x_axis_seconds=8, y_axis_mode="fixed", y_min=0, y_max=1),
+		topic_output("n5", 585, 35, "std_msgs/msg/Float32"),
+	]
+	links = [
+		link("l1", "n1", "out1", "n2", "image", "/sample23/input_image"),
+		link("l2", "n2", "mask", "n3", "in1", "/sample23/threshold_mask"),
+		link("l3", "n2", "bright_ratio", "n4", "in1", "/sample23/bright_ratio"),
+		link("l4", "n2", "bright_ratio", "n5", "in1", "/sample23/bright_ratio"),
+	]
+	projects["cpp/23_cpp_image_threshold.json"] = project(nodes, links, 6)
 
 	return projects
 

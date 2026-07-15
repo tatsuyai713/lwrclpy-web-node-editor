@@ -4,9 +4,9 @@
   "nodes": [
     {
       "id": "n1",
-      "name": "function_generator",
-      "x": -440,
-      "y": -100,
+      "name": "noisy_signal",
+      "x": -520,
+      "y": -110,
       "inputs": [],
       "outputs": [
         {
@@ -16,7 +16,7 @@
         }
       ],
       "params": {
-        "signalType": "square",
+        "signalType": "white_noise",
         "amplitude": 1,
         "bias": 0,
         "frequency": 1,
@@ -33,60 +33,50 @@
         "chirpEndFrequency": 10,
         "chirpDuration": 10,
         "noiseMean": 0,
-        "noiseStd": 1,
-        "noiseSeed": 1
+        "noiseStd": 0.35,
+        "noiseSeed": 21
       },
       "loopCode": "",
       "toolType": "function_generator"
     },
     {
       "id": "n2",
-      "name": "manual_subscriber_sampler",
-      "x": -40,
-      "y": -100,
+      "name": "cpp_low_pass_filter",
+      "x": -145,
+      "y": -110,
       "inputs": [
         {
           "id": "in",
           "name": "signal",
           "dataType": "std_msgs/msg/Float32",
-          "receiveMode": "manual",
-          "callbackCode": ""
+          "receiveMode": "callback",
+          "callbackCode": "const double raw = static_cast<double>(msg.data);\nconst double filtered = filter.update(raw);\nstd_msgs::msg::Float32 out;\nout.data = static_cast<float>(filtered);\npublish_filtered(out);\n"
         }
       ],
       "outputs": [
-        {
-          "id": "raw",
-          "name": "raw",
-          "dataType": "std_msgs/msg/Float32"
-        },
         {
           "id": "filtered",
           "name": "filtered",
           "dataType": "std_msgs/msg/Float32"
         }
       ],
-      "loopCode": "",
-      "timers": [
-        {
-          "id": "sample_timer",
-          "name": "sample_timer",
-          "periodSec": 0.02,
-          "callbackCode": "value = latest(\"in\")\nif value is None:\n\treturn_value = None\nelse:\n\traw = value.get(\"data\", 0.0) if isinstance(value, dict) else getattr(value, \"data\", 0.0)\n\tstate[\"last_raw\"] = float(raw)\n\tstate[\"filtered\"] = state.get(\"filtered\", float(raw)) * 0.85 + float(raw) * 0.15\n\tpublish(\"raw\", {\"data\": float(raw)})\n\tpublish(\"filtered\", {\"data\": float(state[\"filtered\"])})\n"
-        }
-      ],
-      "timerEnabled": true,
-      "timerPeriodSec": 0.02,
-      "timerCode": "value = latest(\"in\")\nif value is None:\n\treturn_value = None\nelse:\n\traw = value.get(\"data\", 0.0) if isinstance(value, dict) else getattr(value, \"data\", 0.0)\n\tstate[\"last_raw\"] = float(raw)\n\tstate[\"filtered\"] = state.get(\"filtered\", float(raw)) * 0.85 + float(raw) * 0.15\n\tpublish(\"raw\", {\"data\": float(raw)})\n\tpublish(\"filtered\", {\"data\": float(state[\"filtered\"])})\n",
-      "importCode": "",
+      "loopCode": "rclcpp::spin_some(node);\n// No periodic work by default.\nloop_rate.sleep();\n",
+      "timers": [],
+      "timerEnabled": false,
+      "timerPeriodSec": 1.0,
+      "timerCode": "",
+      "importCode": "class LowPassFilter {\npublic:\n  void configure(double alpha) {\n    alpha_ = alpha;\n    initialized_ = false;\n    value_ = 0.0;\n  }\n\n  double update(double raw) {\n    if (!initialized_) {\n      value_ = raw;\n      initialized_ = true;\n      return value_;\n    }\n    value_ = value_ * (1.0 - alpha_) + raw * alpha_;\n    return value_;\n  }\n\nprivate:\n  double alpha_ = 0.1;\n  double value_ = 0.0;\n  bool initialized_ = false;\n};\n\nstatic LowPassFilter filter;\n",
       "requirements": "",
       "pythonVersion": "3.13",
       "lwrclpyVersion": "0.5.1",
-      "params": {}
+      "params": {},
+      "language": "cpp",
+      "cppCode": "filter.configure(0.08);\n"
     },
     {
       "id": "n3",
       "name": "graph_view",
-      "x": 330,
+      "x": 245,
       "y": -205,
       "inputs": [
         {
@@ -103,37 +93,30 @@
         "sampleLimit": 10000,
         "xAxisSeconds": 8,
         "yAxisMode": "fixed",
-        "yMin": -1.2,
-        "yMax": 1.2
+        "yMin": -1.0,
+        "yMax": 1.0
       },
       "loopCode": "",
       "toolType": "graph_view"
     },
     {
       "id": "n4",
-      "name": "graph_view",
-      "x": 330,
-      "y": 45,
+      "name": "topic_output",
+      "x": 575,
+      "y": -205,
       "inputs": [
         {
           "id": "in1",
-          "name": "value",
+          "name": "topic",
           "dataType": "std_msgs/msg/Float32",
           "receiveMode": "manual",
           "callbackCode": ""
         }
       ],
       "outputs": [],
-      "params": {
-        "fieldPath": "data",
-        "sampleLimit": 10000,
-        "xAxisSeconds": 8,
-        "yAxisMode": "fixed",
-        "yMin": -1.2,
-        "yMax": 1.2
-      },
+      "params": {},
       "loopCode": "",
-      "toolType": "graph_view"
+      "toolType": "topic_output"
     }
   ],
   "links": [
@@ -143,15 +126,15 @@
       "fromPort": "out1",
       "toNode": "n2",
       "toPort": "in",
-      "name": "/sample11/source_signal"
+      "name": "/sample21/noisy_signal"
     },
     {
       "id": "l2",
       "fromNode": "n2",
-      "fromPort": "raw",
+      "fromPort": "filtered",
       "toNode": "n3",
       "toPort": "in1",
-      "name": "/sample11/raw"
+      "name": "/sample21/filtered_signal"
     },
     {
       "id": "l3",
@@ -159,7 +142,7 @@
       "fromPort": "filtered",
       "toNode": "n4",
       "toPort": "in1",
-      "name": "/sample11/filtered"
+      "name": "/sample21/filtered_signal"
     }
   ],
   "view": {

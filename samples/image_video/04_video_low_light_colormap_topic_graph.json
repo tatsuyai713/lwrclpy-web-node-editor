@@ -9296,9 +9296,9 @@
       "timerCode": "",
       "importCode": "from std_msgs.msg import Float32\n",
       "requirements": "",
-      "params": {},
       "pythonVersion": "3.13",
-      "lwrclpyVersion": "0.5.1"
+      "lwrclpyVersion": "0.5.1",
+      "params": {}
     },
     {
       "id": "n3",
@@ -9328,9 +9328,9 @@
       "timerCode": "",
       "importCode": "",
       "requirements": "",
-      "params": {},
       "pythonVersion": "3.13",
-      "lwrclpyVersion": "0.5.1"
+      "lwrclpyVersion": "0.5.1",
+      "params": {}
     },
     {
       "id": "n4",

@@ -26,6 +26,7 @@ from multiprocessing import shared_memory
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from . import graph as graph_module
+from .cpp_codegen import render_cpp_node_cmake, render_cpp_node_source, render_cpp_workspace_cmake
 from .graph import GraphRuntime
 from .runtime_exec import (
     LWRCLPY_LOCAL_WHEEL_INSTALLED_ENV,
@@ -1083,6 +1084,18 @@ def _infer_export_link_types(src_port: dict[str, Any] | None, dst_port: dict[str
         dst_port["dataType"] = src_type
 
 
+def _node_language(node: dict[str, Any] | None) -> str:
+    return str((node or {}).get("language") or "python").strip().lower()
+
+
+def _is_cpp_node(node: dict[str, Any] | None) -> bool:
+    return _node_language(node) in {"cpp", "c++"}
+
+
+def _is_python_runtime_export_node(node: dict[str, Any]) -> bool:
+    return str(node.get("toolType") or "") not in EXPORT_EXCLUDED_TOOL_TYPES and not _is_cpp_node(node)
+
+
 def _export_runtime_payload(payload: dict) -> dict[str, Any]:
     source_nodes = [
         node for node in (payload.get("nodes") if isinstance(payload.get("nodes"), list) else [])
@@ -1092,7 +1105,7 @@ def _export_runtime_payload(payload: dict) -> dict[str, Any]:
     nodes = [
         json.loads(json.dumps(node, default=str))
         for node in source_nodes
-        if str(node.get("toolType") or "") not in EXPORT_EXCLUDED_TOOL_TYPES
+        if _is_python_runtime_export_node(node)
     ]
     runtime_by_id = {str(node.get("id") or ""): node for node in nodes}
     active_ids = {str(node.get("id") or "") for node in nodes}
@@ -1124,7 +1137,21 @@ def _export_runtime_payload(payload: dict) -> dict[str, Any]:
             _append_export_port_topic(dst_port, topic)
             _mark_export_external(dst_runtime)
             continue
+        if _is_cpp_node(src_source) and dst_runtime is not None:
+            src_port = _find_port(src_source, "outputs", link.get("fromPort"))
+            dst_port = _find_port(dst_runtime, "inputs", link.get("toPort"))
+            _infer_export_link_types(src_port, dst_port)
+            _append_export_port_topic(dst_port, topic)
+            _mark_export_external(dst_runtime)
+            continue
         if src_runtime is not None and str(dst_source.get("toolType") if dst_source else "") == "topic_output":
+            src_port = _find_port(src_runtime, "outputs", link.get("fromPort"))
+            dst_port = _find_port(dst_source, "inputs", link.get("toPort"))
+            _infer_export_link_types(src_port, dst_port)
+            _append_export_port_topic(src_port, topic)
+            _mark_export_external(src_runtime)
+            continue
+        if src_runtime is not None and _is_cpp_node(dst_source):
             src_port = _find_port(src_runtime, "outputs", link.get("fromPort"))
             dst_port = _find_port(dst_source, "inputs", link.get("toPort"))
             _infer_export_link_types(src_port, dst_port)
@@ -1144,14 +1171,22 @@ def _export_runtime_payload(payload: dict) -> dict[str, Any]:
 def _build_cli_export_zip(payload: dict) -> tuple[str, bytes]:
     project_name = _cli_export_project_name(payload)
     project_payload = _export_runtime_payload(payload)
+    cpp_nodes = _cpp_export_nodes(payload)
     root = f"{project_name}_cli"
     buffer = io.BytesIO()
     wheel = local_lwrclpy_wheel()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(f"{root}/project.json", json.dumps(project_payload, ensure_ascii=False, indent=2, default=str) + "\n")
-        archive.writestr(f"{root}/README.md", _render_cli_export_readme(project_name, wheel))
+        archive.writestr(f"{root}/README.md", _render_cli_export_readme(project_name, wheel, cpp_nodes))
         archive.writestr(f"{root}/requirements.txt", _render_cli_export_requirements(wheel))
         archive.writestr(f"{root}/run_project.py", _render_cli_package_run_project(wheel))
+        if cpp_nodes:
+            archive.writestr(f"{root}/cpp_nodes/CMakeLists.txt", _render_cpp_workspace_cmake(cpp_nodes))
+            archive.writestr(f"{root}/build_cpp_nodes.sh", _render_cpp_build_script())
+            for cpp_node in cpp_nodes:
+                node_dir = f"{root}/cpp_nodes/{cpp_node['package_name']}"
+                archive.writestr(f"{node_dir}/CMakeLists.txt", _render_cpp_node_cmake(cpp_node))
+                archive.writestr(f"{node_dir}/src/{cpp_node['executable_name']}.cpp", _render_cpp_node_source(cpp_node))
         for source in _cli_package_runtime_files():
             archive.write(source, f"{root}/lwrclpy_web_node_editor/{source.name}")
         if wheel is not None and wheel.is_file():
@@ -1174,6 +1209,136 @@ def _cli_package_runtime_files() -> list[Path]:
         "mcap_record_worker.py",
     ]
     return [package_dir / name for name in names if (package_dir / name).is_file()]
+
+
+def _safe_cpp_identifier(value: object, fallback: str = "node") -> str:
+    text = re.sub(r"[^A-Za-z0-9_]", "_", str(value or "").strip())
+    if not text:
+        text = fallback
+    if text[0].isdigit():
+        text = f"n_{text}"
+    return text
+
+
+def _cpp_type(data_type: object) -> str:
+    parts = str(data_type or "std_msgs/msg/String").replace(".", "/").split("/")
+    if len(parts) != 3:
+        parts = ["std_msgs", "msg", "String"]
+    package, kind, name = parts
+    namespace = "msg" if kind == "msg" else kind
+    return f"{package}::{namespace}::{name}"
+
+
+def _is_cpp_message_type(data_type: object) -> bool:
+    parts = str(data_type or "").replace(".", "/").split("/")
+    return len(parts) == 3 and parts[1] == "msg" and _valid_ros_type_name(data_type)
+
+
+def _cpp_include(data_type: object) -> str:
+    parts = str(data_type or "std_msgs/msg/String").replace(".", "/").split("/")
+    if len(parts) != 3:
+        parts = ["std_msgs", "msg", "String"]
+    package, kind, name = parts
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+    return f"{package}/{kind}/{snake}.hpp"
+
+
+def _cpp_string_literal(value: object) -> str:
+    return json.dumps(str(value or ""), ensure_ascii=True)
+
+
+def _cpp_message_packages_for_node(node: dict[str, Any]) -> list[str]:
+    packages: set[str] = set()
+    for direction in ("inputs", "outputs"):
+        for port in node.get(direction, []) if isinstance(node.get(direction), list) else []:
+            if not isinstance(port, dict):
+                continue
+            parts = str(port.get("dataType") or "").replace(".", "/").split("/")
+            if len(parts) == 3 and re.fullmatch(r"[a-z][a-z0-9_]*", parts[0]):
+                packages.add(parts[0])
+    return sorted(packages)
+
+
+def _cpp_export_nodes(payload: dict) -> list[dict[str, Any]]:
+    source_nodes = [
+        node for node in (payload.get("nodes") if isinstance(payload.get("nodes"), list) else [])
+        if isinstance(node, dict)
+    ]
+    source_by_id = {str(node.get("id") or ""): node for node in source_nodes}
+    cpp_nodes = [json.loads(json.dumps(node, default=str)) for node in source_nodes if _is_cpp_node(node) and not node.get("toolType")]
+    cpp_by_id = {str(node.get("id") or ""): node for node in cpp_nodes}
+    used_packages: set[str] = set()
+    for index, node in enumerate(cpp_nodes, start=1):
+        base = re.sub(r"[^a-z0-9_]", "_", str(node.get("name") or node.get("id") or f"cpp_node_{index}").lower()).strip("_") or f"cpp_node_{index}"
+        if base[0].isdigit():
+            base = f"node_{base}"
+        name = base
+        suffix = 2
+        while name in used_packages:
+            name = f"{base}_{suffix}"
+            suffix += 1
+        used_packages.add(name)
+        node["package_name"] = name
+        node["executable_name"] = name
+        node["ros_node_name"] = name
+        node["class_name"] = _safe_cpp_identifier("".join(part.capitalize() for part in name.split("_")), "GeneratedNode")
+        node["message_packages"] = _cpp_message_packages_for_node(node)
+        node["importCode"] = str(node.get("importCode") or "")
+        node["loopCode"] = str(node.get("loopCode") or "")
+        node["requirements"] = str(node.get("requirements") or "")
+        node["cppCode"] = str(node.get("cppCode") or "")
+        node["timers"] = [timer for timer in (node.get("timers") if isinstance(node.get("timers"), list) else []) if isinstance(timer, dict)]
+        for direction in ("inputs", "outputs"):
+            for port in node.get(direction, []) if isinstance(node.get(direction), list) else []:
+                if isinstance(port, dict):
+                    port["topics"] = []
+    for raw_link in (payload.get("links") if isinstance(payload.get("links"), list) else []):
+        if not isinstance(raw_link, dict):
+            continue
+        src = source_by_id.get(str(raw_link.get("fromNode") or ""))
+        dst = source_by_id.get(str(raw_link.get("toNode") or ""))
+        topic = _normalize_export_topic(raw_link.get("name") or f"/{raw_link.get('fromNode')}_{raw_link.get('fromPort')}_to_{raw_link.get('toNode')}_{raw_link.get('toPort')}")
+        if str(raw_link.get("fromNode") or "") in cpp_by_id:
+            port = _find_port(cpp_by_id[str(raw_link.get("fromNode"))], "outputs", raw_link.get("fromPort"))
+            _infer_export_link_types(port, _find_port(dst, "inputs", raw_link.get("toPort")))
+            _append_export_port_topic(port, topic)
+        if str(raw_link.get("toNode") or "") in cpp_by_id:
+            port = _find_port(cpp_by_id[str(raw_link.get("toNode"))], "inputs", raw_link.get("toPort"))
+            _infer_export_link_types(_find_port(src, "outputs", raw_link.get("fromPort")), port)
+            _append_export_port_topic(port, topic)
+    return cpp_nodes
+
+
+def _render_cpp_workspace_cmake(cpp_nodes: list[dict[str, Any]]) -> str:
+    return render_cpp_workspace_cmake([str(node["package_name"]) for node in cpp_nodes])
+
+
+def _render_cpp_node_cmake(node: dict[str, Any]) -> str:
+    return render_cpp_node_cmake(node)
+
+
+def _render_cpp_node_source(node: dict[str, Any]) -> str:
+    return render_cpp_node_source(node, run_hz=GRAPH_RUN_HZ)
+
+
+def _indent_cpp_user_code(code: str, spaces: int) -> str:
+    text = code.strip() or "// Add C++ logic here."
+    prefix = " " * spaces
+    return "\n".join(prefix + line if line.strip() else "" for line in text.splitlines())
+
+
+def _render_cpp_build_script() -> str:
+    return """#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="${ROOT}/cpp_build"
+
+cmake -S "${ROOT}/cpp_nodes" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release
+cmake --build "${BUILD_DIR}" --parallel
+
+echo "Built C++ nodes under ${BUILD_DIR}."
+"""
 
 
 def _render_cli_package_run_project(wheel: Path | None) -> str:
@@ -1212,6 +1377,7 @@ def _build_ros2_export_zip(payload: dict) -> tuple[str, bytes]:
     if package_name[0].isdigit():
         package_name = f"pkg_{package_name}"
     project_payload = _export_runtime_payload(payload)
+    cpp_nodes = _cpp_export_nodes(payload)
     root = f"{project_name}_ros2"
     runner_text = (PROJECT_DIR / "lwrclpy_web_node_editor" / "cli_export_runner.py").read_text(encoding="utf-8")
     buffer = io.BytesIO()
@@ -1226,6 +1392,13 @@ def _build_ros2_export_zip(payload: dict) -> tuple[str, bytes]:
         archive.writestr(f"{base}/{package_name}/runner.py", runner_text)
         archive.writestr(f"{base}/{package_name}/project.json", json.dumps(project_payload, ensure_ascii=False, indent=2, default=str) + "\n")
         archive.writestr(f"{base}/launch/{project_name}.launch.py", _render_ros2_runner_launch_py(package_name))
+        if cpp_nodes:
+            archive.writestr(f"{root}/cpp_nodes/CMakeLists.txt", _render_cpp_workspace_cmake(cpp_nodes))
+            archive.writestr(f"{root}/build_cpp_nodes.sh", _render_cpp_build_script())
+            for cpp_node in cpp_nodes:
+                node_dir = f"{root}/cpp_nodes/{cpp_node['package_name']}"
+                archive.writestr(f"{node_dir}/CMakeLists.txt", _render_cpp_node_cmake(cpp_node))
+                archive.writestr(f"{node_dir}/src/{cpp_node['executable_name']}.cpp", _render_cpp_node_source(cpp_node))
     return f"{project_name}_ros2_package.zip", buffer.getvalue()
 
 
@@ -1256,6 +1429,17 @@ ros2 launch {package_name} {project_name}.launch.py
 ```
 
 External image/video paths stored in `project.json` must exist on the target machine.
+
+## C++ / lwrcl nodes
+
+If the project contains C++ nodes, this archive also includes `cpp_nodes/` and `build_cpp_nodes.sh`.
+Install and build `tatsuyai713/lwrcl` with the FastDDS backend first, then run:
+
+```bash
+./build_cpp_nodes.sh
+```
+
+The C++ executables communicate with the Python runner via the same DDS topic names stored in the exported graph.
 """
 
 
@@ -1382,7 +1566,7 @@ def _render_cli_export_requirements(wheel: Path | None, project_payload: dict | 
     return "\n".join(lines) + "\n"
 
 
-def _render_cli_export_readme(project_name: str, wheel: Path | None) -> str:
+def _render_cli_export_readme(project_name: str, wheel: Path | None, cpp_nodes: list[dict[str, Any]] | None = None) -> str:
     wheel_text = (
         f"- Bundled lwrclpy wheel: `wheels/{wheel.name}`\n"
         if wheel is not None and wheel.is_file()
@@ -1436,6 +1620,41 @@ Without `--duration`, the project runs until interrupted.
 - External image/video paths stored in the project must exist on the target PC, or you must edit `project.json`.
 - The package includes only the CLI graph runtime and worker scripts needed to run the project. It does not include the web UI.
 - For ROS 2/DDS communication across machines, make sure both PCs use compatible `ROS_DOMAIN_ID`, network interfaces, and QoS settings.
+{_render_cli_cpp_readme_section(cpp_nodes or [])}
+"""
+
+
+def _render_cli_cpp_readme_section(cpp_nodes: list[dict[str, Any]]) -> str:
+    if not cpp_nodes:
+        return ""
+    names = "\n".join(f"- `{node['package_name']}`" for node in cpp_nodes)
+    return f"""
+
+## C++ / lwrcl nodes
+
+This export contains C++ nodes under `cpp_nodes/`:
+
+{names}
+
+Install and build `tatsuyai713/lwrcl` with the FastDDS backend first:
+
+```bash
+git clone --recursive https://github.com/tatsuyai713/lwrcl.git
+cd lwrcl
+./scripts/install_fast_dds.sh
+./build_libraries.sh fastdds install
+./build_data_types.sh fastdds install
+./build_lwrcl.sh fastdds install
+```
+
+Then build the exported C++ nodes:
+
+```bash
+./build_cpp_nodes.sh
+```
+
+Run the generated executables from `cpp_build/<node>/` alongside `run_project.py`.
+They use the same DDS topic names as the Python/lwrclpy runner.
 """
 
 

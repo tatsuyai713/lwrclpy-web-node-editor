@@ -40,9 +40,9 @@
       "timerCode": "state[\"fast_count\"] = int(state.get(\"fast_count\", 0)) + 1\npublish(\"fast\", {\"data\": float(state[\"fast_count\"])})\n",
       "importCode": "",
       "requirements": "",
-      "params": {},
       "pythonVersion": "3.13",
-      "lwrclpyVersion": "0.5.1"
+      "lwrclpyVersion": "0.5.1",
+      "params": {}
     },
     {
       "id": "n2",

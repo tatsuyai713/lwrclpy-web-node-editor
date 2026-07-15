@@ -4,9 +4,9 @@
   "nodes": [
     {
       "id": "n1",
-      "name": "embedded_color_input",
-      "x": -520,
-      "y": -120,
+      "name": "embedded_cpp_threshold_input",
+      "x": -540,
+      "y": -130,
       "inputs": [],
       "outputs": [
         {
@@ -16,7 +16,7 @@
         }
       ],
       "params": {
-        "fileName": "embedded_color_input.embedded.png",
+        "fileName": "embedded_cpp_threshold_input.embedded.png",
         "dataUrl": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAgCAIAAADbtmxLAAAO6klEQVR42n2YeVea6ZbF85n6j9blkktDcym4NFwKmhAIgRAIEhAhhFeC4CsEEacEh+A844RRFCWKE06g4oCKEedZM5lYiRUzWeZ0YirV2tV1v8FvnWefvfd5Ll37R5SIGn2LHpPAiL3DwiRxsGkiXG48vhQh1CUTXRZSZzbZl08JFFMnK2lztfSIk7HSwlx3s7Y87F0vZ6+Hu9/H2+/n7/kEuz7htk+06ROv9ksWe6XzPbLpLvmYRzHYpuxuUbkb1Y0OTWUF8rBIm5GrQ7P0d60GJBVVm4xK1CRPMsclWkRq6yURNeoWPVrJjEEuxyZdwZgF2AdSXIkaX6cnuMzErizSQB55rJgSqqQu1NFWmugbLsZuB/NZF+tlL/ugn/N6kHs4zDsc4R/6Ba/8wpd+0bMR8f6IZHtYujogi/TLZ3sUE13K4XZVj0vtdmoaHEhFhTa/SGfN1SdlGO5aUSTVeNtoSkg2y3QWCWK9dIsepWRGI5djkq7EplzFZImxhQm4Gi2+2UjoTCcO5JDGCskzFZRILXWtibbTSn/mYRx4mYd9rLcD7HcjnOMA9/0Y7/04/zgoeBcUHgVFb4LiV+OS56PSvYBsY1i+NKCY61VOeFXDHepul6bNidQ5tCVlOluB3mwzJGWg2jSjxmxSpZjj9Rap1nopgRGFXI5OuhJjvBqbJsDk3cJW3sE5DXiPheC7Txx9SJopI0dqKBtO6l4r7YWH/ks346if+X6I9cnPPhnjnE5wTyd5X6b5pyHBSUj4OST6EBK/m5a8mZQeBGVPx+SbI4rlQWW4XxX0qoc6NF0upKVRW1OtKyjRZz00JGehunRjosWkNpkTki0ynfXSHVZU0pXolKsxFn7sfRGmWIGtv4trM+J7MwiBPOJ0MSlSRV5voOy7qAcdtDde+nsf49MQ8zTAgiAbpjgQ4sIsD8J8CAsgLIR50Zew+GRO8mFWehSSvZ6UPx1XbAWUy0Oq2T71uFfja0c8zVpnva68Up9XZEjNQfWZxrtWk8ZsVqVY4vXWS3fZUSg3OvVaTMb12Pw4TJUa+0iP67Lgh+4TJuzEJ+WktVry3iPKSzf1bRftQz/9ZIgBo0wIsmCaDTMcCHPhCQ8W+BARwKIQFkUQEcOC5PSJ9OOc7NcZ+espxdOgcsOvWhxSh/o0/k6kp03b2qSrdegLSw1ZD9HkbKMu3ZRoMatNloRk6yUDJ+oeLzpdEPPgRmyxHFOHYN0puL50/FguYa6YuFxF2m4gv3BR3j6mfuil/TZIhwADgkyYZsEsG+Y5sMCFRR4s82FFACtCWBHBihiWJbAo/bIg+xiWH80oXk0p94OqNb96fkAz0YMMerSPW3TOen15pSGnEDXbjPpMkzbNfOeeRYlaLxmvRqXxo7OFMbni2HIFpukutvMebigLP5lPWCgjbjhIT5vIh27KsZd60k+DETqMM2CKCTMsmGdDhANLXFjhwRof1gSwLoR1EayLYVUCK1JYkp0uyD+EFW9mlC8mVdtj6qVhzUw/4u/UdrfpXE59TY3BXoJa84yGLNNdq1ljtqhSrJfM16Iyr0fbRDF2SWyNCuNKwvak4gL38bMFhOUK4k496aCFfOShfOqhwiANAnSYYECICWEWRNiwxIFVLqzzYIMPmwLYFMKWCDbEsCGBdSmsyGBJfrKgOA4rX0+r9oPq9YAm7EOC3Vpfh669WV9fayguR7PtxuQsky7djKRabhutl9L4UfdvROeJY4riYuvUGLcB60vDjdvw80WE9SrifgPpsJV8/Jhy2keFYRqM0WGKAbNMeMKCRTascGCdCxs82OLDtgC2hbAtgm0xbElgQwprMliRf4koPs4r386qnk+qt0Y1kSFkqlc75NE9btE3NRjKKlBbgdH04BxQxvUomyjaLokpkcY23MF4krGDVtxkDn6hmLBZTXzuJL1pI3/sokA/FUZoME6HaQbMMWGBBUtsWOPABhe2eLDNhx0B7AhhRwQ7YtiWwKYUNmSwKoclxecnyl/nVAdT6p0xzfIwEurTjjzWeVv1zY2Gyio0t9Botp0DyhJG5YqjC+NiymWxTRpMJ4odTsdN5+KXSgg7DuLLJtKRm/zZS4EBKvhpEKRDiAFhJkRYsMKGdQ5scmGbB7t82BXArhB2RbArhh0JbEthUwZrclhWnEaU78Oq19PqvXHN6ggy168d7dL1tOldTkN1Nfqw2JiWcw7o/o2o/JvRxdKYClnsIwTjTcGOpONm8vDLpYSdGuKrR6R37eTfuingo0KABhNnQPNMWPwBtMWFHR7s8GFPAHtC2DsD2v0BtC6HFcWXM6BfQuqnQc3aCBL2ace6dH1ufavT4KhB7f8H6MGNKLskukQaUyWPbT4DCmR8A1opJew5iK+aSMdfgb5P6DvQzJ+Avk/oD6C9i0DLCogoP85/A3oW1Kz7kXmfdvwrUJve3WRwVKMFxcb03HNbZhNFFUiiS2/FVMfHNmswXvQMKBe/UvIDyP0D6PuTzfzLJ9v7f57sG9DXCU2fAY0g8/0/gJw/gHJMd//woZwzoLIzoEd3vgGNWL8BLRcTdqqJr5ykd23k3/4QdfBM1OEzUS+zYfWiqL9r6Luot6Sw/ruovywo389+A3o6rlkbRsJ92rFOXV+rvrXB4KhC7UXGtAffgH536j+AauJjm9SYTgN2OA03bcMvFRF2qogvG0hHLvLnxxT4q7Vf+5drvyyHiOJ0/hvQ60n13qhmdQiZ69WOenQ9LXpXvaG6An1Y8A0oMfVHlp2fUIMS40nCDqbiJu/jF+yEzQri8zrSm2byxw4KfDXGgXPGOMeChTNjXOHC2pkxbpwZ46YINsWwLoG1M2NclMMTxec55a/TqoOgesevWR5AQl7tSLvO+0jfXGuoLENzHxrNWSbNvR9pf15D9QkYtxbru4cbz8TP5xPWy4j7DtJhE/nYTTn1UuFrdAyfRcfkX0TH2ll0rP1vdMCC/EtY8XFG+XZS9XxUvTWsifQhU53aoTbdY6e+qcZQVoLa8oymDNPtP/rQ+S2rS8C4EGwPiguk42dzCctFxJ0q0kEj+chF+eShQi8Nvoar/1y4hjkQOQvXpXPhuvx7uMITGczLT2YUx1PK1+Oqfb96fUAT7kaCHq2vRdder6+vNBQXotk2Y3LaucZ43occX8P1NrZTjxtKxU/eJyzYiRvlpKe15MNHlGM39aSLBn10+Fo/Amf1Y4oNsxfrR0QIkd/rB8xLISw7nZF/mFK8GVe+CKi2B9VLvZqZTsTfpu126lwOfU2Zwf4QtWYZdeZznfq8U9fEY+oTsG4trs+IH8sgzOURl4tJ21XkFw2Uty7qhw7ab1469DNgiAl/VdDCIgiLYU4Cs9IvIdnHSfnRuOJVQLk/pFrrU893aSbakcFm7eN6nbNSX15kyMlBzelGJMUk1ZrFdyzXlRezrFKOqVVgH6lxXQb8kIUwkU18YietlZH3HJSXjdS3rbQPHvqJlwH9TBhigZ8NYxyY4MIUD6b4EBJASAghEUyLYVpyOin9GJT9OiZ/7Vc8HVRu9KkWvepQh8bfgvQ0alurdbWl+sJ8Q1Y2mmw2JiSZbmrMQpXlWvzFtC+XYarjsfUJuDYtvtdICKQTp22kSCF5vZyyX0s9aKK9aaW/9zA+eZmnfSwYYMMwBwJcGOXBOB+CAggKISj6EhSfjEs+jEqP/LLXw/KnPsVWr3LZq5rtUI+7ND4n4nFonWW6crs+z2ZITUO1qPFWokmoMl+Lt3CkF/tQiRRTIcM6FDjnbbwnieAzE0czSTO55EgRZaOSuldLe+Gk/9LKOGpnvu9kfephn/RzTge4p0O8LyP80xHByYjws1/0YUT8bljyZkh6MCB72iff7FYsdyrD7apgi3rIqelyIC3l2ppCXUGOPivDkGxCVTrjDZXpWryZI7WwxBcbY4EEU/r16pDjHAp8s4bQmUwcSCWNZZFn8iiRYupaBW2nlv7MyThoYR62sd562O+6OMfd3Pe9vPf9/ON+wTuf8MgneuMTv+qTPO+V7nXLNjrlSx2KuTblRLNquFHd7dC0VSB1hdqSXJ0tU282GxL1qPSO8Vq8iSM1s8SWn69f7NT5NzGFcdjSW7hKOb5OSXAlErtQ0oCFPJZNCeVRF4ppKxX0jRrGbgPz2SPWSxf7oI3zuoN7+Jh32Mk/9ApeeYUvvaJnXeL9Lsn2Y+lquyzSJp9tUUw0KYfrVT01ane5pqEQqcjT5mfprKn6JIMhAUGFCuOVOBNLbP75uoXKu3h1PLiByb+JLYzDld7CV8gIdSqiS0vqRMk+CyWQTZ3Mpc0V0iNljJUq5rqDtdXA3m3i7DVz9128/Tb+Xptg1y3cdos23eLVVsmiSzrfLJt2ysfqFYMOZXelyl2qbizQVOYiDzO1Gak6NFmvTjTcTEDZEuN/i0x0gfm/rlpI7It3WeZ1zIMb2PybuAIJvkRKKJcRa1WkFi3Zg1L6LNThTNqYjT5tZ8wWMZ+UsRar2MsOzmodd7WBt+bkrzoFy07hUpNowSkON0pCDdJgncxfI++vVHSVKduKVA356kqbxp6BZJm1xmSdJlF/S2m4GocyhMZ/8k0Urvmny5b/ZFy8XC18TMZ17IMbuFwx3i4hFMURS6Qkh4rclEhxG6heM60/nT6czRjNZU7YWdNF7FAJZ66CO1fJm6viz9UIZmqEoRrRRLV4vFrir5T6ymQ9pfKOQkXLQ2Vdjqo8W223ajJNiMmgTUR0sgQ9P87wswCl8ozkKyYiy4z/2fI36p9u+9Rr2HQBLluIt4kIeWKiXUIqjCNXJlDqNdTmJFp7Cr0rldGbzvRls4ZsbH8+J2DnjhbyRov4gWKBv1g4XCwaLBb3FUm8BVKPXebKkzfaFNVZypJ0VZ5ZnYFqjDoEuaOVxesEEj1TYPgHB/3pspHANP3HP82xFEv0T3/6/UC52Hs8XBofn3mdcP8G0SYi5YrJ+TcppfHU6tu0+kT6Iz2jNYXZYWZ1WtneTE53NrfnAa83h9+TI/DmCDtzRJ4csdsmaXkgbcyW1WTIy9IUBWalLUWVlqRORjQaFSKTaQViHfOa/qfLBgITxdGNf6OaYsjmf/+75d9w1v8BSIiaOdUdxyQAAAAASUVORK5CYII=",
         "imageMessage": {
           "width": 48,
@@ -4644,8 +4644,8 @@
     },
     {
       "id": "n2",
-      "name": "contrast_stretch",
-      "x": -180,
+      "name": "cpp_image_threshold",
+      "x": -175,
       "y": -160,
       "inputs": [
         {
@@ -4653,17 +4653,22 @@
           "name": "image",
           "dataType": "sensor_msgs/msg/Image",
           "receiveMode": "callback",
-          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tlow = 255\n\thigh = 0\n\tfor v in data:\n\t\tlow = min(low, v)\n\t\thigh = max(high, v)\n\tspan = max(1, high - low)\n\tout = []\n\tfor v in data:\n\t\tout.append(max(0, min(255, int((v - low) * 255 / span))))\n\tpublish(\"contrast\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n"
+          "callbackCode": "const auto* src = &msg;\nsensor_msgs::msg::Image mask = *src;\nmask.encoding = \"rgb8\";\nmask.step = src->width * 3;\nmask.data.resize(static_cast<size_t>(src->width) * static_cast<size_t>(src->height) * 3);\ndouble bright_pixels = 0.0;\nfor (size_t i = 0; i + 2 < src->data.size() && i + 2 < mask.data.size(); i += 3) {\n  const int y = (static_cast<int>(src->data[i]) + static_cast<int>(src->data[i + 1]) + static_cast<int>(src->data[i + 2])) / 3;\n  const uint8_t v = y >= 120 ? 255 : 0;\n  mask.data[i] = v;\n  mask.data[i + 1] = v;\n  mask.data[i + 2] = v;\n  if (v) {\n    bright_pixels += 1.0;\n  }\n}\npublish_mask(mask);\nstd_msgs::msg::Float32 ratio;\nconst double pixel_count = static_cast<double>(src->width) * static_cast<double>(src->height);\nratio.data = static_cast<float>(bright_pixels / (pixel_count > 0.0 ? pixel_count : 1.0));\npublish_bright_ratio(ratio);\n"
         }
       ],
       "outputs": [
         {
-          "id": "contrast",
-          "name": "contrast",
+          "id": "mask",
+          "name": "mask",
           "dataType": "sensor_msgs/msg/Image"
+        },
+        {
+          "id": "bright_ratio",
+          "name": "bright_ratio",
+          "dataType": "std_msgs/msg/Float32"
         }
       ],
-      "loopCode": "",
+      "loopCode": "rclcpp::spin_some(node);\n// No periodic work by default.\nloop_rate.sleep();\n",
       "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
@@ -4672,50 +4677,15 @@
       "requirements": "",
       "pythonVersion": "3.13",
       "lwrclpyVersion": "0.5.1",
-      "params": {}
+      "params": {},
+      "language": "cpp",
+      "cppCode": ""
     },
     {
       "id": "n3",
-      "name": "red_balance_index",
-      "x": 170,
-      "y": -160,
-      "inputs": [
-        {
-          "id": "image",
-          "name": "image",
-          "dataType": "sensor_msgs/msg/Image",
-          "receiveMode": "callback",
-          "callbackCode": "img = msg\nif img:\n\tdata = img.get(\"data\") or []\n\tw = int(img.get(\"width\") or 0)\n\th = int(img.get(\"height\") or 0)\n\tout = []\n\tred_total = 0\n\tother_total = 0\n\tfor i in range(0, len(data), 3):\n\t\tr = min(255, int(data[i] * 1.22))\n\t\tg = int(data[i + 1] * 0.92)\n\t\tb = int(data[i + 2] * 0.88)\n\t\tout.extend([r, g, b])\n\t\tred_total += r\n\t\tother_total += (g + b) // 2\n\tpublish(\"balanced\", {\"width\": w, \"height\": h, \"encoding\": \"rgb8\", \"is_bigendian\": 0, \"step\": w * 3, \"data\": out})\n\tpublish(\"red_index\", {\"data\": float(red_total - other_total) / max(1, w * h)})\n"
-        }
-      ],
-      "outputs": [
-        {
-          "id": "balanced",
-          "name": "balanced",
-          "dataType": "sensor_msgs/msg/Image"
-        },
-        {
-          "id": "red_index",
-          "name": "red_index",
-          "dataType": "std_msgs/msg/Float32"
-        }
-      ],
-      "loopCode": "",
-      "timers": [],
-      "timerEnabled": false,
-      "timerPeriodSec": 1.0,
-      "timerCode": "",
-      "importCode": "from std_msgs.msg import Float32\n",
-      "requirements": "",
-      "pythonVersion": "3.13",
-      "lwrclpyVersion": "0.5.1",
-      "params": {}
-    },
-    {
-      "id": "n4",
       "name": "image_view",
-      "x": 535,
-      "y": -215,
+      "x": 250,
+      "y": -230,
       "inputs": [
         {
           "id": "in1",
@@ -4731,10 +4701,10 @@
       "toolType": "image_view"
     },
     {
-      "id": "n5",
+      "id": "n4",
       "name": "graph_view",
-      "x": 535,
-      "y": 25,
+      "x": 250,
+      "y": 35,
       "inputs": [
         {
           "id": "in1",
@@ -4748,19 +4718,19 @@
       "params": {
         "fieldPath": "data",
         "sampleLimit": 10000,
-        "xAxisSeconds": 10,
-        "yAxisMode": "auto",
-        "yMin": -1,
+        "xAxisSeconds": 8,
+        "yAxisMode": "fixed",
+        "yMin": 0,
         "yMax": 1
       },
       "loopCode": "",
       "toolType": "graph_view"
     },
     {
-      "id": "n6",
+      "id": "n5",
       "name": "topic_output",
-      "x": 865,
-      "y": 25,
+      "x": 585,
+      "y": 35,
       "inputs": [
         {
           "id": "in1",
@@ -4783,39 +4753,31 @@
       "fromPort": "out1",
       "toNode": "n2",
       "toPort": "image",
-      "name": "/sample3/input_color"
+      "name": "/sample23/input_image"
     },
     {
       "id": "l2",
       "fromNode": "n2",
-      "fromPort": "contrast",
+      "fromPort": "mask",
       "toNode": "n3",
-      "toPort": "image",
-      "name": "/sample3/contrast_image"
+      "toPort": "in1",
+      "name": "/sample23/threshold_mask"
     },
     {
       "id": "l3",
-      "fromNode": "n3",
-      "fromPort": "balanced",
+      "fromNode": "n2",
+      "fromPort": "bright_ratio",
       "toNode": "n4",
       "toPort": "in1",
-      "name": "/sample3/red_balanced_image"
+      "name": "/sample23/bright_ratio"
     },
     {
       "id": "l4",
-      "fromNode": "n3",
-      "fromPort": "red_index",
+      "fromNode": "n2",
+      "fromPort": "bright_ratio",
       "toNode": "n5",
       "toPort": "in1",
-      "name": "/sample3/red_index"
-    },
-    {
-      "id": "l5",
-      "fromNode": "n3",
-      "fromPort": "red_index",
-      "toNode": "n6",
-      "toPort": "in1",
-      "name": "/sample3/red_index"
+      "name": "/sample23/bright_ratio"
     }
   ],
   "view": {
@@ -4823,5 +4785,5 @@
     "y": 90,
     "scale": 0.8
   },
-  "nextId": 7
+  "nextId": 6
 }

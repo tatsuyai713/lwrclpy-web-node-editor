@@ -83,6 +83,26 @@ const DEFAULT_IMPORT_CODE = `# Node-level imports run after this node's venv is 
 # import cv2
 # import numpy as np
 `;
+const DEFAULT_CPP_CALLBACK_CODE = `// C++ subscription callback body.
+// Available: msg, publish_<output_id>(msg), has_<input_id>(), latest_<input_id>(), now.
+`;
+const DEFAULT_CPP_LOOP_CODE = `// C++ loop body. Called at the graph run rate.
+rclcpp::spin_some(node);
+// No periodic work by default.
+loop_rate.sleep();
+`;
+const DEFAULT_CPP_TIMER_CODE = `// C++ timer callback body.
+// Available: publish_<output_id>(msg), has_<input_id>(), latest_<input_id>(), now.
+`;
+const DEFAULT_CPP_HEADER_CODE = `// C++ header section inserted after generated includes.
+// Example:
+// #include <cmath>
+// class MyFilter { ... };
+// static MyFilter filter;
+`;
+const DEFAULT_CPP_CODE = `// C++ initialize body. Called once after publishers/subscriptions are created.
+// Use this to initialize objects declared in Header.
+`;
 const DEFAULT_NODE_WIDTH = 320;
 const DEFAULT_NODE_MIN_HEIGHT = 88;
 
@@ -382,6 +402,7 @@ function bindToolbar() {
   $('config-input-count').oninput = renderConfigPorts;
   $('config-output-count').oninput = renderConfigPorts;
   $('config-timer-count').oninput = renderConfigPorts;
+  $('config-node-language').onchange = renderConfigPorts;
   $('config-tf-input').onchange = renderConfigPorts;
   $('config-tf-output').onchange = renderConfigPorts;
   $('config-python-version').onchange = updateDraftRuntimeVersions;
@@ -481,6 +502,8 @@ function createDefaultNode(pos = centerWorld()) {
     timerPeriodSec: 1.0,
     timerCode: DEFAULT_TIMER_CODE,
     importCode: DEFAULT_IMPORT_CODE,
+    cppCode: DEFAULT_CPP_CODE,
+    language: 'python',
     requirements: '',
     pythonVersion: defaultPythonVersion(),
     lwrclpyVersion: defaultLwrclpyVersion(),
@@ -698,6 +721,7 @@ function lwrclpyVersionsForPython(pythonVersion) {
 
 function nodeRuntimeSummary(node) {
   if (!node || node.toolType) return '';
+  if (node.language === 'cpp') return 'C++ / lwrcl';
   const py = node.pythonVersion || defaultPythonVersion();
   return py ? `Python ${py}` : 'Python host';
 }
@@ -742,6 +766,8 @@ function customNodeStoragePayload(node, name = '', description = null) {
   delete stored.y;
   delete stored.toolType;
   delete stored.customNodeMeta;
+  stored.language = stored.language === 'cpp' ? 'cpp' : 'python';
+  stored.cppCode = stored.cppCode || DEFAULT_CPP_CODE;
   stored.pythonVersion = stored.pythonVersion || defaultPythonVersion();
   stored.lwrclpyVersion = stored.lwrclpyVersion || defaultLwrclpyVersion();
   const exportName = name || meta.name || stored.name || 'custom_node';
@@ -831,9 +857,11 @@ function renderCustomNodeManager() {
     const node = item.node || {};
     const card = document.createElement('article');
     card.className = 'custom-node-card';
+    const isCppNode = node.language === 'cpp';
     const codePreview = [
-      node.importCode ? '# Import Code\n' + node.importCode : '',
-      node.loopCode ? '# Main Loop\n' + node.loopCode : '',
+      node.importCode ? `# ${isCppNode ? 'Header' : 'Import Code'}\n` + node.importCode : '',
+      isCppNode && node.cppCode ? '# Initialize\n' + node.cppCode : '',
+      node.loopCode ? `# ${isCppNode ? 'Loop' : 'Main Loop'}\n` + node.loopCode : '',
       ...(node.inputs || []).filter((port) => port.callbackCode).map((port) => `# Callback: ${port.name}\n${port.callbackCode}`),
       ...normalizeTimers(node).filter((timer) => timer.callbackCode).map((timer) => `# Timer: ${timer.name}\n${timer.callbackCode}`),
     ].filter(Boolean).join('\n\n');
@@ -881,9 +909,11 @@ function openNodeDialog(node = null) {
   state.editingNode = node ? node.id : null;
   const draft = node ? structuredClone(node) : createDefaultNode();
   draft.timers = normalizeTimers(draft);
+  draft.language = draft.language === 'cpp' ? 'cpp' : 'python';
   $('node-dialog').dataset.draft = JSON.stringify(draft);
-  $('node-dialog-title').textContent = node ? 'Edit lwrclpy Node' : 'Create lwrclpy Node';
+  $('node-dialog-title').textContent = node ? 'Edit Node' : 'Create Node';
   $('config-node-name').value = draft.name;
+  $('config-node-language').value = draft.language;
   draft.pythonVersion = draft.pythonVersion || defaultPythonVersion();
   draft.lwrclpyVersion = draft.lwrclpyVersion || defaultLwrclpyVersion();
   renderRuntimeVersionSelects(draft);
@@ -892,6 +922,7 @@ function openNodeDialog(node = null) {
   $('config-tf-input').checked = Boolean(draft.params?.tfInputEnabled);
   $('config-tf-output').checked = Boolean(draft.params?.tfOutputEnabled);
   $('config-timer-count').value = draft.timers.length;
+  $('config-cpp-link-libraries').value = draft.requirements || '';
   renderConfigPorts();
   $('node-dialog').showModal();
 }
@@ -928,6 +959,13 @@ function renderConfigPorts() {
   const dialog = $('node-dialog');
   const draft = JSON.parse(dialog.dataset.draft || JSON.stringify(createDefaultNode()));
   draft.name = $('config-node-name').value || draft.name;
+  draft.language = $('config-node-language').value === 'cpp' ? 'cpp' : 'python';
+  normalizeNodeLanguageDefaults(draft);
+  const isCpp = draft.language === 'cpp';
+  $('config-python-version').disabled = isCpp;
+  $('config-lwrclpy-version').disabled = isCpp;
+  $('config-cpp-link-libraries-field').hidden = !isCpp;
+  draft.requirements = isCpp ? $('config-cpp-link-libraries').value : (draft.requirements || '');
   draft.pythonVersion = $('config-python-version').value || draft.pythonVersion || defaultPythonVersion();
   draft.lwrclpyVersion = $('config-lwrclpy-version').value || draft.lwrclpyVersion || defaultLwrclpyVersion();
   draft.params = { ...(draft.params || {}), tfInputEnabled: $('config-tf-input').checked, tfOutputEnabled: $('config-tf-output').checked };
@@ -942,6 +980,41 @@ function renderConfigPorts() {
   renderPortConfigList('input-configs', draft.inputs, 'Input');
   renderPortConfigList('output-configs', draft.outputs, 'Output');
   renderTimerConfigList(draft.timers);
+  $('config-cpp-link-libraries').oninput = () => {
+    const current = JSON.parse($('node-dialog').dataset.draft || JSON.stringify(createDefaultNode()));
+    current.requirements = $('config-cpp-link-libraries').value;
+    $('node-dialog').dataset.draft = JSON.stringify(current);
+  };
+}
+
+function normalizeNodeLanguageDefaults(node) {
+  if (node.language === 'cpp') {
+    if (!node.importCode || node.importCode === DEFAULT_IMPORT_CODE) node.importCode = DEFAULT_CPP_HEADER_CODE;
+    if (!node.loopCode || node.loopCode === DEFAULT_LOOP_CODE) node.loopCode = DEFAULT_CPP_LOOP_CODE;
+    if (!node.timerCode || node.timerCode === DEFAULT_TIMER_CODE) node.timerCode = DEFAULT_CPP_TIMER_CODE;
+    (node.inputs || []).forEach((port) => {
+      if ((port.receiveMode || 'callback') === 'callback' && (!port.callbackCode || port.callbackCode === DEFAULT_CALLBACK_CODE)) {
+        port.callbackCode = DEFAULT_CPP_CALLBACK_CODE;
+      }
+    });
+    node.timers = normalizeTimers(node).map((timer) => ({
+      ...timer,
+      callbackCode: (!timer.callbackCode || timer.callbackCode === DEFAULT_TIMER_CODE) ? DEFAULT_CPP_TIMER_CODE : timer.callbackCode,
+    }));
+    return;
+  }
+  if (!node.importCode || node.importCode === DEFAULT_CPP_HEADER_CODE) node.importCode = DEFAULT_IMPORT_CODE;
+  if (!node.loopCode || node.loopCode === DEFAULT_CPP_LOOP_CODE) node.loopCode = DEFAULT_LOOP_CODE;
+  if (!node.timerCode || node.timerCode === DEFAULT_CPP_TIMER_CODE) node.timerCode = DEFAULT_TIMER_CODE;
+  (node.inputs || []).forEach((port) => {
+    if ((port.receiveMode || 'callback') === 'callback' && (!port.callbackCode || port.callbackCode === DEFAULT_CPP_CALLBACK_CODE)) {
+      port.callbackCode = DEFAULT_CALLBACK_CODE;
+    }
+  });
+  node.timers = normalizeTimers(node).map((timer) => ({
+    ...timer,
+    callbackCode: (!timer.callbackCode || timer.callbackCode === DEFAULT_CPP_TIMER_CODE) ? DEFAULT_TIMER_CODE : timer.callbackCode,
+  }));
 }
 
 function normalizeTimers(node) {
@@ -968,7 +1041,8 @@ function resizeTimers(timers, count) {
   const next = timers.slice(0, count);
   while (next.length < count) {
     const index = next.length + 1;
-    next.push({ id: `timer${index}`, name: `timer${index}`, periodSec: 1.0, callbackCode: DEFAULT_TIMER_CODE });
+    const draft = JSON.parse($('node-dialog')?.dataset?.draft || '{}');
+    next.push({ id: `timer${index}`, name: `timer${index}`, periodSec: 1.0, callbackCode: draft.language === 'cpp' ? DEFAULT_CPP_TIMER_CODE : DEFAULT_TIMER_CODE });
   }
   return next.map((timer, index) => ({
     ...timer,
@@ -1015,12 +1089,14 @@ function resizePorts(ports, count, prefix) {
   const next = ports.filter((port) => !isTfMessagePort(port)).slice(0, count);
   while (next.length < count) {
     const index = next.length + 1;
+    const draft = JSON.parse($('node-dialog')?.dataset?.draft || '{}');
+    const isCpp = draft.language === 'cpp';
     next.push({
       id: `${prefix}${index}`,
       name: `${prefix}${index}`,
       dataType: 'std_msgs/msg/String',
       receiveMode: prefix === 'in' ? 'callback' : undefined,
-      callbackCode: prefix === 'in' ? DEFAULT_CALLBACK_CODE : undefined,
+      callbackCode: prefix === 'in' ? (isCpp ? DEFAULT_CPP_CALLBACK_CODE : DEFAULT_CALLBACK_CODE) : undefined,
     });
   }
   return next.map((port, index) => ({ ...port, id: port.id || `${prefix}${index + 1}` }));
@@ -1130,7 +1206,7 @@ function updateDraftPort(direction, input) {
   } else {
     if (input.dataset.key === 'receiveMode') {
       port.receiveMode = input.checked ? 'callback' : 'manual';
-      if (input.checked && !port.callbackCode) port.callbackCode = DEFAULT_CALLBACK_CODE;
+      if (input.checked && !port.callbackCode) port.callbackCode = draft.language === 'cpp' ? DEFAULT_CPP_CALLBACK_CODE : DEFAULT_CALLBACK_CODE;
     } else {
       port[input.dataset.key] = input.value;
     }
@@ -1142,8 +1218,11 @@ function saveNodeDialog(ev) {
   ev.preventDefault();
   const draft = JSON.parse($('node-dialog').dataset.draft);
   draft.name = $('config-node-name').value || 'custom_ros_node';
+  draft.language = $('config-node-language').value === 'cpp' ? 'cpp' : 'python';
+  normalizeNodeLanguageDefaults(draft);
   draft.pythonVersion = $('config-python-version').value || draft.pythonVersion || defaultPythonVersion();
   draft.lwrclpyVersion = $('config-lwrclpy-version').value || draft.lwrclpyVersion || defaultLwrclpyVersion();
+  if (draft.language === 'cpp') draft.requirements = $('config-cpp-link-libraries').value || '';
   draft.params = { ...(draft.params || {}), tfInputEnabled: $('config-tf-input').checked, tfOutputEnabled: $('config-tf-output').checked };
   applyCustomTfPorts(draft);
   draft.timers = resizeTimers(normalizeTimers(draft), Number($('config-timer-count').value || 0));
@@ -1175,21 +1254,35 @@ function openCodeDialog(node, kind) {
   const isTimer = kind === 'timerCode' || Boolean(timer);
   const isImport = kind === 'importCode';
   const isRequirements = kind === 'requirements';
+  const isCpp = kind === 'cppCode';
+  const nodeIsCpp = node.language === 'cpp';
   $('code-dialog-title').textContent = callbackPort
     ? `${node.name}.${callbackPort.name}: Callback Code`
-    : (isTimer ? `${node.name}.${timer?.name || 'timer'}: Timer Callback Code` : (isImport ? `${node.name}: Import Code` : (isRequirements ? `${node.name}: requirements.txt` : `${node.name}: Main Loop Code`)));
+    : (isCpp ? `${node.name}: Initialize Code` : (isTimer ? `${node.name}.${timer?.name || 'timer'}: Timer Callback Code` : (isImport ? `${node.name}: ${nodeIsCpp ? 'Header' : 'Import Code'}` : (isRequirements ? `${node.name}: ${nodeIsCpp ? 'Link Libraries' : 'requirements.txt'}` : `${node.name}: ${nodeIsCpp ? 'Loop Code' : 'Main Loop Code'}`))));
   $('code-editor').value = callbackPort
     ? (callbackPort.callbackCode || '')
-    : (isTimer ? (timer?.callbackCode || node.timerCode || DEFAULT_TIMER_CODE) : (isImport ? (node.importCode || DEFAULT_IMPORT_CODE) : (isRequirements ? (node.requirements || '') : (node.loopCode || ''))));
+    : (isCpp ? (node.cppCode || DEFAULT_CPP_CODE) : (isTimer ? (timer?.callbackCode || node.timerCode || DEFAULT_TIMER_CODE) : (isImport ? (node.importCode || DEFAULT_IMPORT_CODE) : (isRequirements ? (node.requirements || '') : (node.loopCode || '')))));
   $('code-hint').textContent = callbackPort
-    ? 'lwrclpy callback scope: node, input_id, msg/request, response, state, publish(output_id, value), log(...). Use publish(...) instead of direct graph outputs.'
-    : (isTimer
-      ? 'lwrclpy timer scope: node, timer_id, timer_name, state, now, period, publish(output_id, value), log(...).'
+    ? (nodeIsCpp
+      ? 'C++ callback scope: msg, now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg). This runs when the input subscription receives a message.'
+      : 'lwrclpy callback scope: node, input_id, msg/request, response, state, publish(output_id, value), log(...). Use publish(...) instead of direct graph outputs.')
+    : (isCpp
+      ? 'C++ initialize scope: runs once in the generated node constructor after publishers/subscriptions are created and before timers start. Use classes or objects declared in Header.'
+      : (isTimer
+      ? (nodeIsCpp
+        ? 'C++ timer scope: now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg).'
+        : 'lwrclpy timer scope: node, timer_id, timer_name, state, now, period, publish(output_id, value), log(...).')
       : (isImport
-        ? 'Import code runs once after this node venv is ready. Put imports such as import cv2 and import numpy as np here.'
+        ? (nodeIsCpp
+          ? 'C++ header section inserted after generated includes. Put #include lines, helper functions, constants, class definitions, structs, or static objects here.'
+          : 'Import code runs once after this node venv is ready. Put imports such as import cv2 and import numpy as np here.')
         : (isRequirements
-          ? 'One requirement per line. uv creates this node venv and installs these packages before execution.'
-          : 'Optional lwrclpy-compatible spin tick scope: node, state, now, publish(output_id, value), log(...). Prefer input callbacks for data-dependent processing.')));
+          ? (nodeIsCpp
+            ? 'C++ link libraries/options, one or more per line, for example -lm, -lmy_library, /path/to/libfoo.a.'
+            : 'One requirement per line. uv creates this node venv and installs these packages before execution.')
+          : (nodeIsCpp
+            ? 'C++ loop scope: node, loop_rate, now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg). Use spin_some + loop_rate.sleep() for periodic work, or replace it with rclcpp::spin(node) for callback-only blocking execution.'
+            : 'Optional lwrclpy-compatible spin tick scope: node, state, now, publish(output_id, value), log(...). Prefer input callbacks for data-dependent processing.')))));
   $('code-dialog').showModal();
 }
 
@@ -1211,6 +1304,8 @@ function saveCodeDialog(ev) {
     node.timerCode = $('code-editor').value;
   } else if (node && kind === 'importCode') {
     node.importCode = $('code-editor').value;
+  } else if (node && kind === 'cppCode') {
+    node.cppCode = $('code-editor').value;
   } else if (node && kind === 'requirements') {
     node.requirements = $('code-editor').value;
   } else if (node) {
@@ -1553,9 +1648,9 @@ function renderNodes() {
       ${viewNodeHtml(node)}
       ${node.toolType ? '' : `<div class="node-actions">
           <button data-action="config">Configure</button>
-          <button data-action="imports">Import Code</button>
-          <button data-action="requirements">Requirements</button>
-          <button data-action="loop">Main Loop Code</button>
+          <button data-action="imports">${node.language === 'cpp' ? 'Header' : 'Import Code'}</button>
+          ${node.language === 'cpp' ? '<button data-action="cppCode">Initialize Code</button>' : '<button data-action="requirements">Requirements</button>'}
+          <button data-action="loop">${node.language === 'cpp' ? 'Loop Code' : 'Main Loop Code'}</button>
           ${timerActionButtons(node)}
           ${node.inputs.filter((input) => (input.receiveMode || 'callback') === 'callback').map((input) => `<button data-callback-input="${escapeAttr(input.id)}">Callback: ${escapeHtml(input.name)}</button>`).join('')}
         </div>`}
@@ -1592,6 +1687,13 @@ function renderNodes() {
       requirementsButton.onclick = (ev) => {
         ev.stopPropagation();
         openCodeDialog(node, 'requirements');
+      };
+    }
+    const cppCodeButton = el.querySelector('[data-action="cppCode"]');
+    if (cppCodeButton) {
+      cppCodeButton.onclick = (ev) => {
+        ev.stopPropagation();
+        openCodeDialog(node, 'cppCode');
       };
     }
     el.querySelectorAll('[data-timer-input]').forEach((button) => {
@@ -2435,7 +2537,15 @@ function renderInspector() {
     ${node.toolType === 'function_generator' ? `<div class="inspector-actions"><button id="inspect-signal-settings">Signal Settings</button></div>` : ''}
     ${node.toolType === 'graph_view' ? `<div class="inspector-actions"><button id="inspect-graph-settings">Graph Settings</button></div>` : ''}
     ${node.toolType === 'tf_viewer' || node.toolType === '3d_viewer' ? `<div class="inspector-actions"><button id="inspect-tf-viewer-settings">Configure</button></div>` : ''}
-    ${node.toolType ? '' : `<div class="inspector-actions">
+    ${node.toolType ? '' : (node.language === 'cpp' ? `<div class="inspector-actions">
+        <button id="inspect-config">Configure Ports</button>
+        <button id="inspect-export-custom-node">Export Custom Node</button>
+        <button id="inspect-imports">Header</button>
+        <button id="inspect-cpp-code">Initialize Code</button>
+        <button id="inspect-callback">Subscribe Callback Code</button>
+        ${timerActionButtons(node)}
+        <button id="inspect-loop">Loop Code</button>
+      </div>` : `<div class="inspector-actions">
         <button id="inspect-config">Configure Ports</button>
         <button id="inspect-export-custom-node">Export Custom Node</button>
         <button id="inspect-imports">Import Code</button>
@@ -2443,7 +2553,7 @@ function renderInspector() {
         <button id="inspect-callback">Subscribe Callback Code</button>
         ${timerActionButtons(node)}
         <button id="inspect-loop">Main Loop Code</button>
-      </div>`}
+      </div>`)}
     <h3>Inputs</h3>
     ${inputSummary(node)}
     <h3>Outputs</h3>
@@ -2470,6 +2580,8 @@ function renderInspector() {
   if (inspectImports) inspectImports.onclick = () => openCodeDialog(node, 'importCode');
   const inspectRequirements = $('inspect-requirements');
   if (inspectRequirements) inspectRequirements.onclick = () => openCodeDialog(node, 'requirements');
+  const inspectCppCode = $('inspect-cpp-code');
+  if (inspectCppCode) inspectCppCode.onclick = () => openCodeDialog(node, 'cppCode');
   box.querySelectorAll('[data-timer-input]').forEach((button) => {
     button.onclick = () => openCodeDialog(node, `timer:${button.dataset.timerInput}`);
   });
@@ -3076,6 +3188,7 @@ function updateRunStatus(data) {
     }
     pauseVideoInputs();
     stopAllFramePullLoops();
+    freezeAllPlotViews();
     $('run-model').classList.remove('active');
     setExecutionStatus('stopped', `Server run stopped after ${state.tickCount} ticks`);
   }
@@ -3897,6 +4010,32 @@ function stopPlotAnimation(el) {
     clearTimeout(el._plotRenderTimer);
     el._plotRenderTimer = null;
   }
+}
+
+function stopAllPlotAnimations() {
+  document.querySelectorAll('[data-node-view]').forEach((el) => stopPlotAnimation(el));
+}
+
+function freezeAllPlotViews() {
+  let changed = false;
+  Object.entries(state.nodeViews).forEach(([nodeId, view]) => {
+    if (view?.kind !== 'plot' || view.running === false) return;
+    const series = Array.isArray(view.series) ? view.series : [];
+    const lastPoint = series.length ? series[series.length - 1] : null;
+    state.nodeViews[nodeId] = {
+      ...view,
+      running: false,
+      clientReceivedAt: 0,
+      statusTime: Number(view.statusTime || lastPoint?.t || 0),
+    };
+    changed = true;
+  });
+  stopAllPlotAnimations();
+  if (!changed) return;
+  document.querySelectorAll('[data-node-view]').forEach((el) => {
+    const view = state.nodeViews[el.dataset.nodeView];
+    if (view?.kind === 'plot') patchNodeViewEl(el, view);
+  });
 }
 
 function schedulePlotAnimation(el, view) {
@@ -5235,6 +5374,7 @@ function stopRun(message = null) {
   }
   pauseVideoInputs();
   stopAllFramePullLoops();
+  freezeAllPlotViews();
   $('run-model').classList.remove('active');
   setExecutionStatus('stopping', message || `Stopping after ${state.tickCount} ticks`);
   stopWorkers(false);
@@ -5255,6 +5395,7 @@ function forceStopRun() {
   }
   pauseVideoInputs();
   stopAllFramePullLoops();
+  freezeAllPlotViews();
   $('run-model').classList.remove('active');
   setExecutionStatus('stopping', `Force stopping after ${state.tickCount} ticks`);
   stopWorkers(true);
@@ -5274,6 +5415,7 @@ async function resetGraphRuntimeState({ stopServer = false } = {}) {
     state.runStopTimer = null;
   }
   stopAllFramePullLoops();
+  stopAllPlotAnimations();
   stopAllVideoInputs();
   state.nodeViews = {};
   state.graphBuffers = {};
@@ -5785,6 +5927,7 @@ function configWithoutInlineCode(config) {
 function clearNodeInlineCode(node) {
   node.importCode = '';
   node.loopCode = '';
+  node.cppCode = '';
   node.timerCode = '';
   (node.inputs || []).forEach((input) => { input.callbackCode = ''; });
   (node.timers || []).forEach((timer) => { timer.callbackCode = ''; });
@@ -5797,6 +5940,7 @@ function nodeInlineCodeAssignments(nodePath, node) {
   };
   add(`${nodePath}["importCode"]`, node.importCode);
   add(`${nodePath}["loopCode"]`, node.loopCode);
+  add(`${nodePath}["cppCode"]`, node.cppCode);
   add(`${nodePath}["timerCode"]`, node.timerCode);
   (node.inputs || []).forEach((input, index) => {
     add(`${nodePath}["inputs"][${index}]["callbackCode"]`, input.callbackCode);
@@ -7130,6 +7274,8 @@ function normalizeImportedNode(node) {
     timerPeriodSec: Number(node.timerPeriodSec || 1.0),
     timerCode: Object.prototype.hasOwnProperty.call(node, 'timerCode') ? node.timerCode : DEFAULT_TIMER_CODE,
     importCode: node.importCode || DEFAULT_IMPORT_CODE,
+    cppCode: node.cppCode || DEFAULT_CPP_CODE,
+    language: isTool ? '' : (node.language === 'cpp' ? 'cpp' : 'python'),
     requirements: node.requirements || '',
     pythonVersion: isTool ? '' : (node.pythonVersion || defaultPythonVersion()),
     lwrclpyVersion: isTool ? '' : (node.lwrclpyVersion || defaultLwrclpyVersion()),

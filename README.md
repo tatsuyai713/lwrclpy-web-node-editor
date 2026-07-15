@@ -1,6 +1,6 @@
 # lwrclpy Web Node Editor
 
-`lwrclpy Web Node Editor` は、ブラウザ上で画像処理・動画処理・数値処理のノードグラフを作り、`lwrclpy` のAPIに近い書き方で各ノードのPythonコードを編集・実行・保存・エクスポートできるWebアプリです。
+`lwrclpy Web Node Editor` は、ブラウザ上で画像処理・動画処理・数値処理のノードグラフを作り、各ノードのコードを編集・実行・保存・エクスポートできるWebアプリです。カスタムノードはPython / `lwrclpy` またはC++ / `lwrcl` + FastDDSを選択できます。
 
 ROS 2本体のインストールは不要です。`lwrclpy` が提供する `rclpy` 互換APIを使い、ノードコードは `msg` を受け取って `publish(...)` で出力するcallbackスタイルで書けます。
 
@@ -19,9 +19,10 @@ ROS 2本体のインストールは不要です。`lwrclpy` が提供する `rcl
 - `URDF Static TF` と `TF Merge` で、URDF/Xacroからの静的TFと複数ノードのTF入出力をグラフ上で接続できます。
 - `Topic Input` / `Topic Output` で、グラフ外部とのtopic境界を表現できます。
 - カスタムノードごとに `requirements.txt` を持たせ、実行前に `.node_envs/<node-id>` のvenvへ依存をセットアップできます。
+- カスタムノードごとにPython / `lwrclpy` とC++ / `lwrcl` + FastDDSを選択できます。C++ノードはWeb実行時に自動ビルド・worker起動され、CLI export時にもC++コードとCMakeビルドファイルとして出力されます。
 - プロジェクト全体をJSONとしてSave/Loadできます。
 - カスタムノードを個別のPythonファイルとしてExport/Importできます。
-- カスタムノード群をROS 2 Python package形式のzipとしてExportできます。中には各ノードのPythonファイルとlaunchファイルが含まれます。
+- カスタムノード群をROS 2 Python package形式またはCLI実行パッケージのzipとしてExportできます。C++ノードが含まれる場合は `cpp_nodes/` と `build_cpp_nodes.sh` も含まれます。
 
 ## 実行方法
 
@@ -195,7 +196,7 @@ dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe --server --host 127.0.0
 
 ## サンプルプロジェクト
 
-`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/`, `deep_learning/`, `tf/`, `llm/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
+`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/`, `cpp/`, `deep_learning/`, `tf/`, `llm/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
 
 - `image_video/01_image_edge_topic_graph.json`: 画像入力、グレースケール化、エッジ抽出、画像表示、エッジ強度グラフ、topic出力。
 - `image_video/02_video_motion_topic_graph.json`: 動画フレーム入力、フレーム差分によるmotion mask、overlay表示、motion scoreグラフ、topic出力。
@@ -209,6 +210,9 @@ dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe --server --host 127.0.0
 - `custom_runtime/10_multi_timer_counter_graph.json`: 1つのカスタムノードに複数Timerを持たせ、別々の周期で値をpublish。
 - `custom_runtime/11_manual_subscriber_timer_sampler.json`: Subscriber callbackをOFFにし、Timer callbackから `latest()` で入力を読む例。
 - `image_video/12_image_view_save_topic_output.json`: 埋め込み画像を表示、保存、topic出力境界へ接続。
+- `cpp/21_cpp_low_pass_filter.json`: C++カスタムノードのSubscribe Callbackでノイズ信号をローパスフィルタ処理してGraph Viewerへ表示。
+- `cpp/22_cpp_signal_mixer.json`: 2つの信号をC++カスタムノードで加算・減算して表示。
+- `cpp/23_cpp_image_threshold.json`: C++カスタムノードで画像をしきい値処理し、mask画像と明部比率を出力。
 - `deep_learning/13_ultralytics_yolo_detection_segmentation.json`: Video File InputをUltralytics YOLOの検出・インスタンスセグメンテーションノードへ分岐して表示。
 - `deep_learning/14_ultralytics_yolo_pose_depth_anything.json`: Ultralytics YOLO PoseとDepth Anything V2の深度推定を表示。
 - `deep_learning/15_cuda_ultralytics_yolo_detection_segmentation.json`: CUDA環境向けのUltralytics YOLO検出・インスタンスセグメンテーション。
@@ -235,8 +239,37 @@ Webプレビューは、リンクごとのtopic名を使ってlwrclpy topic経�
 - `Topic Input` と `Topic Output` は、グラフ外部との境界マーカーです。実際のPub/Subは接続された処理・表示ノードが行います。
 - 画像入力は小さな埋め込みデータとして扱えます。動画入力はブラウザからアップロードせず、サーバー側のファイル選択ダイアログで選んだローカルファイルを独立workerがデコードしてDDS publishします。
 - 連続実行のtick周波数は60Hzです。Run中のtickループはサーバー側threadで動くため、ブラウザのtimer throttlingには依存しません。実効周波数はノード処理時間やlwrclpy/DDS処理時間に制限されます。
+- C++ / `lwrcl` ノードはWeb実行時に `.node_workers/cpp/<node-id>/` へCMake projectとして生成・ビルドされ、Python workerや組み込みDDS workerと同じtopicへ接続されます。
 
 つまり、Webプレビューでもノード間通信の意味論はlwrclpy topicに寄せています。
+
+## C++ / lwrcl + FastDDS runtime/export
+
+Web実行とCLI exportのどちらでも、先に `lwrcl` をFastDDS backendでビルドしてインストールしてください。Web実行では `cmake` とC++コンパイラも必要です。
+
+```bash
+git clone --recursive https://github.com/tatsuyai713/lwrcl.git
+cd lwrcl
+./scripts/install_fast_dds.sh
+./build_libraries.sh fastdds install
+./build_data_types.sh fastdds install
+./build_lwrcl.sh fastdds install
+```
+
+Web実行では、C++ノードごとに `.node_workers/cpp/<node-id>/` 配下へ生成ソースとCMake projectが作られます。C++コード、ポート、接続topicが変わると自動で再ビルドされ、生成実行ファイルがworker processとして起動します。
+
+CLI exportにC++ノードが含まれる場合、zipには通常のPython実行パッケージに加えて次が含まれます。
+
+- `cpp_nodes/`: C++ノードごとのCMake projectと生成ソース。
+- `build_cpp_nodes.sh`: `cpp_nodes/` 全体をCMakeでビルドするスクリプト。
+
+exportしたzipを展開した後、C++ノードは次でビルドします。
+
+```bash
+bash build_cpp_nodes.sh
+```
+
+C++ノードとPythonノードを混在させた場合、export時に同じグラフ接続名がDDS topic名として使われます。Python側runnerとC++ executableを同じDDS domainで起動すると、topic経由で接続されます。
 
 ## ノードの作り方
 
@@ -244,15 +277,21 @@ Webプレビューは、リンクごとのtopic名を使ってlwrclpy topic経�
 
 主な設定項目は次の通りです。
 
+- `Implementation`: ノード実装をPython / `lwrclpy` またはC++ / `lwrcl` + FastDDSから選びます。
 - `Inputs`: 入力ポートです。型は `sensor_msgs/msg/Image` や `std_msgs/msg/Float32` など、インストール済みlwrclpyメッセージから選びます。`Use Callback` はデフォルトONで、OFFにすると `latest()` / `take()` で読む手動入力になります。
 - `Outputs`: 出力ポートです。
 - `Callback Code`: 入力を受け取ったときに実行するコードです。通常の画像処理・動画処理はここに書きます。
 - `Timer Callback`: 一定周期で実行したいコードです。`Timer Count` で複数のTimerを作成でき、各Timerは常にcallbackとして実行されます。
 - `TF Input` / `TF Output`: カスタムノードでTF機能を使う場合に明示的に有効化します。TFの送受信は `tf2_ros` の `TransformListener` / `TransformBroadcaster` / `StaticTransformBroadcaster` を使います。
-- `Import Code`: `import cv2` や `import numpy as np` など、ノード専用のimportを書きます。
-- `requirements.txt`: ノード専用venvに入れる依存パッケージを書きます。
+- Pythonノードの `Import Code`: `import cv2` や `import numpy as np` など、ノード専用のimportを書きます。
+- Pythonノードの `requirements.txt`: ノード専用venvに入れる依存パッケージを書きます。
+- C++ノードの `Header`: 生成されたincludeの直後に挿入されます。`#include <cmath>`、helper関数、定数、class/struct定義、`static` オブジェクトなどを書けます。
+- C++ノードの `C++ Link Libraries`: Configure内またはInspectorから、`-lm`、`-lmy_library`、`/path/to/libfoo.a` のようなリンク指定を書けます。
+- C++ノードの `Initialize Code`: 生成C++クラスのコンストラクタ内で、publisher/subscriber作成後、Loop/Timer開始前に1回だけ実行されます。Headerで定義したclass/objectの初期化に使えます。
 
 ポート同士は型が一致すると接続できます。1つの出力ポートから複数のノードへ接続した場合、その出力から出るtopic名は同じ名前に同期されます。
+
+C++ノードでは、Initialize Code、入力ポートのCallback Code、Loop Code、Timer Callback Codeが生成C++クラスに埋め込まれます。入力ポートごとに `has_in1()` / `latest_in1()`、出力ポートごとに `publish_out1(msg)` のようなヘルパーを使えます。継続して保持したい値は、Headerで定義したclass/objectのメンバーとして持たせます。生成された `main()` は `while (rclcpp::ok())` で回り、各周期で Loop Code を呼びます。Loop Codeのデフォルトには `rclcpp::spin_some(node);` と `loop_rate.sleep();` が入り、Loop周波数はWeb実行の `runHz` に合わせて `rclcpp::Rate loop_rate` に渡します。Callbackだけで処理したい場合は、Loop Codeを `rclcpp::spin(node);` に置き換えるとそこでブロッキング実行できます。周期処理も行う場合はデフォルトの `spin_some` + `loop_rate.sleep()` を使います。これはArduinoの `setup()` / `loop()` に近い使い方です。
 
 ## Callback Codeの書き方
 

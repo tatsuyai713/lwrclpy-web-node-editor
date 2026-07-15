@@ -100,6 +100,13 @@
           <span>Node Name</span>
           <input id="config-node-name" required value="custom_ros_node">
         </label>
+        <label class="field">
+          <span>Implementation</span>
+          <select id="config-node-language">
+            <option value="python">Python / lwrclpy</option>
+            <option value="cpp">C++ / lwrcl + FastDDS</option>
+          </select>
+        </label>
         <div class="count-grid">
           <label class="field">
             <span>Python Version</span>
@@ -137,6 +144,10 @@
           </label>
           <div id="timer-configs"></div>
         </div>
+        <label class="field" id="config-cpp-link-libraries-field">
+          <span>C++ Link Libraries</span>
+          <textarea id="config-cpp-link-libraries" rows="3" placeholder="-lm&#10;-lmy_library"></textarea>
+        </label>
         <div class="port-configs">
           <section>
             <h3>Inputs / Subscriptions</h3>

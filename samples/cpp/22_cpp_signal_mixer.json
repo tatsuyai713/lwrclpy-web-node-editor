@@ -1,0 +1,218 @@
+{
+  "format": "lwrclpy-web-node-editor-project",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "sine_source",
+      "x": -560,
+      "y": -210,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out1",
+          "name": "signal",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "params": {
+        "signalType": "sine",
+        "amplitude": 1.0,
+        "bias": 0,
+        "frequency": 1.0,
+        "phase": 0,
+        "sampleTime": 0,
+        "publishHz": 100,
+        "ddsTopic": "",
+        "stepTime": 1,
+        "initialValue": 0,
+        "finalValue": 1,
+        "dutyCycle": 50,
+        "rampSlope": 1,
+        "chirpStartFrequency": 0.1,
+        "chirpEndFrequency": 10,
+        "chirpDuration": 10,
+        "noiseMean": 0,
+        "noiseStd": 1,
+        "noiseSeed": 1
+      },
+      "loopCode": "",
+      "toolType": "function_generator"
+    },
+    {
+      "id": "n2",
+      "name": "step_source",
+      "x": -560,
+      "y": 20,
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out1",
+          "name": "signal",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "params": {
+        "signalType": "step",
+        "amplitude": 1,
+        "bias": 0,
+        "frequency": 1,
+        "phase": 0,
+        "sampleTime": 0,
+        "publishHz": 100,
+        "ddsTopic": "",
+        "stepTime": 2.0,
+        "initialValue": -0.4,
+        "finalValue": 0.6,
+        "dutyCycle": 50,
+        "rampSlope": 1,
+        "chirpStartFrequency": 0.1,
+        "chirpEndFrequency": 10,
+        "chirpDuration": 10,
+        "noiseMean": 0,
+        "noiseStd": 1,
+        "noiseSeed": 1
+      },
+      "loopCode": "",
+      "toolType": "function_generator"
+    },
+    {
+      "id": "n3",
+      "name": "cpp_signal_mixer",
+      "x": -160,
+      "y": -100,
+      "inputs": [
+        {
+          "id": "a",
+          "name": "a",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "callback",
+          "callbackCode": ""
+        },
+        {
+          "id": "b",
+          "name": "b",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "callback",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [
+        {
+          "id": "sum",
+          "name": "sum",
+          "dataType": "std_msgs/msg/Float32"
+        },
+        {
+          "id": "difference",
+          "name": "difference",
+          "dataType": "std_msgs/msg/Float32"
+        }
+      ],
+      "loopCode": "rclcpp::spin_some(node);\nif (has_a() && has_b()) {\n  const double a = static_cast<double>(latest_a()->data);\n  const double b = static_cast<double>(latest_b()->data);\n  std_msgs::msg::Float32 sum;\n  sum.data = static_cast<float>(a + b);\n  publish_sum(sum);\n  std_msgs::msg::Float32 diff;\n  diff.data = static_cast<float>(a - b);\n  publish_difference(diff);\n}\nloop_rate.sleep();\n",
+      "timers": [],
+      "timerEnabled": false,
+      "timerPeriodSec": 1.0,
+      "timerCode": "",
+      "importCode": "",
+      "requirements": "",
+      "pythonVersion": "3.13",
+      "lwrclpyVersion": "0.5.1",
+      "params": {},
+      "language": "cpp",
+      "cppCode": ""
+    },
+    {
+      "id": "n4",
+      "name": "graph_view",
+      "x": 250,
+      "y": -210,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "value",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "fieldPath": "data",
+        "sampleLimit": 10000,
+        "xAxisSeconds": 8,
+        "yAxisMode": "fixed",
+        "yMin": -1.8,
+        "yMax": 1.8
+      },
+      "loopCode": "",
+      "toolType": "graph_view"
+    },
+    {
+      "id": "n5",
+      "name": "graph_view",
+      "x": 250,
+      "y": 40,
+      "inputs": [
+        {
+          "id": "in1",
+          "name": "value",
+          "dataType": "std_msgs/msg/Float32",
+          "receiveMode": "manual",
+          "callbackCode": ""
+        }
+      ],
+      "outputs": [],
+      "params": {
+        "fieldPath": "data",
+        "sampleLimit": 10000,
+        "xAxisSeconds": 8,
+        "yAxisMode": "fixed",
+        "yMin": -1.8,
+        "yMax": 1.8
+      },
+      "loopCode": "",
+      "toolType": "graph_view"
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "fromNode": "n1",
+      "fromPort": "out1",
+      "toNode": "n3",
+      "toPort": "a",
+      "name": "/sample22/sine"
+    },
+    {
+      "id": "l2",
+      "fromNode": "n2",
+      "fromPort": "out1",
+      "toNode": "n3",
+      "toPort": "b",
+      "name": "/sample22/step"
+    },
+    {
+      "id": "l3",
+      "fromNode": "n3",
+      "fromPort": "sum",
+      "toNode": "n4",
+      "toPort": "in1",
+      "name": "/sample22/sum"
+    },
+    {
+      "id": "l4",
+      "fromNode": "n3",
+      "fromPort": "difference",
+      "toNode": "n5",
+      "toPort": "in1",
+      "name": "/sample22/difference"
+    }
+  ],
+  "view": {
+    "x": 70,
+    "y": 90,
+    "scale": 0.8
+  },
+  "nextId": 6
+}

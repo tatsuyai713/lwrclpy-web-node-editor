@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .cpp_codegen import cpp_message_packages_for_node, render_cpp_node_cmake, render_cpp_node_source, safe_cpp_identifier
 from .runtime_exec import find_lwrclpy_installer, local_lwrclpy_wheel, resolve_worker_command
 
 LWRCLPY_RELEASES_API_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
@@ -348,6 +349,8 @@ class CustomLwrclNodeConfig:
     requirements: str = ""
     python_version: str = ""
     lwrclpy_version: str = ""
+    cpp_code: str = ""
+    language: str = "python"
     tool_type: str = ""
     params: dict[str, Any] = field(default_factory=dict)
 
@@ -612,6 +615,20 @@ class CustomLwrclNodeInstance:
             pass
 
     def tick(self, linked_inputs: dict[str, Any]) -> dict[str, Any]:
+        if self.config.language in {"cpp", "c++"}:
+            if self.worker_process is not None and self.worker_process.poll() is not None:
+                self.env_status = f"C++ worker exited: {self.worker_process.returncode}"
+            elif self.worker_process is not None:
+                self.env_status = "C++ worker running"
+            self.view = {"kind": "text", "status": self.env_status or "C++ worker"}
+            return {
+                "inputs": {},
+                "outputs": {},
+                "logs": self._combined_logs(),
+                "lwrclpy": self.runtime.available,
+                "environment": self.env_status,
+                "worker": "running" if self.worker_process and self.worker_process.poll() is None else "stopped",
+            }
         self.runtime.spin_once()
         if self._execute_tool(linked_inputs):
             self.runtime.spin_once()
@@ -2839,6 +2856,7 @@ class CustomLwrclNodeInstance:
     def _signature(self, config: CustomLwrclNodeConfig) -> tuple[Any, ...]:
         return (
             config.tool_type,
+            config.language,
             tuple((p.id, p.data_type, p.topic, p.topics) for p in config.inputs),
             tuple((p.id, p.data_type, p.topic, p.topics) for p in config.outputs),
         )
@@ -2941,7 +2959,9 @@ class GraphRuntime:
         for config in configs:
             instance = self._instance_for(config)
             ok = True
-            if self._config_needs_node_environment(config):
+            if config.language in {"cpp", "c++"}:
+                ok = self._ensure_cpp_worker_process(config, instance)
+            elif self._config_needs_node_environment(config):
                 ok = self._ensure_node_environment(config, instance)
             else:
                 instance.env_status = "built-in background" if self._config_runs_in_background(config) else "built-in"
@@ -2995,7 +3015,9 @@ class GraphRuntime:
             instance = self._instance_for(config)
             self._apply_runtime_param_overrides(instance)
             setup_ok = True
-            if self._config_needs_node_environment(config):
+            if config.language in {"cpp", "c++"}:
+                setup_ok = self._ensure_cpp_worker_process(config, instance)
+            elif self._config_needs_node_environment(config):
                 setup_ok = self._ensure_node_environment(config, instance)
             else:
                 instance.env_status = "built-in background" if self._config_runs_in_background(config) else "built-in"
@@ -3039,9 +3061,13 @@ class GraphRuntime:
         }
 
     def _config_needs_node_environment(self, config: CustomLwrclNodeConfig) -> bool:
+        if config.language in {"cpp", "c++"}:
+            return False
         return not config.tool_type or config.tool_type in {"image_crop_resize", "llm_text"}
 
     def _config_runs_in_background(self, config: CustomLwrclNodeConfig) -> bool:
+        if config.language in {"cpp", "c++"}:
+            return False
         tool_type = config.tool_type
         if tool_type in {"mcap_file_input", "image_file_input", "urdf_static_tf_publisher"}:
             return True
@@ -3504,6 +3530,169 @@ class GraphRuntime:
             score += 3
         return score, name
 
+    def _ensure_cpp_worker_process(self, config: CustomLwrclNodeConfig, instance: CustomLwrclNodeInstance) -> bool:
+        signature = self._cpp_worker_signature(config)
+        if instance.worker_process is not None and instance.worker_process.poll() is None and instance.worker_signature == signature:
+            instance.env_status = "C++ worker running"
+            return True
+        instance.stop_worker()
+        worker_dir = Path.cwd() / ".node_workers"
+        cpp_root = worker_dir / "cpp" / config.id
+        package_name = self._cpp_package_name(config)
+        package_dir = cpp_root / package_name
+        build_dir = cpp_root / "build"
+        exe_path = build_dir / package_name / package_name
+        if sys.platform.startswith("win"):
+            exe_path = exe_path.with_suffix(".exe")
+        log_path = worker_dir / f"{config.id}.cpp.log"
+        pid_path = worker_dir / f"{config.id}.cpp.pid"
+        signature_path = cpp_root / ".signature.json"
+        instance._kill_pid_file_process(pid_path)
+        try:
+            self._write_cpp_project(config, cpp_root, package_dir, package_name)
+            current_signature = signature_path.read_text(encoding="utf-8") if signature_path.exists() else ""
+            signature_text = json.dumps(signature, sort_keys=True, default=str)
+            if current_signature != signature_text or not exe_path.exists():
+                instance.env_status = "building C++ worker"
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("a", encoding="utf-8") as log_file:
+                    log_file.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Building C++ node {config.name}\n")
+                    subprocess.run(
+                        ["cmake", "-S", str(cpp_root), "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Release"],
+                        cwd=Path.cwd(),
+                        env=self._cpp_worker_env(),
+                        stdout=log_file,
+                        stderr=log_file,
+                        text=True,
+                        check=True,
+                    )
+                    subprocess.run(
+                        ["cmake", "--build", str(build_dir), "--parallel"],
+                        cwd=Path.cwd(),
+                        env=self._cpp_worker_env(),
+                        stdout=log_file,
+                        stderr=log_file,
+                        text=True,
+                        check=True,
+                    )
+                signature_path.write_text(signature_text, encoding="utf-8")
+            if not exe_path.exists():
+                instance.env_status = f"C++ executable missing: {exe_path}"
+                instance.log(instance.env_status)
+                return False
+            log_file = log_path.open("a", encoding="utf-8")
+            instance.worker_process = subprocess.Popen(
+                [str(exe_path)],
+                cwd=Path.cwd(),
+                env=self._cpp_worker_env(),
+                stdout=log_file,
+                stderr=log_file,
+                text=True,
+                start_new_session=(os.name != "nt"),
+            )
+            instance.worker_signature = signature
+            instance.worker_config_path = package_dir / "src" / f"{package_name}.cpp"
+            instance.worker_log_path = log_path
+            instance.worker_pid_path = pid_path
+            pid_path.write_text(str(instance.worker_process.pid), encoding="utf-8")
+            instance.env_status = "C++ worker running"
+            return True
+        except subprocess.CalledProcessError as exc:
+            detail = str(exc)
+            try:
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                detail = next((line for line in reversed(lines) if line.strip()), detail)
+            except Exception:
+                pass
+            instance.env_status = f"C++ build failed: {detail}"
+            instance.worker_log_path = log_path
+            instance.log(instance.env_status)
+            return False
+        except Exception as exc:
+            instance.env_status = f"C++ worker setup failed: {exc}"
+            instance.worker_log_path = log_path
+            instance.log(instance.env_status)
+            return False
+
+    def _write_cpp_project(self, config: CustomLwrclNodeConfig, cpp_root: Path, package_dir: Path, package_name: str) -> None:
+        src_dir = package_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        node = self._cpp_codegen_node(config, package_name)
+        (cpp_root / "CMakeLists.txt").write_text(
+            f"""cmake_minimum_required(VERSION 3.16)
+project(lwrcl_cpp_worker)
+
+add_subdirectory({package_name})
+""",
+            encoding="utf-8",
+        )
+        (package_dir / "CMakeLists.txt").write_text(render_cpp_node_cmake(node), encoding="utf-8")
+        (src_dir / f"{package_name}.cpp").write_text(render_cpp_node_source(node, run_hz=self._cpp_run_hz(config)), encoding="utf-8")
+
+    def _cpp_codegen_node(self, config: CustomLwrclNodeConfig, package_name: str) -> dict[str, Any]:
+        node = {
+            "id": config.id,
+            "name": config.name,
+            "package_name": package_name,
+            "executable_name": package_name,
+            "ros_node_name": package_name,
+            "class_name": safe_cpp_identifier("".join(part.capitalize() for part in package_name.split("_")), "GeneratedNode"),
+            "inputs": [self._port_dict(port, include_callback=True) | {"topics": list(port.topics)} for port in config.inputs if not self._is_visual_tf_port(config, port)],
+            "outputs": [self._port_dict(port, include_callback=False) | {"topics": list(port.topics)} for port in config.outputs if not self._is_visual_tf_port(config, port)],
+            "loopCode": config.loop_code,
+            "timers": [self._timer_dict(timer) for timer in config.timers],
+            "importCode": config.import_code,
+            "requirements": config.requirements,
+            "cppCode": config.cpp_code,
+        }
+        node["message_packages"] = cpp_message_packages_for_node(node)
+        return node
+
+    def _cpp_worker_signature(self, config: CustomLwrclNodeConfig) -> tuple[Any, ...]:
+        return (
+            "cpp-worker-v1",
+            config.id,
+            config.name,
+            config.import_code,
+            config.loop_code,
+            config.cpp_code,
+            config.requirements,
+            self._cpp_run_hz(config),
+            tuple((timer.id, timer.name, timer.period_sec, timer.callback_code) for timer in config.timers),
+            tuple((p.id, p.name, p.data_type, p.topics, p.receive_mode, p.callback_code) for p in config.inputs),
+            tuple((p.id, p.name, p.data_type, p.topics) for p in config.outputs),
+        )
+
+    def _cpp_package_name(self, config: CustomLwrclNodeConfig) -> str:
+        base = re.sub(r"[^a-z0-9_]", "_", str(config.name or config.id or "cpp_node").lower()).strip("_") or "cpp_node"
+        if base[0].isdigit():
+            base = f"node_{base}"
+        return f"{base}_{safe_cpp_identifier(config.id).lower()}"
+
+    def _cpp_run_hz(self, config: CustomLwrclNodeConfig) -> float:
+        try:
+            return max(1.0, min(float(config.params.get("_runHz") or DEFAULT_RUN_HZ), 120.0))
+        except Exception:
+            return DEFAULT_RUN_HZ
+
+    def _cpp_worker_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        prefixes = [
+            str(Path("/opt/fast-dds-libs")),
+            str(Path("/opt/fast-dds")),
+            str(Path("/opt/cyclonedds-libs")),
+            str(Path("/opt/vsomeip-libs")),
+        ]
+        existing_prefix = env.get("CMAKE_PREFIX_PATH", "")
+        env["CMAKE_PREFIX_PATH"] = os.pathsep.join([*prefixes, *([existing_prefix] if existing_prefix else [])])
+        lib_paths = [str(Path(prefix) / "lib") for prefix in prefixes]
+        for key in ("DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+            existing = env.get(key, "")
+            env[key] = os.pathsep.join([*lib_paths, *([existing] if existing else [])])
+        env.setdefault("FASTDDS_BUILTIN_TRANSPORTS", os.environ.get("LWRCLPY_WEB_FASTDDS_TRANSPORTS", "LARGE_DATA"))
+        env.setdefault("LWRCLPY_NO_DATASHARING", "1")
+        return env
+
     def _ensure_worker_process(self, config: CustomLwrclNodeConfig, instance: CustomLwrclNodeInstance, python_bin: Path) -> bool:
         signature = self._worker_signature(config)
         if instance.worker_process is not None and instance.worker_process.poll() is None and instance.worker_signature == signature:
@@ -3628,6 +3817,8 @@ class GraphRuntime:
             requirements=str(node.get("requirements", "")),
             python_version=str(node.get("pythonVersion", "")),
             lwrclpy_version=str(node.get("lwrclpyVersion", "")),
+            cpp_code=str(node.get("cppCode", "")),
+            language=str(node.get("language") or "python").strip().lower(),
             tool_type=tool_type,
             params=dict(node.get("params", {}) if isinstance(node.get("params", {}), dict) else {}),
         )
