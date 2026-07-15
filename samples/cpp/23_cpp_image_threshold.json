@@ -4668,7 +4668,7 @@
           "dataType": "std_msgs/msg/Float32"
         }
       ],
-      "loopCode": "rclcpp::spin_some(node);\n// No periodic work by default.\nloop_rate.sleep();\n",
+      "loopCode": "// Loop Code runs repeatedly while rclcpp::ok() is true.\n// Keep rclcpp::spin_some(node) and loop_rate.sleep() here to process\n// callbacks without creating a busy loop.\n// Available:\n//   node, loop_rate, now\n//   has_<input_id>(), latest_<input_id>()\n//   publish_<output_id>(message)\n//\n// Add periodic work between spin_some(...) and loop_rate.sleep().\nrclcpp::spin_some(node);\n// Example:\n//   if (has_in1()) {\n//     auto value = latest_in1()->data;\n//   }\nloop_rate.sleep();\n",
       "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,

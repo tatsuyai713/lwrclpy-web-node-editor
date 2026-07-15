@@ -57,51 +57,141 @@ const $ = (id) => document.getElementById(id);
 const workspace = () => $('workspace');
 const scene = () => $('scene');
 
-const DEFAULT_CALLBACK_CODE = `# lwrclpy subscription/service callback body.
-# Available: node, input_id, msg, request, response, state, publish(output_id, value), log(...)
-node.get_logger().info(f"received {input_id}")
-
-# Example for std_msgs/msg/String:
-# publish("out1", msg.data)
+const DEFAULT_CALLBACK_CODE = `# This callback runs when this input receives a ROS 2 message.
+# Write per-message processing here.
+# Available:
+#   node: rclpy Node
+#   input_id: this input port id
+#   msg: received message object
+#   request/response: service callback objects, when this input is a service
+#   state: dict for values that must persist between callbacks
+#   publish(output_id, value): publish to an output port
+#   log(...): print to this node log
+#
+# Examples:
+#   log("received", input_id)
+#   publish("out1", {"data": float(msg.data)})
 `;
 
-const DEFAULT_LOOP_CODE = `# Optional lwrclpy-compatible spin tick body.
-# Prefer input callback code for data-dependent processing.
-# Available: node, state, now, publish(output_id, value), log(...)
-`;
-
-const DEFAULT_TIMER_CODE = `# lwrclpy timer callback body.
-# Available: node, timer_id, timer_name, state, now, period, publish(output_id, value), log(...)
-
+const DEFAULT_LOOP_CODE = `# Main Loop runs repeatedly while the graph is running.
+# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
+# without creating a busy loop.
+# Available:
+#   rclpy, node, rate, run_hz, loop_period, state, now
+#   latest(input_id), take(input_id), has_input(input_id)
+#   publish(output_id, value), log(...)
+#
+# Add periodic work between spin_once(...) and rate.sleep().
+rclpy.spin_once(node, timeout_sec=0.0)
 # Example:
-# state["count"] = state.get("count", 0) + 1
-# publish("out1", state["count"])
+# if has_input("in1"):
+#     msg = latest("in1")
+#     publish("out1", msg)
+rate.sleep()
 `;
 
-const DEFAULT_IMPORT_CODE = `# Node-level imports run after this node's venv is ready.
+const DEFAULT_TIMER_CODE = `# This timer callback runs every periodSec seconds.
+# Write fixed-rate processing here.
+# Available:
+#   node, timer_id, timer_name, state, now, period
+#   latest(input_id), take(input_id), has_input(input_id)
+#   publish(output_id, value), log(...)
+#
 # Example:
-# import cv2
-# import numpy as np
+#   state["count"] = state.get("count", 0) + 1
+#   publish("out1", {"data": float(state["count"])})
 `;
-const DEFAULT_CPP_CALLBACK_CODE = `// C++ subscription callback body.
-// Available: msg, publish_<output_id>(msg), has_<input_id>(), latest_<input_id>(), now.
+
+const DEFAULT_IMPORT_CODE = `# Import Code runs once after this node's Python venv is ready.
+# Put imports, helper functions, constants, and class definitions here.
+# They are available from Callback, Main Loop, and Timer code.
+#
+# Examples:
+#   import math
+#   import cv2
+#   import numpy as np
+#
+# class MyFilter:
+#     def update(self, value):
+#         return value
 `;
-const DEFAULT_CPP_LOOP_CODE = `// C++ loop body. Called at the graph run rate.
+const DEFAULT_REQUIREMENTS_CODE = `# Python packages installed into this node's venv.
+# Write one package requirement per line, using requirements.txt syntax.
+#
+# Examples:
+# numpy
+# opencv-python
+# ultralytics
+`;
+const DEFAULT_CPP_CALLBACK_CODE = `// This callback runs when this input receives a ROS 2 message.
+// Write per-message C++ processing here.
+// Available:
+//   msg: received message
+//   now: std::chrono::steady_clock::time_point
+//   publish_<output_id>(message)
+//   has_<input_id>(), latest_<input_id>()
+//
+// Example:
+//   std_msgs::msg::Float32 out;
+//   out.data = msg.data;
+//   publish_out1(out);
+`;
+const DEFAULT_CPP_LOOP_CODE = `// Loop Code runs repeatedly while rclcpp::ok() is true.
+// Keep rclcpp::spin_some(node) and loop_rate.sleep() here to process
+// callbacks without creating a busy loop.
+// Available:
+//   node, loop_rate, now
+//   has_<input_id>(), latest_<input_id>()
+//   publish_<output_id>(message)
+//
+// Add periodic work between spin_some(...) and loop_rate.sleep().
 rclcpp::spin_some(node);
-// No periodic work by default.
+// Example:
+//   if (has_in1()) {
+//     auto value = latest_in1()->data;
+//   }
 loop_rate.sleep();
 `;
-const DEFAULT_CPP_TIMER_CODE = `// C++ timer callback body.
-// Available: publish_<output_id>(msg), has_<input_id>(), latest_<input_id>(), now.
-`;
-const DEFAULT_CPP_HEADER_CODE = `// C++ header section inserted after generated includes.
+const DEFAULT_CPP_TIMER_CODE = `// This timer callback runs every periodSec seconds.
+// Write fixed-rate C++ processing here.
+// Available:
+//   now
+//   publish_<output_id>(message)
+//   has_<input_id>(), latest_<input_id>()
+//
 // Example:
-// #include <cmath>
-// class MyFilter { ... };
-// static MyFilter filter;
+//   std_msgs::msg::Float32 out;
+//   out.data = 1.0f;
+//   publish_out1(out);
 `;
-const DEFAULT_CPP_CODE = `// C++ initialize body. Called once after publishers/subscriptions are created.
-// Use this to initialize objects declared in Header.
+const DEFAULT_CPP_HEADER_CODE = `// Header is inserted after generated #include lines.
+// Put extra #include lines, helper functions, constants, structs,
+// classes, and static objects here.
+//
+// Examples:
+//   #include <cmath>
+//
+//   class MyFilter {
+//   public:
+//     double update(double value) { return value; }
+//   };
+//
+//   static MyFilter filter;
+`;
+const DEFAULT_CPP_CODE = `// Initialize Code runs once in the generated node constructor
+// after publishers/subscriptions are created and before timers start.
+// Configure objects declared in Header here.
+//
+// Example:
+//   // filter.configure(0.1);
+`;
+const DEFAULT_CPP_LINK_LIBRARIES_CODE = `# C++ libraries/options linked into this node target.
+# Write one or more linker items per line.
+#
+# Examples:
+# -lm
+# -lmy_library
+# /absolute/path/to/libfoo.a
 `;
 const DEFAULT_NODE_WIDTH = 320;
 const DEFAULT_NODE_MIN_HEIGHT = 88;
@@ -504,7 +594,7 @@ function createDefaultNode(pos = centerWorld()) {
     importCode: DEFAULT_IMPORT_CODE,
     cppCode: DEFAULT_CPP_CODE,
     language: 'python',
-    requirements: '',
+    requirements: DEFAULT_REQUIREMENTS_CODE,
     pythonVersion: defaultPythonVersion(),
     lwrclpyVersion: defaultLwrclpyVersion(),
   };
@@ -922,7 +1012,7 @@ function openNodeDialog(node = null) {
   $('config-tf-input').checked = Boolean(draft.params?.tfInputEnabled);
   $('config-tf-output').checked = Boolean(draft.params?.tfOutputEnabled);
   $('config-timer-count').value = draft.timers.length;
-  $('config-cpp-link-libraries').value = draft.requirements || '';
+  $('config-cpp-link-libraries').value = draft.language === 'cpp' ? (draft.requirements || DEFAULT_CPP_LINK_LIBRARIES_CODE) : '';
   renderConfigPorts();
   $('node-dialog').showModal();
 }
@@ -964,8 +1054,11 @@ function renderConfigPorts() {
   const isCpp = draft.language === 'cpp';
   $('config-python-version').disabled = isCpp;
   $('config-lwrclpy-version').disabled = isCpp;
-  $('config-cpp-link-libraries-field').hidden = !isCpp;
-  draft.requirements = isCpp ? $('config-cpp-link-libraries').value : (draft.requirements || '');
+  const cppLinkLibrariesField = $('config-cpp-link-libraries-field');
+  cppLinkLibrariesField.hidden = !isCpp;
+  cppLinkLibrariesField.style.display = isCpp ? '' : 'none';
+  $('config-cpp-link-libraries').disabled = !isCpp;
+  draft.requirements = isCpp ? $('config-cpp-link-libraries').value : (draft.requirements || DEFAULT_REQUIREMENTS_CODE);
   draft.pythonVersion = $('config-python-version').value || draft.pythonVersion || defaultPythonVersion();
   draft.lwrclpyVersion = $('config-lwrclpy-version').value || draft.lwrclpyVersion || defaultLwrclpyVersion();
   draft.params = { ...(draft.params || {}), tfInputEnabled: $('config-tf-input').checked, tfOutputEnabled: $('config-tf-output').checked };
@@ -992,6 +1085,7 @@ function normalizeNodeLanguageDefaults(node) {
     if (!node.importCode || node.importCode === DEFAULT_IMPORT_CODE) node.importCode = DEFAULT_CPP_HEADER_CODE;
     if (!node.loopCode || node.loopCode === DEFAULT_LOOP_CODE) node.loopCode = DEFAULT_CPP_LOOP_CODE;
     if (!node.timerCode || node.timerCode === DEFAULT_TIMER_CODE) node.timerCode = DEFAULT_CPP_TIMER_CODE;
+    if (!node.requirements || node.requirements === DEFAULT_REQUIREMENTS_CODE) node.requirements = DEFAULT_CPP_LINK_LIBRARIES_CODE;
     (node.inputs || []).forEach((port) => {
       if ((port.receiveMode || 'callback') === 'callback' && (!port.callbackCode || port.callbackCode === DEFAULT_CALLBACK_CODE)) {
         port.callbackCode = DEFAULT_CPP_CALLBACK_CODE;
@@ -1006,6 +1100,7 @@ function normalizeNodeLanguageDefaults(node) {
   if (!node.importCode || node.importCode === DEFAULT_CPP_HEADER_CODE) node.importCode = DEFAULT_IMPORT_CODE;
   if (!node.loopCode || node.loopCode === DEFAULT_CPP_LOOP_CODE) node.loopCode = DEFAULT_LOOP_CODE;
   if (!node.timerCode || node.timerCode === DEFAULT_CPP_TIMER_CODE) node.timerCode = DEFAULT_TIMER_CODE;
+  if (!node.requirements || node.requirements === DEFAULT_CPP_LINK_LIBRARIES_CODE) node.requirements = DEFAULT_REQUIREMENTS_CODE;
   (node.inputs || []).forEach((port) => {
     if ((port.receiveMode || 'callback') === 'callback' && (!port.callbackCode || port.callbackCode === DEFAULT_CPP_CALLBACK_CODE)) {
       port.callbackCode = DEFAULT_CALLBACK_CODE;
@@ -1222,7 +1317,7 @@ function saveNodeDialog(ev) {
   normalizeNodeLanguageDefaults(draft);
   draft.pythonVersion = $('config-python-version').value || draft.pythonVersion || defaultPythonVersion();
   draft.lwrclpyVersion = $('config-lwrclpy-version').value || draft.lwrclpyVersion || defaultLwrclpyVersion();
-  if (draft.language === 'cpp') draft.requirements = $('config-cpp-link-libraries').value || '';
+  if (draft.language === 'cpp') draft.requirements = $('config-cpp-link-libraries').value || DEFAULT_CPP_LINK_LIBRARIES_CODE;
   draft.params = { ...(draft.params || {}), tfInputEnabled: $('config-tf-input').checked, tfOutputEnabled: $('config-tf-output').checked };
   applyCustomTfPorts(draft);
   draft.timers = resizeTimers(normalizeTimers(draft), Number($('config-timer-count').value || 0));
@@ -1261,7 +1356,7 @@ function openCodeDialog(node, kind) {
     : (isCpp ? `${node.name}: Initialize Code` : (isTimer ? `${node.name}.${timer?.name || 'timer'}: Timer Callback Code` : (isImport ? `${node.name}: ${nodeIsCpp ? 'Header' : 'Import Code'}` : (isRequirements ? `${node.name}: ${nodeIsCpp ? 'Link Libraries' : 'requirements.txt'}` : `${node.name}: ${nodeIsCpp ? 'Loop Code' : 'Main Loop Code'}`))));
   $('code-editor').value = callbackPort
     ? (callbackPort.callbackCode || '')
-    : (isCpp ? (node.cppCode || DEFAULT_CPP_CODE) : (isTimer ? (timer?.callbackCode || node.timerCode || DEFAULT_TIMER_CODE) : (isImport ? (node.importCode || DEFAULT_IMPORT_CODE) : (isRequirements ? (node.requirements || '') : (node.loopCode || '')))));
+    : (isCpp ? (node.cppCode || DEFAULT_CPP_CODE) : (isTimer ? (timer?.callbackCode || node.timerCode || DEFAULT_TIMER_CODE) : (isImport ? (node.importCode || DEFAULT_IMPORT_CODE) : (isRequirements ? (node.requirements || (nodeIsCpp ? DEFAULT_CPP_LINK_LIBRARIES_CODE : DEFAULT_REQUIREMENTS_CODE)) : (node.loopCode || '')))));
   $('code-hint').textContent = callbackPort
     ? (nodeIsCpp
       ? 'C++ callback scope: msg, now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg). This runs when the input subscription receives a message.'
@@ -6119,7 +6214,6 @@ import sys
 import time
 
 import rclpy
-from rclpy.executors import MultiThreadedExecutor
 
 
 def import_type_class(type_name):
@@ -6141,6 +6235,36 @@ def sanitize_node_name(name):
   return text
 
 
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
+# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
+# without creating a busy loop.
+# Available:
+#   rclpy, node, rate, run_hz, loop_period, state, now
+#   latest(input_id), take(input_id), has_input(input_id)
+#   publish(output_id, value), log(...)
+#
+# Add periodic work between spin_once(...) and rate.sleep().
+rclpy.spin_once(node, timeout_sec=0.0)
+# Example:
+# if has_input("in1"):
+#     msg = latest("in1")
+#     publish("out1", msg)
+rate.sleep()
+"""
+
+
+class LoopRate:
+  def __init__(self, hz):
+    self.hz = max(1.0, float(hz or 60.0))
+
+  @property
+  def period(self):
+    return 1.0 / self.hz
+
+  def sleep(self):
+    time.sleep(self.period)
+
+
 class ExportedNode:
   def __init__(self, config):
     self.config = config
@@ -6150,9 +6274,10 @@ class ExportedNode:
     self.last_inputs = {}
     self.input_queues = {}
     self.last_outputs = {}
-    self.next_timer_at = 0.0
-    self.next_timer_by_id = {}
-    self.publishers = {}
+	    self.next_timer_at = 0.0
+	    self.next_timer_by_id = {}
+	    self.next_loop_at = 0.0
+	    self.publishers = {}
     self.clients = {}
     self.subscriptions = []
     self.services = []
@@ -6202,10 +6327,16 @@ class ExportedNode:
   def has_input(self, input_id):
     return bool(self.input_queues.get(input_id))
 
-  def log(self, *values):
-    print(f'[{self.node_config["name"]}]', *values)
-
-  def spin_tick(self):
+	  def log(self, *values):
+	    print(f'[{self.node_config["name"]}]', *values)
+	
+	  def _run_hz(self):
+	    try:
+	      return max(1.0, min(float(self.node_config.get('params', {}).get('_runHz') or 60.0), 120.0))
+	    except Exception:
+	      return 60.0
+	
+	  def spin_tick(self):
     outputs = {}
     inputs = dict(self.last_inputs)
     self._execute_timer_if_due(inputs, outputs)
@@ -6242,11 +6373,12 @@ class ExportedNode:
     except Exception as exc:
       self.log(f'{input_port["id"]} callback error: {exc}')
 
-  def _execute_loop(self, inputs, outputs):
-    code = self.node_config.get('loopCode', '').strip()
-    if not code:
-      return
-    local = self._locals({'inputs': inputs, 'outputs': outputs, 'now': time.time(), 'latest': self.latest, 'take': self.take, 'has_input': self.has_input})
+	  def _execute_loop(self, inputs, outputs):
+	    code = self.node_config.get('loopCode', '').strip()
+	    if not code:
+	      code = DEFAULT_PYTHON_LOOP_CODE
+	    run_hz = self._run_hz()
+	    local = self._locals({'inputs': inputs, 'outputs': outputs, 'now': time.time(), 'latest': self.latest, 'take': self.take, 'has_input': self.has_input, 'rclpy': rclpy, 'run_hz': run_hz, 'loop_period': 1.0 / run_hz, 'rate': LoopRate(run_hz)})
     try:
       exec(code, self._globals(), local)
     except Exception as exc:
@@ -6341,12 +6473,12 @@ class ExportedNode:
   def _param_globals(self, params):
     if not isinstance(params, dict):
       return {}
-    reserved = {
-      'node', 'params', 'state', 'publish', 'log',
-      'input_id', 'msg', 'request', 'response',
-      'inputs', 'outputs', 'now', 'period',
-      'timer_id', 'timer_name', 'latest', 'take', 'has_input',
-    }
+	    reserved = {
+	      'node', 'params', 'state', 'publish', 'log',
+	      'input_id', 'msg', 'request', 'response',
+	      'inputs', 'outputs', 'now', 'period', 'run_hz', 'loop_period', 'rate', 'rclpy',
+	      'timer_id', 'timer_name', 'latest', 'take', 'has_input',
+	    }
     return {
       key: value
       for key, value in params.items()
@@ -6402,19 +6534,15 @@ class ExportedNode:
     return request
 
 
-def run_node(config, args=None):
-  rclpy.init(args=args)
-  exported = ExportedNode(config)
-  executor = MultiThreadedExecutor()
-  executor.add_node(exported.node)
-  try:
-    while rclpy.ok():
-      executor.spin_once(timeout_sec=0.05)
-      exported.spin_tick()
-  finally:
-    executor.remove_node(exported.node)
-    exported.node.destroy_node()
-    rclpy.shutdown()
+	def run_node(config, args=None):
+	  rclpy.init(args=args)
+	  exported = ExportedNode(config)
+	  try:
+	    while rclpy.ok():
+	      exported.spin_tick()
+	  finally:
+	    exported.node.destroy_node()
+	    rclpy.shutdown()
 `;
 }
 
@@ -6549,7 +6677,6 @@ import time
 from pathlib import Path
 
 import rclpy
-from rclpy.executors import MultiThreadedExecutor
 
 
 CONFIG = ${pythonJsonLoadExpression(configWithoutInlineCode(config))}
@@ -6575,6 +6702,36 @@ def sanitize_node_name(name):
     return text
 
 
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
+# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
+# without creating a busy loop.
+# Available:
+#   rclpy, node, rate, run_hz, loop_period, state, now
+#   latest(input_id), take(input_id), has_input(input_id)
+#   publish(output_id, value), log(...)
+#
+# Add periodic work between spin_once(...) and rate.sleep().
+rclpy.spin_once(node, timeout_sec=0.0)
+# Example:
+# if has_input("in1"):
+#     msg = latest("in1")
+#     publish("out1", msg)
+rate.sleep()
+"""
+
+
+class LoopRate:
+    def __init__(self, hz):
+        self.hz = max(1.0, float(hz or 60.0))
+
+    @property
+    def period(self):
+        return 1.0 / self.hz
+
+    def sleep(self):
+        time.sleep(self.period)
+
+
 class ProjectNode:
     def __init__(self, config):
         self.config = config
@@ -6583,10 +6740,11 @@ class ProjectNode:
         self.state = {}
         self.last_inputs = {}
         self.input_queues = {}
-        self.last_outputs = {}
-        self.next_timer_at = 0.0
-        self.next_timer_by_id = {}
-        self.publishers = {}
+	        self.last_outputs = {}
+	        self.next_timer_at = 0.0
+	        self.next_timer_by_id = {}
+	        self.next_loop_at = 0.0
+	        self.publishers = {}
         self.clients = {}
         self.subscriptions = []
         self.services = []
@@ -6671,10 +6829,16 @@ class ProjectNode:
     def has_input(self, input_id):
         return bool(self.input_queues.get(input_id))
 
-    def log(self, *values):
-        print(f"[{self.node_config['name']}]", *values)
-
-    def spin_tick(self):
+	    def log(self, *values):
+	        print(f"[{self.node_config['name']}]", *values)
+	
+	    def _run_hz(self):
+	        try:
+	            return max(1.0, min(float(self.node_config.get("params", {}).get("_runHz") or 60.0), 120.0))
+	        except Exception:
+	            return 60.0
+	
+	    def spin_tick(self):
         outputs = {}
         inputs = dict(self.last_inputs)
         self._execute_timer_if_due(inputs, outputs)
@@ -6711,11 +6875,12 @@ class ProjectNode:
         except Exception as exc:
             self.log(f"{input_port['id']} callback error: {exc}")
 
-    def _execute_loop(self, inputs, outputs):
-        code = self.node_config.get("loopCode", "").strip()
-        if not code:
-            return
-        local = self._locals({"inputs": inputs, "outputs": outputs, "now": time.time(), "latest": self.latest, "take": self.take, "has_input": self.has_input})
+	    def _execute_loop(self, inputs, outputs):
+	        code = self.node_config.get("loopCode", "").strip()
+	        if not code:
+	            code = DEFAULT_PYTHON_LOOP_CODE
+	        run_hz = self._run_hz()
+	        local = self._locals({"inputs": inputs, "outputs": outputs, "now": time.time(), "latest": self.latest, "take": self.take, "has_input": self.has_input, "rclpy": rclpy, "run_hz": run_hz, "loop_period": 1.0 / run_hz, "rate": LoopRate(run_hz)})
         try:
             exec(code, self._globals(), local)
         except Exception as exc:
@@ -6773,9 +6938,9 @@ class ProjectNode:
         self._sync_param_globals(globals_dict)
         return globals_dict
 
-    def _locals(self, extra):
-        params = self.node_config.get("params", {})
-        return {"params": params, "state": self.state, "publish": self.publish, "log": self.log, **self._param_globals(params), **extra}
+	    def _locals(self, extra):
+	        params = self.node_config.get("params", {})
+	        return {"node": self.node, "params": params, "state": self.state, "publish": self.publish, "log": self.log, **self._param_globals(params), **extra}
 
     def _sync_param_globals(self, globals_dict):
         previous = globals_dict.get("__lwrclpy_param_names__", set())
@@ -6789,12 +6954,12 @@ class ProjectNode:
     def _param_globals(self, params):
         if not isinstance(params, dict):
             return {}
-        reserved = {
-            "node", "params", "state", "publish", "log",
-            "input_id", "msg", "request", "response",
-            "inputs", "outputs", "now", "period",
-            "timer_id", "timer_name", "latest", "take", "has_input",
-        }
+	        reserved = {
+	            "node", "params", "state", "publish", "log",
+	            "input_id", "msg", "request", "response",
+	            "inputs", "outputs", "now", "period", "run_hz", "loop_period", "rate", "rclpy",
+	            "timer_id", "timer_name", "latest", "take", "has_input",
+	        }
         return {
             key: value
             for key, value in params.items()
@@ -6850,22 +7015,17 @@ class ProjectNode:
         return request
 
 
-def main():
-    rclpy.init(args=None)
-    nodes = [ProjectNode(item) for item in CONFIG.get("nodes", [])]
-    executor = MultiThreadedExecutor()
-    for item in nodes:
-        executor.add_node(item.node)
-    try:
-        while rclpy.ok():
-            executor.spin_once(timeout_sec=0.05)
-            for item in nodes:
-                item.spin_tick()
-    finally:
-        for item in nodes:
-            executor.remove_node(item.node)
-            item.node.destroy_node()
-        rclpy.shutdown()
+	def main():
+	    rclpy.init(args=None)
+	    nodes = [ProjectNode(item) for item in CONFIG.get("nodes", [])]
+	    try:
+	        while rclpy.ok():
+	            for item in nodes:
+	                item.spin_tick()
+	    finally:
+	        for item in nodes:
+	            item.node.destroy_node()
+	        rclpy.shutdown()
 
 
 if __name__ == "__main__":
@@ -6911,7 +7071,6 @@ import re
 import time
 
 import rclpy
-from rclpy.executors import MultiThreadedExecutor
 
 
 CONFIG = ${pythonJsonLoadExpression(configWithoutInlineCode(config))}
@@ -6937,6 +7096,36 @@ def sanitize_node_name(name):
     return text
 
 
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
+# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
+# without creating a busy loop.
+# Available:
+#   rclpy, node, rate, run_hz, loop_period, state, now
+#   latest(input_id), take(input_id), has_input(input_id)
+#   publish(output_id, value), log(...)
+#
+# Add periodic work between spin_once(...) and rate.sleep().
+rclpy.spin_once(node, timeout_sec=0.0)
+# Example:
+# if has_input("in1"):
+#     msg = latest("in1")
+#     publish("out1", msg)
+rate.sleep()
+"""
+
+
+class LoopRate:
+    def __init__(self, hz):
+        self.hz = max(1.0, float(hz or 60.0))
+
+    @property
+    def period(self):
+        return 1.0 / self.hz
+
+    def sleep(self):
+        time.sleep(self.period)
+
+
 class ExportedNode:
     def __init__(self, config):
         self.config = config
@@ -6945,10 +7134,11 @@ class ExportedNode:
         self.state = {}
         self.last_inputs = {}
         self.input_queues = {}
-        self.last_outputs = {}
-        self.next_timer_at = 0.0
-        self.next_timer_by_id = {}
-        self.publishers = {}
+	        self.last_outputs = {}
+	        self.next_timer_at = 0.0
+	        self.next_timer_by_id = {}
+	        self.next_loop_at = 0.0
+	        self.publishers = {}
         self.clients = {}
         self.subscriptions = []
         self.services = []
@@ -6996,10 +7186,16 @@ class ExportedNode:
     def has_input(self, input_id):
         return bool(self.input_queues.get(input_id))
 
-    def log(self, *values):
-        print(*values)
-
-    def spin_tick(self):
+	    def log(self, *values):
+	        print(*values)
+	
+	    def _run_hz(self):
+	        try:
+	            return max(1.0, min(float(self.node_config.get("params", {}).get("_runHz") or 60.0), 120.0))
+	        except Exception:
+	            return 60.0
+	
+	    def spin_tick(self):
         outputs = {}
         inputs = dict(self.last_inputs)
         self._execute_timer_if_due(inputs, outputs)
@@ -7042,18 +7238,23 @@ class ExportedNode:
         except Exception as exc:
             self.log(f"{input_port['id']} callback error: {exc}")
 
-    def _execute_loop(self, inputs, outputs):
-        code = self.node_config.get("loopCode", "").strip()
-        if not code:
-            return
-        local = self._locals({
-            "inputs": inputs,
-            "outputs": outputs,
-            "now": time.time(),
-            "latest": self.latest,
-            "take": self.take,
-            "has_input": self.has_input,
-        })
+	    def _execute_loop(self, inputs, outputs):
+	        code = self.node_config.get("loopCode", "").strip()
+	        if not code:
+	            code = DEFAULT_PYTHON_LOOP_CODE
+	        run_hz = self._run_hz()
+	        local = self._locals({
+	            "inputs": inputs,
+	            "outputs": outputs,
+	            "now": time.time(),
+	            "latest": self.latest,
+	            "take": self.take,
+	            "has_input": self.has_input,
+	            "rclpy": rclpy,
+	            "run_hz": run_hz,
+	            "loop_period": 1.0 / run_hz,
+	            "rate": LoopRate(run_hz),
+	        })
         try:
             exec(code, self._globals(), local)
         except Exception as exc:
@@ -7134,10 +7335,11 @@ class ExportedNode:
 
     def _locals(self, extra):
         params = self.node_config.get("params", {})
-        return {
-            "params": params,
-            "state": self.state,
-            "publish": self.publish,
+	        return {
+	            "node": self.node,
+	            "params": params,
+	            "state": self.state,
+	            "publish": self.publish,
             "log": self.log,
             **self._param_globals(params),
             **extra,
@@ -7155,12 +7357,12 @@ class ExportedNode:
     def _param_globals(self, params):
         if not isinstance(params, dict):
             return {}
-        reserved = {
-            "node", "params", "state", "publish", "log",
-            "input_id", "msg", "request", "response",
-            "inputs", "outputs", "now", "period",
-            "timer_id", "timer_name", "latest", "take", "has_input",
-        }
+	        reserved = {
+	            "node", "params", "state", "publish", "log",
+	            "input_id", "msg", "request", "response",
+	            "inputs", "outputs", "now", "period", "run_hz", "loop_period", "rate", "rclpy",
+	            "timer_id", "timer_name", "latest", "take", "has_input",
+	        }
         return {
             key: value
             for key, value in params.items()
@@ -7216,19 +7418,15 @@ class ExportedNode:
         return request
 
 
-def main():
-    rclpy.init(args=None)
-    exported = ExportedNode(CONFIG)
-    executor = MultiThreadedExecutor()
-    executor.add_node(exported.node)
-    try:
-        while rclpy.ok():
-            executor.spin_once(timeout_sec=0.05)
-            exported.spin_tick()
-    finally:
-        executor.remove_node(exported.node)
-        exported.node.destroy_node()
-        rclpy.shutdown()
+	def main():
+	    rclpy.init(args=None)
+	    exported = ExportedNode(CONFIG)
+	    try:
+	        while rclpy.ok():
+	            exported.spin_tick()
+	    finally:
+	        exported.node.destroy_node()
+	        rclpy.shutdown()
 
 
 if __name__ == "__main__":
@@ -7281,7 +7479,7 @@ function normalizeImportedNode(node) {
     importCode: node.importCode || DEFAULT_IMPORT_CODE,
     cppCode: node.cppCode || DEFAULT_CPP_CODE,
     language: isTool ? '' : (node.language === 'cpp' ? 'cpp' : 'python'),
-    requirements: node.requirements || '',
+    requirements: node.requirements || DEFAULT_REQUIREMENTS_CODE,
     pythonVersion: isTool ? '' : (node.pythonVersion || defaultPythonVersion()),
     lwrclpyVersion: isTool ? '' : (node.lwrclpyVersion || defaultLwrclpyVersion()),
     toolType: node.toolType || '',

@@ -12,6 +12,24 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
+# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
+# without creating a busy loop.
+# Available:
+#   rclpy, node, rate, run_hz, loop_period, state, now
+#   latest(input_id), take(input_id), has_input(input_id)
+#   publish(output_id, value), log(...)
+#
+# Add periodic work between spin_once(...) and rate.sleep().
+rclpy.spin_once(node, timeout_sec=0.0)
+# Example:
+# if has_input("in1"):
+#     msg = latest("in1")
+#     publish("out1", msg)
+rate.sleep()
+"""
+
+
 os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
 EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
     "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
@@ -80,13 +98,23 @@ def subscriber_qos(data_type: str, topic: str = "") -> Any:
     return topic_qos(data_type, depth=5, reliable=False, topic=topic)
 
 
+class LoopRate:
+    def __init__(self, hz: float) -> None:
+        self.hz = max(1.0, float(hz or 60.0))
+
+    @property
+    def period(self) -> float:
+        return 1.0 / self.hz
+
+    def sleep(self) -> None:
+        time.sleep(self.period)
+
+
 class LwrclpyWorkerNode:
     def __init__(self, config: dict[str, Any]) -> None:
         import rclpy
-        from rclpy.executors import MultiThreadedExecutor
 
         self.rclpy = rclpy
-        self.executor = MultiThreadedExecutor()
         self.config = config
         self.node_config = config["node"]
         self.port_topics = config.get("portTopics", {"inputs": {}, "outputs": {}})
@@ -106,7 +134,6 @@ class LwrclpyWorkerNode:
             self.rclpy.init(args=None)
         self.node = self.rclpy.create_node(sanitize_node_name(self.node_config["name"]))
         self._setup_transport()
-        self.executor.add_node(self.node)
 
     def _setup_transport(self) -> None:
         for output in self.node_config.get("outputs", []):
@@ -244,8 +271,20 @@ class LwrclpyWorkerNode:
     def _execute_loop(self, inputs: dict[str, Any], outputs: dict[str, Any]) -> None:
         code = self.node_config.get("loopCode", "").strip()
         if not code:
-            return
-        local = self._locals({"inputs": inputs, "outputs": outputs, "now": time.time(), "latest": self.latest, "take": self.take, "has_input": self.has_input})
+            code = DEFAULT_PYTHON_LOOP_CODE
+        run_hz = self._run_hz()
+        local = self._locals({
+            "inputs": inputs,
+            "outputs": outputs,
+            "now": time.time(),
+            "latest": self.latest,
+            "take": self.take,
+            "has_input": self.has_input,
+            "rclpy": self.rclpy,
+            "run_hz": run_hz,
+            "loop_period": 1.0 / run_hz,
+            "rate": LoopRate(run_hz),
+        })
         try:
             exec(code, self._globals(), local)
         except Exception as exc:
@@ -357,6 +396,10 @@ class LwrclpyWorkerNode:
             "outputs",
             "now",
             "period",
+            "run_hz",
+            "loop_period",
+            "rate",
+            "rclpy",
             "timer_id",
             "timer_name",
             "latest",
@@ -472,7 +515,6 @@ class LwrclpyWorkerNode:
         return request
 
     def close(self) -> None:
-        self.executor.remove_node(self.node)
         self.node.destroy_node()
         self.rclpy.shutdown()
 
@@ -487,7 +529,6 @@ def main(argv: list[str] | None = None) -> int:
     worker = LwrclpyWorkerNode(config)
     try:
         while worker.rclpy.ok():
-            worker.executor.spin_once(timeout_sec=worker.next_event_delay())
             worker.spin_tick()
     finally:
         worker.close()

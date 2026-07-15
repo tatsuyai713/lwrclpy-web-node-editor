@@ -11,9 +11,37 @@ from pathlib import Path
 OUT_DIR = Path(__file__).resolve().parent
 DEFAULT_PYTHON_VERSION = "3.13"
 DEFAULT_LWRCLPY_VERSION = "0.5.1"
-DEFAULT_CPP_NOOP_LOOP = """rclcpp::spin_some(node);
-// No periodic work by default.
+DEFAULT_CPP_NOOP_LOOP = """// Loop Code runs repeatedly while rclcpp::ok() is true.
+// Keep rclcpp::spin_some(node) and loop_rate.sleep() here to process
+// callbacks without creating a busy loop.
+// Available:
+//   node, loop_rate, now
+//   has_<input_id>(), latest_<input_id>()
+//   publish_<output_id>(message)
+//
+// Add periodic work between spin_some(...) and loop_rate.sleep().
+rclcpp::spin_some(node);
+// Example:
+//   if (has_in1()) {
+//     auto value = latest_in1()->data;
+//   }
 loop_rate.sleep();
+"""
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
+# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
+# without creating a busy loop.
+# Available:
+#   rclpy, node, rate, run_hz, loop_period, state, now
+#   latest(input_id), take(input_id), has_input(input_id)
+#   publish(output_id, value), log(...)
+#
+# Add periodic work between spin_once(...) and rate.sleep().
+rclpy.spin_once(node, timeout_sec=0.0)
+# Example:
+# if has_input("in1"):
+#     msg = latest("in1")
+#     publish("out1", msg)
+rate.sleep()
 """
 
 
@@ -507,7 +535,7 @@ def custom_node(
 		"y": y,
 		"inputs": [{"id": pid, "name": pname, "dataType": dtype, "receiveMode": input_receive_mode, "callbackCode": code if input_receive_mode == "callback" else ""} for pid, pname, dtype in inputs],
 		"outputs": [{"id": pid, "name": pname, "dataType": dtype} for pid, pname, dtype in outputs],
-		"loopCode": "",
+		"loopCode": DEFAULT_PYTHON_LOOP_CODE,
 		"timers": timer_items,
 		"timerEnabled": bool(timer_items),
 		"timerPeriodSec": float(timer_items[0].get("periodSec", 1.0)) if timer_items else 1.0,

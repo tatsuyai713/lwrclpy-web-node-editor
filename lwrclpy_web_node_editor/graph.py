@@ -28,6 +28,22 @@ from .cpp_codegen import cpp_message_packages_for_node, render_cpp_node_cmake, r
 from .runtime_exec import find_lwrclpy_installer, local_lwrclpy_wheel, resolve_worker_command
 
 LWRCLPY_RELEASES_API_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
+# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
+# without creating a busy loop.
+# Available:
+#   rclpy, node, rate, run_hz, loop_period, state, now
+#   latest(input_id), take(input_id), has_input(input_id)
+#   publish(output_id, value), log(...)
+#
+# Add periodic work between spin_once(...) and rate.sleep().
+rclpy.spin_once(node, timeout_sec=0.0)
+# Example:
+# if has_input("in1"):
+#     msg = latest("in1")
+#     publish("out1", msg)
+rate.sleep()
+"""
 
 
 def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
@@ -440,7 +456,7 @@ class LwrclpyRuntime:
     def _spin_loop(self) -> None:
         return
 
-    def spin_once(self) -> None:
+    def spin_once(self, *args: Any, **kwargs: Any) -> None:
         # No-op: executor is now spun by the dedicated background thread.
         pass
 
@@ -473,6 +489,18 @@ class PreviewNode:
 
     def get_logger(self) -> PreviewLogger:
         return self._logger
+
+
+class PythonLoopRate:
+    def __init__(self, hz: float) -> None:
+        self.hz = max(1.0, float(hz or DEFAULT_RUN_HZ))
+
+    @property
+    def period(self) -> float:
+        return 1.0 / self.hz
+
+    def sleep(self) -> None:
+        time.sleep(self.period)
 
 
 class CustomLwrclNodeInstance:
@@ -2671,7 +2699,8 @@ class CustomLwrclNodeInstance:
     def _execute_loop(self, inputs: dict[str, Any], outputs: dict[str, Any]) -> None:
         code = self.config.loop_code.strip()
         if not code:
-            return
+            code = DEFAULT_PYTHON_LOOP_CODE
+        run_hz = self._run_hz()
         local = self._locals({
             "inputs": inputs,
             "outputs": outputs,
@@ -2679,6 +2708,10 @@ class CustomLwrclNodeInstance:
             "latest": self.latest,
             "take": self.take,
             "has_input": self.has_input,
+            "rclpy": self.runtime,
+            "run_hz": run_hz,
+            "loop_period": 1.0 / run_hz,
+            "rate": PythonLoopRate(run_hz),
         })
         try:
             exec(code, self._globals(), local)
@@ -3824,6 +3857,8 @@ add_subdirectory({package_name})
         )
         if not tool_type:
             self._apply_custom_tf_ports(config)
+            if config.language not in {"cpp", "c++"} and not config.loop_code.strip():
+                config.loop_code = DEFAULT_PYTHON_LOOP_CODE
         if tool_type == "image_crop_resize":
             config.import_code = IMAGE_CROP_RESIZE_IMPORT_CODE
             config.loop_code = ""

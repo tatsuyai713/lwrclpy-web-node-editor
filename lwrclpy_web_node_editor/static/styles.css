@@ -101,6 +101,9 @@ main {
 .hidden {
   display: none !important;
 }
+[hidden] {
+  display: none !important;
+}
 .management-view {
   height: calc(100vh - 64px);
   overflow: auto;

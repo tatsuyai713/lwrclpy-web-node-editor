@@ -6,8 +6,20 @@ import shlex
 from typing import Any
 
 
-DEFAULT_CPP_NOOP_LOOP = """rclcpp::spin_some(node);
-// No periodic work by default.
+DEFAULT_CPP_NOOP_LOOP = """// Loop Code runs repeatedly while rclcpp::ok() is true.
+// Keep rclcpp::spin_some(node) and loop_rate.sleep() here to process
+// callbacks without creating a busy loop.
+// Available:
+//   node, loop_rate, now
+//   has_<input_id>(), latest_<input_id>()
+//   publish_<output_id>(message)
+//
+// Add periodic work between spin_some(...) and loop_rate.sleep().
+rclcpp::spin_some(node);
+// Example:
+//   if (has_in1()) {
+//     auto value = latest_in1()->data;
+//   }
 loop_rate.sleep();"""
 
 

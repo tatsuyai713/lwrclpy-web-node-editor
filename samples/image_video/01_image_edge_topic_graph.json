@@ -4668,7 +4668,7 @@
           "dataType": "std_msgs/msg/Float32"
         }
       ],
-      "loopCode": "",
+      "loopCode": "# Main Loop runs repeatedly while the graph is running.\n# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks\n# without creating a busy loop.\n# Available:\n#   rclpy, node, rate, run_hz, loop_period, state, now\n#   latest(input_id), take(input_id), has_input(input_id)\n#   publish(output_id, value), log(...)\n#\n# Add periodic work between spin_once(...) and rate.sleep().\nrclpy.spin_once(node, timeout_sec=0.0)\n# Example:\n# if has_input(\"in1\"):\n#     msg = latest(\"in1\")\n#     publish(\"out1\", msg)\nrate.sleep()\n",
       "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
@@ -4705,7 +4705,7 @@
           "dataType": "std_msgs/msg/Float32"
         }
       ],
-      "loopCode": "",
+      "loopCode": "# Main Loop runs repeatedly while the graph is running.\n# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks\n# without creating a busy loop.\n# Available:\n#   rclpy, node, rate, run_hz, loop_period, state, now\n#   latest(input_id), take(input_id), has_input(input_id)\n#   publish(output_id, value), log(...)\n#\n# Add periodic work between spin_once(...) and rate.sleep().\nrclpy.spin_once(node, timeout_sec=0.0)\n# Example:\n# if has_input(\"in1\"):\n#     msg = latest(\"in1\")\n#     publish(\"out1\", msg)\nrate.sleep()\n",
       "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
