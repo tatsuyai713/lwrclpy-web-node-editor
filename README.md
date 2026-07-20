@@ -113,6 +113,32 @@ venv/bin/python -m pip install -r requirements.txt
 scripts/build_macos_standalone.sh
 ```
 
+生成時には `samples/`、Python版の `lwrclpy` runtime、C++ worker用の `cmake`、C++ / `lwrcl` + FastDDS依存が同梱されます。C++依存は次の順で探して `lwrcl_cpp` としてbundleへコピーします。
+
+- `LWRCL_PREFIX`
+- `CPP_DEP_PREFIXES`（`:` 区切りで複数指定可）
+- `/opt/fast-dds-libs`
+- `/opt/fast-dds`
+
+C++依存を事前に最新化してからAppへ入れる場合は、先に次を実行してください。
+
+```bash
+scripts/setup_lwrcl_cpp_env.sh
+scripts/build_macos_standalone.sh
+```
+
+ローカルprefixを使う場合は、セットアップとAppビルドで同じprefixを指定します。
+
+```bash
+scripts/setup_lwrcl_cpp_env.sh \
+  --prefix "$PWD/.local/fast-dds-libs" \
+  --dds-prefix "$PWD/.local/fast-dds"
+
+LWRCL_PREFIX="$PWD/.local/fast-dds-libs" \
+DDS_PREFIX="$PWD/.local/fast-dds" \
+scripts/build_macos_standalone.sh
+```
+
 署名付きでビルドする場合は、`MAC_CODESIGN_IDENTITY` を指定して実行します。
 
 ```bash
@@ -143,6 +169,7 @@ xattr -dr com.apple.quarantine dist/lwrclpy-web-node-editor.app
 
 ```bash
 dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
+open dist/lwrclpy-web-node-editor.app
 dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor --server --host 127.0.0.1 --port 8765
 ```
 
