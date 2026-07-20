@@ -1,32 +1,30 @@
 # lwrclpy Web Node Editor
 
-`lwrclpy Web Node Editor` は、ブラウザ上で画像処理・動画処理・数値処理のノードグラフを作り、各ノードのコードを編集・実行・保存・エクスポートできるWebアプリです。カスタムノードはPython / `lwrclpy` またはC++ / `lwrcl` + FastDDSを選択できます。
+[日本語版 README](README_JA.md)
 
-ROS 2本体のインストールは不要です。`lwrclpy` が提供する `rclpy` 互換APIを使い、ノードコードは `msg` を受け取って `publish(...)` で出力するcallbackスタイルで書けます。
+`lwrclpy Web Node Editor` is a browser-based node graph editor for building, editing, running, saving, and exporting image-processing, video-processing, numeric-processing, TF, MCAP, LLM, and custom runtime workflows.
 
-## できること
+The app does not require a full ROS 2 installation. Python nodes use the `rclpy`-compatible API provided by `lwrclpy`, and C++ custom nodes can use `lwrcl` + FastDDS.
 
-- ブラウザでノードを作成し、入力・処理・表示・グラフ化・topic出力を接続できます。
-- `Image File Input` で画像を読み込み、`sensor_msgs/msg/Image` として処理できます。
-- `Video File Input` で動画ファイルを選択し、Run中に `sensor_msgs/msg/Image` として流せます。
-- `MCAP File Input` / `MCAP Record` でROS 2 MCAP/rosbagの再生と記録ができます。
-- `Image Viewer` で画像を表示できます。
-- `String Viewer` / `Chat String Viewer` で `std_msgs/msg/String` の最新内容や、LLM応答をチャット形式で表示できます。
-- `Graph Viewer` で `std_msgs/msg/Float32` などの数値や、メッセージ内の数値フィールドをプロットできます。
-- `3D Viewer` でTF、PointCloud2、OccupancyGrid、URDF/Xacro由来のRobot Modelを3D表示できます。
-- `Interactive Text Input` でRun中に文字列promptを入力し、送信ボタンで `std_msgs/msg/String` としてpublishできます。
-- `LLM Text` で `std_msgs/msg/String` のpromptをOllama/OpenAI/OpenAI互換API/LM Studioへ渡し、responseをtopicとして出力できます。
-- `URDF Static TF` と `TF Merge` で、URDF/Xacroからの静的TFと複数ノードのTF入出力をグラフ上で接続できます。
-- `Topic Input` / `Topic Output` で、グラフ外部とのtopic境界を表現できます。
-- カスタムノードごとに `requirements.txt` を持たせ、実行前に `.node_envs/<node-id>` のvenvへ依存をセットアップできます。
-- カスタムノードごとにPython / `lwrclpy` とC++ / `lwrcl` + FastDDSを選択できます。C++ノードはWeb実行時に自動ビルド・worker起動され、CLI export時にもC++コードとCMakeビルドファイルとして出力されます。
-- プロジェクト全体をJSONとしてSave/Loadできます。
-- カスタムノードを個別のPythonファイルとしてExport/Importできます。
-- カスタムノード群をROS 2 Python package形式またはCLI実行パッケージのzipとしてExportできます。C++ノードが含まれる場合は `cpp_nodes/` と `build_cpp_nodes.sh` も含まれます。
+## Features
 
-## 実行方法
+- Create node graphs in the browser and connect inputs, processing nodes, viewers, graph plots, and topic outputs.
+- Load images with `Image File Input` and process them as `sensor_msgs/msg/Image`.
+- Select video files with `Video File Input`; frames are published while the graph is running.
+- Play and record ROS 2 MCAP/rosbag data with `MCAP File Input` and `MCAP Record`.
+- View images, strings, chat messages, numeric plots, TF, PointCloud2, OccupancyGrid, and URDF/Xacro robot models.
+- Use `Interactive Text Input` while the graph is running.
+- Call Ollama, OpenAI, OpenAI-compatible APIs, or LM Studio with `LLM Text`.
+- Represent external DDS/lwrclpy topics with `Topic Input` and `Topic Output`.
+- Create Python custom nodes with per-node `requirements.txt` and isolated `.node_envs/<node-id>` virtual environments.
+- Create C++ custom nodes with `lwrcl` + FastDDS. C++ nodes are generated, built, and launched automatically during Web execution.
+- Save and load complete projects as JSON.
+- Export custom nodes as Python files.
+- Export projects as ROS 2 Python packages or CLI runner packages. Exports containing C++ nodes include `cpp_nodes/` and `build_cpp_nodes.sh`.
 
-このREADMEがある `lwrclpy_web_node_editor` ディレクトリで実行します。
+## Run From Source
+
+Run these commands from this directory:
 
 ```bash
 python3.13 -m venv .venv
@@ -35,77 +33,64 @@ python3.13 -m venv .venv
 .venv/bin/python main.py --host 127.0.0.1 --port 8765
 ```
 
-ローカルでビルドした `lwrclpy` wheel を使う場合は、サーバー起動時に指定できます。指定した wheel はサーバー本体と各ノード専用 `.node_envs/<node-id>` の両方で使用されます。
+Open `http://127.0.0.1:8765` in your browser.
+
+To use a locally built `lwrclpy` wheel, pass it when starting the server. The same wheel is used by the server and each custom-node environment.
 
 ```bash
 .venv/bin/python main.py --host 127.0.0.1 --port 8765 \
   --lwrclpy-wheel /Users/tatsuyai/repos/lwrclpy/dist/lwrclpy-0.5.1-cp313-cp313-macosx_26_0_arm64.whl
 ```
 
-## Linux向けスタンドアロンアプリ化
-
-LinuxではPyInstallerで `onedir` 形式のスタンドアロン実行ファイルを作成できます。
-
-1. 通常どおりvenvを準備し、依存を入れます。
-
-```bash
-python3.13 -m venv venv
-venv/bin/python -m pip install -r requirements.txt
-```
-
-1. ビルドスクリプトを実行します。
-
-```bash
-scripts/build_linux_standalone.sh
-```
-
-1. 生成物を起動します（外部ブラウザ不要、アプリ内にWebUIを表示）。
-
-```bash
-dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
-```
-
-従来どおりHTTPサーバーとして起動したい場合は次を使います。
-
-```bash
-dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor --server --host 127.0.0.1 --port 8765
-```
-
-デスクトップ起動時は内部サーバーを別プロセスでlocalhost起動し、アプリ内WebViewから接続します。
-
-```text
-lwrclpy Web Node Editor Desktop: http://127.0.0.1:<auto-port>
-```
-
-スタンドアロン実行時の作業ディレクトリは既定で次になります。
-
-```text
-~/.local/share/lwrclpy-web-node-editor
-```
-
-変更したい場合は起動前に次を設定してください。
-
-```bash
-export LWRCLPY_WEB_NODE_EDITOR_HOME=/path/to/workdir
-```
-
-サーバーモードで起動すると次のように表示されます。
-
-```text
-lwrclpy Web Node Editor: http://127.0.0.1:8765
-```
-
-サーバーモードではブラウザで `http://127.0.0.1:8765` を開いてください。
-
-同じ作業ディレクトリではサーバー単一起動ロックが有効です。すでに起動中のサーバーがある状態で再起動すると、次のようなエラーで拒否されます。
+Only one server can run in the same working context. If another server is already running, startup fails with:
 
 ```text
 Another lwrclpy Web Node Editor server is already running (lock: .../server.lock). Stop it first before starting a new instance.
 ```
 
-## macOS向けスタンドアロンアプリ化
+Use another port when needed:
 
-macOSでは、macOS上で次のスクリプトを実行して `onedir` 形式を作成します。
+```bash
+.venv/bin/python main.py --host 127.0.0.1 --port 8766
+```
+
+## Standalone Builds
+
+Each OS must build its own standalone package on that OS. By default the build scripts use `venv`; set `PYTHON_BIN` to use a different Python executable.
+
+### Linux
+
+```bash
+python3.13 -m venv venv
+venv/bin/python -m pip install -r requirements.txt
+scripts/build_linux_standalone.sh
+```
+
+Run the desktop app:
+
+```bash
+dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
+```
+
+Run server mode:
+
+```bash
+dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor --server --host 127.0.0.1 --port 8765
+```
+
+Standalone mode uses this default working directory:
+
+```text
+~/.local/share/lwrclpy-web-node-editor
+```
+
+Override it with:
+
+```bash
+export LWRCLPY_WEB_NODE_EDITOR_HOME=/path/to/workdir
+```
+
+### macOS
 
 ```bash
 python3.13 -m venv venv
@@ -113,21 +98,28 @@ venv/bin/python -m pip install -r requirements.txt
 scripts/build_macos_standalone.sh
 ```
 
-生成時には `samples/`、Python版の `lwrclpy` runtime、C++ worker用の `cmake`、C++ / `lwrcl` + FastDDS依存が同梱されます。C++依存は次の順で探して `lwrcl_cpp` としてbundleへコピーします。
+The macOS build bundles:
+
+- `samples/`
+- the Python `lwrclpy` runtime
+- `cmake` for C++ worker builds
+- C++ `lwrcl` + FastDDS dependencies under `lwrcl_cpp`
+
+C++ dependency prefixes are copied in this order:
 
 - `LWRCL_PREFIX`
-- `CPP_DEP_PREFIXES`（`:` 区切りで複数指定可）
+- `CPP_DEP_PREFIXES` (`:` separated)
 - `/opt/fast-dds-libs`
 - `/opt/fast-dds`
 
-C++依存を事前に最新化してからAppへ入れる場合は、先に次を実行してください。
+To update and install the C++ environment before building the app:
 
 ```bash
 scripts/setup_lwrcl_cpp_env.sh
 scripts/build_macos_standalone.sh
 ```
 
-ローカルprefixを使う場合は、セットアップとAppビルドで同じprefixを指定します。
+To install the C++ environment into a local prefix and bundle that prefix:
 
 ```bash
 scripts/setup_lwrcl_cpp_env.sh \
@@ -139,33 +131,7 @@ DDS_PREFIX="$PWD/.local/fast-dds" \
 scripts/build_macos_standalone.sh
 ```
 
-署名付きでビルドする場合は、`MAC_CODESIGN_IDENTITY` を指定して実行します。
-
-```bash
-export MAC_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-scripts/build_macos_standalone.sh
-```
-
-必要な場合は `MAC_CODESIGN_ENTITLEMENTS=/path/to/entitlements.plist` も指定できます。
-
-GitHub Releaseなどで他のMacへ配布し、ダブルクリックで起動できる状態にするには、Apple Developer Programの `Developer ID Application` 証明書で署名し、Appleのnotarizationを通す必要があります。証明書なしのCIビルドはad-hoc署名になるため、Gatekeeperにより「開発元を検証できない」「壊れているため開けない」などとしてブロックされることがあります。
-
-Release CIでmacOSアプリを署名・notarizeする場合は、GitHub Secretsに次を設定します。
-
-- `MACOS_CERTIFICATE_P12_BASE64`: Developer ID Application証明書を書き出した `.p12` をbase64化した文字列。
-- `MACOS_CERTIFICATE_PASSWORD`: `.p12` の書き出しパスワード。
-- `MACOS_KEYCHAIN_PASSWORD`: CI一時keychain用パスワード。未設定ならCI内で自動生成されます。
-- `MACOS_NOTARY_KEY_ID`: App Store Connect API keyのKey ID。
-- `MACOS_NOTARY_ISSUER_ID`: App Store Connect API keyのIssuer ID。
-- `MACOS_NOTARY_KEY`: App Store Connect API keyの `.p8` ファイル本文。
-
-開発中に自分のMacだけで未notarizeのRelease zipを試す場合は、展開後に次でquarantine属性を外せます。ただし一般配布ではnotarizationを使ってください。
-
-```bash
-xattr -dr com.apple.quarantine dist/lwrclpy-web-node-editor.app
-```
-
-生成物の起動例:
+Run the generated app:
 
 ```bash
 dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
@@ -173,9 +139,31 @@ open dist/lwrclpy-web-node-editor.app
 dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor --server --host 127.0.0.1 --port 8765
 ```
 
-## Windows向けスタンドアロンアプリ化
+For a signed build:
 
-Windowsでは、Windows上でPowerShellから次を実行します。
+```bash
+export MAC_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+scripts/build_macos_standalone.sh
+```
+
+Set `MAC_CODESIGN_ENTITLEMENTS=/path/to/entitlements.plist` when needed.
+
+For distribution to other Macs, sign with a Developer ID Application certificate and notarize with Apple. CI releases can use these secrets:
+
+- `MACOS_CERTIFICATE_P12_BASE64`
+- `MACOS_CERTIFICATE_PASSWORD`
+- `MACOS_KEYCHAIN_PASSWORD`
+- `MACOS_NOTARY_KEY_ID`
+- `MACOS_NOTARY_ISSUER_ID`
+- `MACOS_NOTARY_KEY`
+
+For local testing of an unsigned or non-notarized zip:
+
+```bash
+xattr -dr com.apple.quarantine dist/lwrclpy-web-node-editor.app
+```
+
+### Windows
 
 ```powershell
 py -3.13 -m venv venv
@@ -183,104 +171,91 @@ venv\Scripts\python.exe -m pip install -r requirements.txt
 powershell -ExecutionPolicy Bypass -File scripts\build_windows_standalone.ps1
 ```
 
-生成物の起動例:
+Run the generated app:
 
 ```powershell
 dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe
 dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe --server --host 127.0.0.1 --port 8765
 ```
 
-補足:
+## First Run
 
-- Linux/macOS/WindowsはそれぞれのOS上で個別にビルドしてください。
-- 既定のPythonは `venv` 配下を参照します。別のPythonを使う場合は `PYTHON_BIN` を設定してください。
+1. Start the server.
+2. Open `http://127.0.0.1:8765`.
+3. Click `Load` and select `samples/image_video/02_video_motion_topic_graph.json`.
+4. Click `Run`.
+5. Confirm that the video input, processed image, and motion-score graph update.
+6. Click `Stop` to stop execution.
 
-すでに8765番ポートを使っているサーバーがある場合は、止めるか別ポートで起動します。
+The continuous run loop ticks at 60 Hz. `Run For` executes for the specified duration and then stops automatically.
 
-```bash
-.venv/bin/python main.py --host 127.0.0.1 --port 8766
-```
+## Keyboard Shortcuts
 
-## 最初に試す手順
+- `Ctrl+S` / `Cmd+S`: save.
+- `Ctrl+Shift+S` / `Cmd+Shift+S`: save as.
+- `Ctrl+Z` / `Cmd+Z`: undo.
+- `Ctrl+Shift+Z` / `Cmd+Shift+Z` or `Ctrl+Y`: redo.
 
-1. サーバーを起動します。
-2. ブラウザで `http://127.0.0.1:8765` を開きます。
-3. `Load` を押して `samples/image_video/02_video_motion_topic_graph.json` を選びます。
-4. `Run` を押します。
-5. Video入力、処理後画像、motion scoreのグラフが動くことを確認します。
-6. 止めるときは `Stop` を押します。
+When the browser does not support the File System Access API, saving falls back to downloading a JSON file.
 
-連続実行時のtick周波数は60Hzです。`Run` の連続実行ループはサーバー側で動くため、ブラウザタブがフォーカスを失ってもTopic出力は継続します。`Duration sec` に秒数を入力して `Run For` を使うと、指定秒数だけ実行して自動停止できます。
+## Sample Projects
 
-## ショートカット
+The `samples/` directory contains runnable project JSON files organized by category: `image_video/`, `signals/`, `external_topics/`, `custom_runtime/`, `cpp/`, `deep_learning/`, `tf/`, and `llm/`.
 
-- `Ctrl+S` / `Cmd+S`: 上書き保存します。まだ保存先がない場合は保存先を選びます。
-- `Ctrl+Shift+S` / `Cmd+Shift+S`: 名前を付けて保存します。
-- `Ctrl+Z` / `Cmd+Z`: 元に戻します。
-- `Ctrl+Shift+Z` / `Cmd+Shift+Z` または `Ctrl+Y`: やり直します。
+Representative samples:
 
-ブラウザがFile System Access APIに対応していない場合、保存は従来通りJSONファイルのダウンロードになります。
+- `image_video/01_image_edge_topic_graph.json`: image input, grayscale, edge extraction, image view, edge-intensity graph, and topic output.
+- `image_video/02_video_motion_topic_graph.json`: video frames, motion mask, overlay view, motion-score graph, and topic output.
+- `signals/06_function_generator_signal_view.json`: function generator connected to a graph viewer and topic output.
+- `external_topics/08_external_float_topic_graph.json`: external `std_msgs/msg/Float32` topic displayed in a graph viewer.
+- `custom_runtime/10_multi_timer_counter_graph.json`: one custom node with multiple timers.
+- `custom_runtime/11_manual_subscriber_timer_sampler.json`: manual `latest()` access from a timer callback.
+- `cpp/21_cpp_low_pass_filter.json`: C++ custom node low-pass filter using a subscribe callback.
+- `cpp/22_cpp_signal_mixer.json`: C++ custom node that adds and subtracts two signals.
+- `cpp/23_cpp_image_threshold.json`: C++ custom node that thresholds an image and outputs a mask plus ratio.
+- `deep_learning/13_ultralytics_yolo_detection_segmentation.json`: Ultralytics YOLO detection and segmentation.
+- `deep_learning/17_sam_midas_segmentation_depth.json`: Segment Anything masks and MiDaS depth.
+- `llm/18_ollama_llm_string_view.json`: prompt topic to Ollama, displayed with string viewers.
+- `tf/19_urdf_xacro_tf_static_merge_custom_tf.json`: URDF static TF, custom TF output, TF merge, and 3D viewer.
+- `llm/20_interactive_llm_chat.json`: interactive prompt input and chat-style LLM response display.
 
-## サンプルプロジェクト
+See `samples/README.md` for the full sample list.
 
-`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/`, `cpp/`, `deep_learning/`, `tf/`, `llm/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
-
-- `image_video/01_image_edge_topic_graph.json`: 画像入力、グレースケール化、エッジ抽出、画像表示、エッジ強度グラフ、topic出力。
-- `image_video/02_video_motion_topic_graph.json`: 動画フレーム入力、フレーム差分によるmotion mask、overlay表示、motion scoreグラフ、topic出力。
-- `image_video/03_image_color_balance_topic_graph.json`: 画像入力、コントラスト補正、赤バランス処理、画像表示、red indexグラフ、topic出力。
-- `image_video/04_video_low_light_colormap_topic_graph.json`: 暗い動画フレーム入力、ガンマ補正、疑似カラーマップ表示、輝度グラフ、topic出力。
-- `image_video/05_image_crop_mosaic_topic_graph.json`: 画像入力、中央クロップ、モザイク処理、画像表示、平均輝度グラフ、topic出力。
-- `signals/06_function_generator_signal_view.json`: Function Generatorからサイン波をGraph Viewerとtopic出力へ接続。
-- `signals/07_function_generator_wave_suite.json`: サイン、ステップ、チャープ、ホワイトノイズのFunction Generatorを並べて表示。
-- `external_topics/08_external_float_topic_graph.json`: 外部 `std_msgs/msg/Float32` topicをGraph Viewerで表示。
-- `external_topics/09_external_image_topic_view_save.json`: 外部 `sensor_msgs/msg/Image` topicをImage ViewerとImage File Saveへ接続。
-- `custom_runtime/10_multi_timer_counter_graph.json`: 1つのカスタムノードに複数Timerを持たせ、別々の周期で値をpublish。
-- `custom_runtime/11_manual_subscriber_timer_sampler.json`: Subscriber callbackをOFFにし、Timer callbackから `latest()` で入力を読む例。
-- `image_video/12_image_view_save_topic_output.json`: 埋め込み画像を表示、保存、topic出力境界へ接続。
-- `cpp/21_cpp_low_pass_filter.json`: C++カスタムノードのSubscribe Callbackでノイズ信号をローパスフィルタ処理してGraph Viewerへ表示。
-- `cpp/22_cpp_signal_mixer.json`: 2つの信号をC++カスタムノードで加算・減算して表示。
-- `cpp/23_cpp_image_threshold.json`: C++カスタムノードで画像をしきい値処理し、mask画像と明部比率を出力。
-- `deep_learning/13_ultralytics_yolo_detection_segmentation.json`: Video File InputをUltralytics YOLOの検出・インスタンスセグメンテーションノードへ分岐して表示。
-- `deep_learning/14_ultralytics_yolo_pose_depth_anything.json`: Ultralytics YOLO PoseとDepth Anything V2の深度推定を表示。
-- `deep_learning/15_cuda_ultralytics_yolo_detection_segmentation.json`: CUDA環境向けのUltralytics YOLO検出・インスタンスセグメンテーション。
-- `deep_learning/16_tensorrt_ultralytics_yolo_engine_detection.json`: TensorRT engine向けのUltralytics YOLO検出。ノードの `weights` に `.engine` ファイルを指定します。
-- `deep_learning/17_sam_midas_segmentation_depth.json`: Segment Anythingの自動マスクとMiDaS深度推定を表示。標準SAM checkpointは未配置の場合に自動取得します。
-- `llm/18_ollama_llm_string_view.json`: promptを一度publishし、OllamaのLLM応答をString Viewerとtopic outputへ表示・出力します。Ollamaと `llama3.2` などのローカルモデルが必要です。
-- `tf/19_urdf_xacro_tf_static_merge_custom_tf.json`: URDFからの静的TF、カスタムノードのTF出力、TF Merge、3D Viewerを組み合わせて表示します。
-- `llm/20_interactive_llm_chat.json`: Run中にInteractive Text Inputからpromptを送信し、`LLM Text` の応答をChat String Viewerに表示します。
-
-詳しい分類は `samples/README.md` を参照してください。カスタムノードを含むサンプルは、実行時にノードごとのvenvとworker processを使います。
-
-サンプルを再生成する場合は次を実行します。
+Regenerate samples with:
 
 ```bash
 .venv/bin/python samples/generate_sample_projects.py
 ```
 
-## Webプレビューの実行モデル
+## Execution Model
 
-Webプレビューは、リンクごとのtopic名を使ってlwrclpy topic経由でノード間データを流します。
+Web preview sends graph data over lwrclpy topics. Internal graph edges are not direct in-process calls; they are DDS/lwrclpy topic connections.
 
-- グラフ内部の接続は、WebUI/サーバー内の直接データ受け渡しではなくlwrclpy topicで実行されます。
-- カスタムノードのコードは `lwrclpy` のcallbackに近いスコープで実行されます。
-- `Topic Input` と `Topic Output` は、グラフ外部との境界マーカーです。実際のPub/Subは接続された処理・表示ノードが行います。
-- 画像入力は小さな埋め込みデータとして扱えます。動画入力はブラウザからアップロードせず、サーバー側のファイル選択ダイアログで選んだローカルファイルを独立workerがデコードしてDDS publishします。
-- 連続実行のtick周波数は60Hzです。Run中のtickループはサーバー側threadで動くため、ブラウザのtimer throttlingには依存しません。実効周波数はノード処理時間やlwrclpy/DDS処理時間に制限されます。
-- C++ / `lwrcl` ノードはWeb実行時に `.node_workers/cpp/<node-id>/` へCMake projectとして生成・ビルドされ、Python workerや組み込みDDS workerと同じtopicへ接続されます。
+- Custom node code runs in a scope close to a ROS 2 callback.
+- `Topic Input` and `Topic Output` are graph boundary markers. Actual publish/subscribe work happens in the connected processing, viewer, source, or tap worker.
+- Image inputs can use embedded image data.
+- Video inputs are decoded by `video_dds_worker.py` and published as `sensor_msgs/msg/Image`.
+- C++ / `lwrcl` nodes are generated under `.node_workers/cpp/<node-id>/`, built with CMake, and launched as worker processes.
 
-つまり、Webプレビューでもノード間通信の意味論はlwrclpy topicに寄せています。
+## C++ / lwrcl + FastDDS
 
-## C++ / lwrcl + FastDDS runtime/export
+For Web execution and CLI export, install `lwrcl` with the FastDDS backend first. Web execution also needs CMake and a C++ compiler.
 
-Web実行とCLI exportのどちらでも、先に `lwrcl` をFastDDS backendでビルドしてインストールしてください。Web実行では `cmake` とC++コンパイラも必要です。
-
-標準セットアップは次のスクリプトで行えます。デフォルトでは `tatsuyai713/lwrcl` のGitHub latest release tagを取得し、なければ最新tag、さらに見つからなければdefault branchを使います。
+Recommended setup:
 
 ```bash
 scripts/setup_lwrcl_cpp_env.sh
 ```
 
-`/opt/fast-dds-libs` や `/opt/fast-dds` に書き込むため、途中でsudoパスワードが必要になる場合があります。ローカルprefixへ入れたい場合は次のように指定します。
+By default, the script resolves `tatsuyai713/lwrcl` as follows:
+
+1. GitHub latest release tag.
+2. Newest git tag.
+3. Default branch.
+
+It then updates submodules and runs the FastDDS, libraries, data-types, and lwrcl build/install steps.
+
+Use a local prefix:
 
 ```bash
 scripts/setup_lwrcl_cpp_env.sh \
@@ -288,15 +263,7 @@ scripts/setup_lwrcl_cpp_env.sh \
   --dds-prefix "$PWD/.local/fast-dds"
 ```
 
-Appにそのprefixを同梱する場合は、同じprefixを指定してmacOS Appをビルドします。
-
-```bash
-LWRCL_PREFIX="$PWD/.local/fast-dds-libs" \
-DDS_PREFIX="$PWD/.local/fast-dds" \
-scripts/build_macos_standalone.sh
-```
-
-手動で行う場合は次の通りです。
+Manual setup:
 
 ```bash
 git clone --recursive https://github.com/tatsuyai713/lwrcl.git
@@ -307,91 +274,72 @@ cd lwrcl
 ./build_lwrcl.sh fastdds install
 ```
 
-Web実行では、C++ノードごとに `.node_workers/cpp/<node-id>/` 配下へ生成ソースとCMake projectが作られます。C++コード、ポート、接続topicが変わると自動で再ビルドされ、生成実行ファイルがworker processとして起動します。
+When a C++ node is used, the editor generates a CMake project and rebuilds it whenever the C++ code, ports, or topic connections change. The generated executable is launched as a worker process.
 
-CLI exportにC++ノードが含まれる場合、zipには通常のPython実行パッケージに加えて次が含まれます。
+CLI exports containing C++ nodes include:
 
-- `cpp_nodes/`: C++ノードごとのCMake projectと生成ソース。
-- `build_cpp_nodes.sh`: `cpp_nodes/` 全体をCMakeでビルドするスクリプト。
+- `cpp_nodes/`
+- `build_cpp_nodes.sh`
 
-exportしたzipを展開した後、C++ノードは次でビルドします。
+Build exported C++ nodes with:
 
 ```bash
 bash build_cpp_nodes.sh
 ```
 
-C++ノードとPythonノードを混在させた場合、export時に同じグラフ接続名がDDS topic名として使われます。Python側runnerとC++ executableを同じDDS domainで起動すると、topic経由で接続されます。
+Python and C++ nodes can be mixed. The exported runner uses the same graph edge names as DDS topic names, so Python nodes and C++ executables communicate through the same DDS domain.
 
-## ノードの作り方
+## Custom Nodes
 
-`Create Node` でカスタムノードを作成できます。
+Create custom nodes with `Create Node`.
 
-主な設定項目は次の通りです。
+Important settings:
 
-- `Implementation`: ノード実装をPython / `lwrclpy` またはC++ / `lwrcl` + FastDDSから選びます。
-- `Inputs`: 入力ポートです。型は `sensor_msgs/msg/Image` や `std_msgs/msg/Float32` など、インストール済みlwrclpyメッセージから選びます。`Use Callback` はデフォルトONで、OFFにすると `latest()` / `take()` で読む手動入力になります。
-- `Outputs`: 出力ポートです。
-- `Callback Code`: 入力を受け取ったときに実行するコードです。通常の画像処理・動画処理はここに書きます。
-- `Timer Callback`: 一定周期で実行したいコードです。`Timer Count` で複数のTimerを作成でき、各Timerは常にcallbackとして実行されます。
-- `TF Input` / `TF Output`: カスタムノードでTF機能を使う場合に明示的に有効化します。TFの送受信は `tf2_ros` の `TransformListener` / `TransformBroadcaster` / `StaticTransformBroadcaster` を使います。
-- Pythonノードの `Import Code`: `import cv2` や `import numpy as np` など、ノード専用のimportを書きます。
-- Pythonノードの `requirements.txt`: ノード専用venvに入れる依存パッケージを書きます。
-- C++ノードの `Header`: 生成されたincludeの直後に挿入されます。`#include <cmath>`、helper関数、定数、class/struct定義、`static` オブジェクトなどを書けます。
-- C++ノードの `C++ Link Libraries`: Configure内またはInspectorから、`-lm`、`-lmy_library`、`/path/to/libfoo.a` のようなリンク指定を書けます。
-- C++ノードの `Initialize Code`: 生成C++クラスのコンストラクタ内で、publisher/subscriber作成後、Loop/Timer開始前に1回だけ実行されます。Headerで定義したclass/objectの初期化に使えます。
+- `Implementation`: Python / `lwrclpy` or C++ / `lwrcl` + FastDDS.
+- `Inputs`: input ports. `Use Callback` is enabled by default. Disable it to read inputs manually with `latest()` / `take()`.
+- `Outputs`: output ports.
+- `Callback Code`: code executed when an input receives data.
+- `Timer Callback`: periodic callback code. Multiple timers are supported.
+- `TF Input` / `TF Output`: enable TF features with `tf2_ros`.
+- Python `Import Code`: per-node imports.
+- Python `requirements.txt`: per-node Python dependencies.
+- C++ `Header`: inserted after generated includes. Use it for `#include`, helpers, constants, classes, structs, and static objects.
+- C++ `C++ Link Libraries`: extra link items such as `-lm`, `-lmy_library`, or `/path/to/libfoo.a`.
+- C++ `Initialize Code`: generated constructor code executed once after publisher/subscriber setup and before loop/timer execution.
 
-ポート同士は型が一致すると接続できます。1つの出力ポートから複数のノードへ接続した場合、その出力から出るtopic名は同じ名前に同期されます。
+C++ custom nodes can use generated helpers such as `has_in1()`, `latest_in1()`, and `publish_out1(msg)`. Keep persistent state in classes or objects defined in the Header. The generated `main()` runs `while (rclcpp::ok())` and calls Loop Code every cycle. The default Loop Code contains:
 
-C++ノードでは、Initialize Code、入力ポートのCallback Code、Loop Code、Timer Callback Codeが生成C++クラスに埋め込まれます。入力ポートごとに `has_in1()` / `latest_in1()`、出力ポートごとに `publish_out1(msg)` のようなヘルパーを使えます。継続して保持したい値は、Headerで定義したclass/objectのメンバーとして持たせます。生成された `main()` は `while (rclcpp::ok())` で回り、各周期で Loop Code を呼びます。Loop Codeのデフォルトには `rclcpp::spin_some(node);` と `loop_rate.sleep();` が入り、Loop周波数はWeb実行の `runHz` に合わせて `rclcpp::Rate loop_rate` に渡します。Callbackだけで処理したい場合は、Loop Codeを `rclcpp::spin(node);` に置き換えるとそこでブロッキング実行できます。周期処理も行う場合はデフォルトの `spin_some` + `loop_rate.sleep()` を使います。これはArduinoの `setup()` / `loop()` に近い使い方です。
+```cpp
+rclcpp::spin_some(node);
+loop_rate.sleep();
+```
 
-## Callback Codeの書き方
+Replace Loop Code with `rclcpp::spin(node);` when you want a callback-only blocking node. Keep the default `spin_some` + `loop_rate.sleep()` when you also need periodic work.
 
-入力ポートの `Use Callback` がONの場合、その入力に値が届いたときにCallback Codeが実行されます。OFFの場合はCallback Codeを使わず、Main LoopやTimer Callbackから `latest()` / `take()` で入力を読みます。
+## Python Callback Code
 
-Callback Codeで使える主な変数は次の通りです。
+When `Use Callback` is enabled, Callback Code runs whenever an input receives a value. When disabled, use Main Loop or Timer Callback with `latest()` / `take()`.
 
-- `node`: lwrclpy互換のノードオブジェクトです。`node.get_logger().info(...)` が使えます。
-- `input_id`: どの入力ポートに届いたかを表すIDです。
-- `msg`: 届いたメッセージです。
-- `request`: service入力の場合のrequestです。message入力では `msg` と同じ値です。
-- `response`: service入力の場合のresponseです。
-- `state`: ノードごとに保持される辞書です。前フレームや累積値を保存できます。
-- `params`: ノードのパラメータ辞書です。
-- GUIで設定したパラメータ名が有効なPython識別子の場合、同名の変数としても参照できます。たとえば `pointsPerSide` は `params.get("pointsPerSide")` でも `pointsPerSide` でも使えます。`msg` や `publish` など実行スコープの予約名と衝突する名前は直接変数化されません。
-- `publish(output_id, value)`: 出力ポートへ値を出します。
-- `log(...)`: ノードログへ文字列を出します。
+Available values include:
 
-例: `std_msgs/msg/String` を受け取って別ポートへ流す場合。
+- `node`
+- `input_id`
+- `msg`
+- `request`
+- `response`
+- `state`
+- `params`
+- `publish(output_id, value)`
+- `log(...)`
+
+Example:
 
 ```python
 node.get_logger().info(f"received {input_id}")
 publish("out1", msg)
 ```
 
-例: `sensor_msgs/msg/Image` 風の辞書を受け取り、RGBをグレースケール化して出力する場合。
-
-```python
-img = msg
-data = img.get("data") or []
-w = int(img.get("width") or 0)
-h = int(img.get("height") or 0)
-out = []
-
-for i in range(0, len(data), 3):
-    y = int(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114)
-    out.extend([y, y, y])
-
-publish("gray", {
-    "width": w,
-    "height": h,
-    "encoding": "rgb8",
-    "is_bigendian": 0,
-    "step": w * 3,
-    "data": out,
-})
-```
-
-複数入力を扱う場合は `state` に入力ごとの最新値を保存すると書きやすくなります。
+For multiple inputs, store the latest values in `state`:
 
 ```python
 state[input_id] = msg
@@ -402,158 +350,122 @@ if frame and mask:
     publish("out1", frame)
 ```
 
-複数の出力ポート（複数Publisher相当）を持つ場合は、同じCallback内で `publish(...)` を出力ポートごとに呼びます。必要に応じて、同じ入力から加工結果を分岐して別topicへ同時に出力できます。
+For multiple outputs, call `publish(...)` once per output port.
 
-```python
-# out_raw: 元データ, out_norm: 正規化値, out_alert: しきい値判定結果
-value = float(getattr(msg, "data", msg.get("data", 0.0)) if hasattr(msg, "data") or isinstance(msg, dict) else msg)
-max_v = float(params.get("max", 100.0))
-threshold = float(params.get("threshold", 0.8))
+## Timers And Main Loop
 
-norm = 0.0 if max_v <= 0 else max(0.0, min(1.0, value / max_v))
-is_alert = norm >= threshold
-
-publish("out_raw", value)
-publish("out_norm", norm)
-publish("out_alert", is_alert)
-```
-
-各 `output_id` はノード定義のOutputsで追加したIDと一致させてください。未定義の `output_id` へ `publish` しても配線されません。
-
-## Timer CallbackとMain Loop
-
-Timer Callbackは、Run中に設定周期へ到達したときに実行されます。1ノードに複数のTimerを設定でき、Timerごとに `timer_id`, `timer_name`, `period` が渡されます。ROS 2の `create_timer` に合わせ、初回callbackはRun開始直後ではなく1周期後に実行されます。
+Timer callbacks run at their configured periods. Like ROS 2 `create_timer`, the first callback runs after one full period rather than immediately at Run start.
 
 ```python
 state["count"] = state.get("count", 0) + 1
 publish("out1", str(state["count"]))
 ```
 
-Main Loopは各tickで実行される任意処理です。データ入力に反応する処理はCallback Codeを使う方が、lwrclpyへエクスポートしやすくなります。
+Main Loop runs every tick. Prefer Callback Code for data-dependent processing when possible.
 
 ```python
 if state.get("enabled", True):
     node.get_logger().info("tick")
 ```
 
-## 画像・動画ノード
+## Built-In Nodes
 
-`Image File Input` はブラウザで選んだ画像を `sensor_msgs/msg/Image` として出力します。
+### Image And Video
 
-- `One Shot`: 同じ画像を数tickだけ出力します。
-- `Rate`: 指定Hzで画像を繰り返し出力します。
+`Image File Input` publishes selected images as `sensor_msgs/msg/Image`.
 
-`Video File Input` はノード上の `Select Video` で動画ファイルを選択します。Path欄は選択結果の表示専用で、直接入力はできません。Run中は独立した `video_dds_worker.py` プロセスがOpenCVで動画をデコードし、動画ファイルのsource fpsに合わせて `sensor_msgs/msg/Image` としてTopic出力します。サンプルJSONの動画入力は実動画ファイルを持たないため、埋め込みフレームからサーバー側で簡易的な動画フレームを生成します。
+- `One Shot`: publish the same image for a few ticks.
+- `Rate`: repeatedly publish at the configured rate.
 
-Image/Videoの実データはノード間で勝手に縮小しません。Web上のPreview/Image Viewer表示だけ、表示負荷を抑えるため横幅最大640pxを目安にアスペクト比維持で表示用変換されます。
+`Video File Input` uses `Select Video` to choose a server-side file. During Run, `video_dds_worker.py` decodes frames with OpenCV and publishes them at the source FPS. Sample video projects can generate simple embedded frames without an external file.
 
-`Image File Save` は接続された画像を `saved_images/` にBMPとして保存します。
+`Image File Save` saves connected images to `saved_images/` as BMP files.
 
-## MCAP / rosbag
+### MCAP / rosbag
 
-`MCAP File Input` は `Select MCAP/Bag` で `.mcap` ファイルまたはROS 2 bagディレクトリを選択し、含まれるROS 2 topicを出力ポートとして展開します。`Rate` で再生倍率を指定でき、`Loop` を有効にすると末尾まで再生した後に繰り返します。
+`MCAP File Input` plays `.mcap` files or ROS 2 bag directories. Use `Rate` for playback speed and `Loop` to replay.
 
-`MCAP Record` は複数入力topicをROS 2 bag形式で記録します。`Topics` で入力ポート数を指定し、`Split MB` に0より大きい値を設定すると指定サイズごとに分割します。
+`MCAP Record` records multiple input topics in ROS 2 bag format. Set `Split MB` to split output files by size.
 
-## 信号生成ノード
+### Signals
 
-`Function Generator` は `std_msgs/msg/Float32` の `data` として信号を出力します。ノード上の設定で `Step`, `Sine`, `Square`, `Ramp`, `Chirp`, `White Noise` を選べます。`Phase` はラジアンです。`Bias` はSine/Square/Ramp/Chirp/White Noiseへ加算されます。`Publish Hz` で出力周期を設定し、`Sample Time sec` で信号値のサンプル保持周期を設定できます。`DDS Topic` を設定すると、リンクやTopic Outputとは別に、そのDDS/lwrclpy topicへ直接publishします。`Graph Viewer` に接続し、`Field Path` を `data` にすると波形を確認できます。
+`Function Generator` publishes `std_msgs/msg/Float32` values. Supported waveforms include Step, Sine, Square, Ramp, Chirp, and White Noise.
 
-`Graph Viewer` の `Graph Settings` では、保持サンプル数、表示する横軸の秒数、縦軸を `Auto` にするか固定範囲にするかを設定できます。保持サンプル数のデフォルトは10000です。
+### TF / 3D Viewer
 
-## TF / 3D Viewer
+`URDF Static TF` publishes fixed joints from URDF/Xacro to `/tf_static`.
 
-`URDF Static TF` はURDF/Xacroのfixed jointを読み取り、`tf2_ros.StaticTransformBroadcaster` で `/tf_static` へpublishします。グラフ上のTFポートは見た目上は `TF` の1本の線として扱いますが、実際のROS 2 topicは `/tf` と `/tf_static` の固定名を使います。
+`TF Merge` represents multiple TF producers connected to one TF consumer.
 
-`TF Merge` は複数のTF出力を1つのTF入力へ接続するためのグラフ上の集約ノードです。実データを加工するノードではなく、複数ノードがTFを出力できることをグラフで表現するために使います。
+`3D Viewer` can display TF, grids, PointCloud2, OccupancyGrid, and robot models. Mouse controls rotate, pan, and zoom the 3D view.
 
-`3D Viewer` は `Configure` から次を設定できます。
+### LLM / Chat
 
-- TF表示の有効/無効、原点フレーム。
-- XY平面グリッドの間隔とサイズ、座標軸サイズ、座標系ラベル表示。
-- PointCloud2入力数、点形状、点サイズ、色、透明度、最大点数。
-- OccupancyGrid入力数、表示カラースキーム、透明度、背面描画。
-- Robot Model表示、URDF/Xacroパス、モデル色、透明度。
+`Interactive Text Input` publishes text while the graph is running and keeps a prompt history.
 
-3D表示はマウスで回転・移動・ズームできます。3D Viewer上でのホイール操作はNode Editor全体のズームには伝播しません。
+`LLM Text` consumes prompt topics and publishes string responses from Ollama, OpenAI, OpenAI-compatible APIs, or LM Studio. `Chat String Viewer` displays accumulated chat messages.
 
-## LLM / Chat
+### Topic Input / Topic Output
 
-`Interactive Text Input` はRun中でも入力欄を編集でき、`Send` で入力文字列を `std_msgs/msg/String` としてpublishします。送信後は入力欄をクリアします。送信履歴はノード内に保持され、左右ボタンで過去promptを呼び出せます。`Clear History` で履歴を消せます。
+`Topic Input` and `Topic Output` are graph boundary nodes for external lwrclpy topics.
 
-`LLM Text` はprompt topicを受け取り、Ollama/OpenAI/OpenAI互換API/LM Studioへ問い合わせ、応答を `std_msgs/msg/String` としてpublishします。`Chat String Viewer` は受け取った文字列をチャット形式で蓄積表示します。
-
-## Topic Input / Topic Output
-
-`Topic Input` と `Topic Output` は、Webグラフの外側とlwrclpy topicで接続するための境界ノードです。これら自体は処理を持たず、実際のpublish/subscribeは接続された処理ノード、source worker、tap workerが行います。
-
-- `Topic Input`: 外部topicから入る信号の入口を表します。接続先ノード側がsubscribeします。
-- `Topic Output`: 外部topicへ出る信号の出口を表します。接続元ノード側がpublishします。
-- topic名はエッジ名として表示・編集されます。
-- 同じ出力ポートから出る複数エッジは、同じtopic名に同期されます。
+- `Topic Input`: external data enters the graph; the connected downstream node subscribes.
+- `Topic Output`: graph data leaves the graph; the connected upstream node publishes.
+- Edge names are editable topic names.
+- Multiple edges from the same output port share the same topic name.
 
 ## Export / Import
 
-`Export Python Node` は、選択したカスタムノードを単体のPythonファイルとして保存します。後から `Import Python Node` で読み戻せます。
+`Export Python Node` saves the selected custom node as a Python file. Use `Import Python Node` to load it later.
 
-`Export ROS 2 Package` は、プロジェクトを通常のROS 2 `rclpy` 環境で実行するPython package形式のzipとして出力します。カスタムノードに加えて、Function Generator、Image/Video File Input、LLM Text、MCAP Recordなど対応済みの組み込み実行ノードもrunnerから実行されます。`Image Viewer`, `String Viewer`, `Graph Viewer`, `Topic Hz Monitor`, `Topic Input`, `Topic Output` のようなWeb表示・境界ノードは実行対象から除外され、Topic Input/Outputは接続先/接続元ノードの外部topicとして反映されます。
+`Export ROS 2 Package` creates a ROS 2 Python package zip containing generated runner code, project JSON, launch files, and dynamic `package.xml` dependencies.
 
-ROS 2 package zipには次のファイルが含まれます。
+`Export CLI Package` creates a standalone CLI runner zip containing `run_project.py`, `project.json`, runtime files, and any configured local `lwrclpy` wheel.
 
-- `package.xml`
-- `setup.py`
-- `setup.cfg`
-- `<package>/runner.py`
-- `<package>/project.json`
-- `launch/<project>.launch.py`
+## Dependencies And Environments
 
-`package.xml` の `exec_depend` は、プロジェクト内で使うメッセージ型に合わせて `std_msgs`, `sensor_msgs`, `geometry_msgs`, `tf2_msgs`, `nav_msgs` などを動的に追加します。package名とノード名はROS 2の命名規則に合うようにサニタイズされます。
+The app itself runs in `.venv`. Each Python custom node gets its own `.node_envs/<node-id>` environment.
 
-`Export CLI Package` は、ROS 2 packageではなく、このWeb Node Editorのrunner一式、`project.json`、必要なruntimeファイルをまとめたzipを出力します。展開後に同梱の `run_project.py` を使って、保存済みプロジェクトをCLIから実行できます。
+When a node has `requirements.txt`, `uv` creates the node environment and installs its dependencies. `lwrclpy` is selected automatically from the GitHub Releases `latest` tag for the current Python ABI, OS, and CPU architecture.
 
-## 依存関係とvenv
+`Stop` asks all custom-node workers to stop. If they do not stop normally, the server escalates to force-stop. `Force Stop` terminates all custom-node workers. Startup and shutdown also clean up stale worker processes created by this framework.
 
-アプリ本体は `.venv` で動きます。カスタムノードは、ノードごとに `.node_envs/<node-id>` のvenvを持ちます。
+## Troubleshooting
 
-ノードの `requirements.txt` に依存を書くと、実行前に `uv` がそのノード用venvを作成し、必要なパッケージとlwrclpyをインストールします。lwrclpyはGitHub Releasesの `latest` タグから、現在のPython ABIとOS/CPUに合うwheelを自動選択してインストールします。Webプレビューでは、カスタムノードごとに `.node_envs/<node-id>` のPythonで別ワーカープロセスを起動し、ノード間や組み込みツールノードとの接続はlwrclpy topicで橋渡しします。
+### Port Already In Use
 
-`Stop` は実行中の全カスタムノードワーカーへ停止指示を送り、通常停止できない場合はサーバー側でforce-stopへエスカレーションします。UI側でもStop要求がタイムアウトした場合は自動で `Force Stop` を再送します。`Force Stop` は全カスタムノードワーカーを強制終了します。サーバー起動時と終了時にも、このフレームワークが起動した残存workerプロセスを検出して強制終了します。
-
-## トラブルシュート
-
-### ポートが使用中と表示される
-
-別のサーバーが残っている可能性があります。別ポートで起動するか、古いプロセスを止めてください。
+Start on another port or stop the old server:
 
 ```bash
 .venv/bin/python main.py --host 127.0.0.1 --port 8766
 ```
 
-### サーバー重複起動エラーが出る
+### Duplicate Server Error
 
-`Another lwrclpy Web Node Editor server is already running` が表示される場合、同じ作業コンテキストに既存サーバーが起動中です。既存プロセスを停止してから再起動するか、別の作業ディレクトリで起動してください。
+If `Another lwrclpy Web Node Editor server is already running` appears, another server is active for the same working context. Stop it first or use another working directory.
 
-### 動画が動かない
+### Video Does Not Move
 
-- `Run` を押して連続実行にしてください。1 tickだけでは動画は進みにくいです。
-- 実動画を使う場合は、`Video File Input` ノードの `Select Video` でファイルを選択し、`Ready` 後に `Run` してください。
-- サンプル動画は `samples/image_video/02_video_motion_topic_graph.json` または `samples/image_video/04_video_low_light_colormap_topic_graph.json` を読み込み、`Run` で動作確認できます。
+- Use `Run`; one tick is usually not enough for video playback.
+- For real video files, use `Select Video`, wait for `Ready`, then click `Run`.
+- Try `samples/image_video/02_video_motion_topic_graph.json` or `samples/image_video/04_video_low_light_colormap_topic_graph.json`.
 
-### ノードの処理結果が出ない
+### Node Output Is Missing
 
-- 入力ポートの型と出力ポートの型が一致しているか確認してください。
-- Callback Codeでは `outputs["out1"] = ...` ではなく `publish("out1", value)` を使ってください。
-- 画像処理ノードでは出力辞書に `width`, `height`, `encoding`, `step`, `data` が入っているか確認してください。
+- Check that connected input and output port types match.
+- In Callback Code, use `publish("out1", value)` rather than `outputs["out1"] = ...`.
+- Image outputs should include `width`, `height`, `encoding`, `step`, and `data`.
 
-### 依存パッケージのimportに失敗する
+### Python Import Fails
 
-カスタムノードの `requirements.txt` に依存を書き、Runしてください。`.node_envs/<node-id>` が作られ、依存がインストールされます。
+Add the dependency to the custom node `requirements.txt` and run again. The editor creates `.node_envs/<node-id>` and installs dependencies there.
 
-## 関連ファイル
+## Important Files
 
-- `main.py`: サーバー/デスクトップ/workerの統合起動入口。
-- `lwrclpy_web_node_editor/server.py`: HTTP APIと静的ファイル配信。
-- `lwrclpy_web_node_editor/graph.py`: グラフ実行、画像変換、lwrclpy topic連携。
-- `lwrclpy_web_node_editor/static/app.js`: ブラウザUI。
-- `samples/generate_sample_projects.py`: サンプルJSON生成スクリプト。
-- `scripts/install_lwrclpy.py`: 現在のOS/Pythonに合うlwrclpy wheelをインストールするスクリプト。
+- `main.py`: integrated entry point for server, desktop, and workers.
+- `lwrclpy_web_node_editor/server.py`: HTTP API and static file server.
+- `lwrclpy_web_node_editor/graph.py`: graph execution, image conversion, and lwrclpy topic integration.
+- `lwrclpy_web_node_editor/static/app.js`: browser UI.
+- `samples/generate_sample_projects.py`: sample JSON generator.
+- `scripts/install_lwrclpy.py`: installs the matching `lwrclpy` wheel.
+- `scripts/setup_lwrcl_cpp_env.sh`: fetches, builds, and installs the C++ `lwrcl` environment.
