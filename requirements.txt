@@ -5,3 +5,4 @@ pywebview
 mcap
 mcap-ros2-support
 PyYAML
+cmake

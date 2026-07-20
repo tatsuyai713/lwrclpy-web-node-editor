@@ -1,6 +1,7 @@
 .venv/
 .venv*/
 venv*/
+.DS_Store
 .pycache/
 __pycache__/
 *.pyc
@@ -10,8 +11,9 @@ __pycache__/
 .app_settings/python_site/
 .app_settings/server.lock
 .appimage-tools/
+.build_cpp_deps/
 dist/
 build/
-.spec
+*.spec
 *.pt
 *.pth

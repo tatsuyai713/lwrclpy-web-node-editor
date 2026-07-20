@@ -3590,8 +3590,9 @@ class GraphRuntime:
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 with log_path.open("a", encoding="utf-8") as log_file:
                     log_file.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Building C++ node {config.name}\n")
+                    cmake_command = self._cpp_cmake_command()
                     subprocess.run(
-                        ["cmake", "-S", str(cpp_root), "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Release"],
+                        [cmake_command, "-S", str(cpp_root), "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Release"],
                         cwd=Path.cwd(),
                         env=self._cpp_worker_env(),
                         stdout=log_file,
@@ -3600,7 +3601,7 @@ class GraphRuntime:
                         check=True,
                     )
                     subprocess.run(
-                        ["cmake", "--build", str(build_dir), "--parallel"],
+                        [cmake_command, "--build", str(build_dir), "--parallel"],
                         cwd=Path.cwd(),
                         env=self._cpp_worker_env(),
                         stdout=log_file,
@@ -3646,6 +3647,27 @@ class GraphRuntime:
             instance.worker_log_path = log_path
             instance.log(instance.env_status)
             return False
+
+    def _cpp_cmake_command(self) -> str:
+        try:
+            import cmake  # type: ignore
+
+            cmake_bin_dir = Path(getattr(cmake, "CMAKE_BIN_DIR", ""))
+            cmake_exe = cmake_bin_dir / ("cmake.exe" if sys.platform.startswith("win") else "cmake")
+            if cmake_exe.exists() and os.access(cmake_exe, os.X_OK):
+                return str(cmake_exe)
+        except Exception:
+            pass
+        for candidate in self._bundled_tool_candidates("cmake"):
+            if candidate.exists() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        found = shutil.which("cmake")
+        if found:
+            return found
+        raise FileNotFoundError(
+            "cmake not found. Rebuild the standalone app with the cmake Python package, "
+            "or install CMake and make it available on PATH."
+        )
 
     def _write_cpp_project(self, config: CustomLwrclNodeConfig, cpp_root: Path, package_dir: Path, package_name: str) -> None:
         src_dir = package_dir / "src"
@@ -3711,6 +3733,7 @@ add_subdirectory({package_name})
     def _cpp_worker_env(self) -> dict[str, str]:
         env = dict(os.environ)
         prefixes = [
+            *self._bundled_lwrcl_prefixes(),
             str(Path("/opt/fast-dds-libs")),
             str(Path("/opt/fast-dds")),
             str(Path("/opt/cyclonedds-libs")),
@@ -3722,9 +3745,47 @@ add_subdirectory({package_name})
         for key in ("DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH"):
             existing = env.get(key, "")
             env[key] = os.pathsep.join([*lib_paths, *([existing] if existing else [])])
+        path_items = [str(path.parent) for path in self._bundled_tool_candidates("cmake") if path.exists()]
+        if path_items:
+            existing_path = env.get("PATH", "")
+            env["PATH"] = os.pathsep.join([*path_items, *([existing_path] if existing_path else [])])
         env.setdefault("FASTDDS_BUILTIN_TRANSPORTS", os.environ.get("LWRCLPY_WEB_FASTDDS_TRANSPORTS", "LARGE_DATA"))
         env.setdefault("LWRCLPY_NO_DATASHARING", "1")
         return env
+
+    def _bundled_tool_candidates(self, name: str) -> list[Path]:
+        exe_name = f"{name}.exe" if sys.platform.startswith("win") else name
+        candidates: list[Path] = []
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend([
+            exe_dir / "_internal" / exe_name,
+            exe_dir / "_internal" / "cmake" / "data" / "bin" / exe_name,
+            exe_dir / exe_name,
+        ])
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            base = Path(meipass)
+            candidates.extend([
+                base / exe_name,
+                base / "cmake" / "data" / "bin" / exe_name,
+            ])
+        return candidates
+
+    def _bundled_lwrcl_prefixes(self) -> list[str]:
+        candidates: list[Path] = []
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend([
+            exe_dir / "_internal" / "lwrcl_cpp",
+            exe_dir / "lwrcl_cpp",
+        ])
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.insert(0, Path(meipass) / "lwrcl_cpp")
+        result: list[str] = []
+        for prefix in candidates:
+            if (prefix / "include" / "lwrcl.hpp").exists() and any((prefix / "lib").glob("liblwrcl*")):
+                result.append(str(prefix))
+        return result
 
     def _ensure_worker_process(self, config: CustomLwrclNodeConfig, instance: CustomLwrclNodeInstance, python_bin: Path) -> bool:
         signature = self._worker_signature(config)

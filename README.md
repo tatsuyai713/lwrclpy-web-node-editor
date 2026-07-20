@@ -247,6 +247,30 @@ Webプレビューは、リンクごとのtopic名を使ってlwrclpy topic経�
 
 Web実行とCLI exportのどちらでも、先に `lwrcl` をFastDDS backendでビルドしてインストールしてください。Web実行では `cmake` とC++コンパイラも必要です。
 
+標準セットアップは次のスクリプトで行えます。デフォルトでは `tatsuyai713/lwrcl` のGitHub latest release tagを取得し、なければ最新tag、さらに見つからなければdefault branchを使います。
+
+```bash
+scripts/setup_lwrcl_cpp_env.sh
+```
+
+`/opt/fast-dds-libs` や `/opt/fast-dds` に書き込むため、途中でsudoパスワードが必要になる場合があります。ローカルprefixへ入れたい場合は次のように指定します。
+
+```bash
+scripts/setup_lwrcl_cpp_env.sh \
+  --prefix "$PWD/.local/fast-dds-libs" \
+  --dds-prefix "$PWD/.local/fast-dds"
+```
+
+Appにそのprefixを同梱する場合は、同じprefixを指定してmacOS Appをビルドします。
+
+```bash
+LWRCL_PREFIX="$PWD/.local/fast-dds-libs" \
+DDS_PREFIX="$PWD/.local/fast-dds" \
+scripts/build_macos_standalone.sh
+```
+
+手動で行う場合は次の通りです。
+
 ```bash
 git clone --recursive https://github.com/tatsuyai713/lwrcl.git
 cd lwrcl

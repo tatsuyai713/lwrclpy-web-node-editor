@@ -9,6 +9,8 @@ APP_NAME="lwrclpy-web-node-editor"
 APP_TITLE="lwrclpy Web Node Editor"
 MAC_CODESIGN_IDENTITY="${MAC_CODESIGN_IDENTITY:--}"
 MAC_CODESIGN_ENTITLEMENTS="${MAC_CODESIGN_ENTITLEMENTS:-}"
+LWRCL_PREFIX="${LWRCL_PREFIX:-}"
+CPP_DEP_PREFIXES="${CPP_DEP_PREFIXES:-}"
 
 
 is_macho_file() {
@@ -156,6 +158,57 @@ EOF
 EOF
 }
 
+
+copy_cpp_dependency_prefixes() {
+  local target="$1"
+  rm -rf "$target"
+  mkdir -p "$target"
+
+  local candidates=()
+  if [[ -n "$LWRCL_PREFIX" ]]; then
+    candidates+=("$LWRCL_PREFIX")
+  fi
+  if [[ -n "$CPP_DEP_PREFIXES" ]]; then
+    local extra_prefixes=()
+    IFS=: read -r -a extra_prefixes <<< "$CPP_DEP_PREFIXES"
+    candidates+=("${extra_prefixes[@]}")
+  fi
+  candidates+=(
+    "/opt/fast-dds-libs"
+    "/opt/fast-dds"
+  )
+
+  local copied=0
+  local seen=":"
+  for prefix in "${candidates[@]}"; do
+    [[ -n "$prefix" && -d "$prefix" ]] || continue
+    local resolved
+    resolved="$(cd "$prefix" && pwd)"
+    case "$seen" in
+      *":$resolved:"*) continue ;;
+    esac
+    seen="${seen}${resolved}:"
+
+    echo "Bundling C++ dependency prefix: $resolved"
+    for subdir in include lib share bin tools; do
+      if [[ -e "$resolved/$subdir" ]]; then
+        mkdir -p "$target/$subdir"
+        ditto "$resolved/$subdir" "$target/$subdir"
+        copied=1
+      fi
+    done
+  done
+
+  if [[ "$copied" -eq 0 ]]; then
+    echo "WARNING: no C++ dependency prefixes found. C++ custom nodes will require external lwrcl/FastDDS setup." >&2
+    return 0
+  fi
+  if [[ ! -f "$target/include/lwrcl.hpp" || ! -e "$target/lib/liblwrcl.dylib" ]]; then
+    echo "WARNING: bundled C++ prefix does not contain lwrcl.hpp and liblwrcl.dylib." >&2
+    echo "Set LWRCL_PREFIX=/path/to/lwrcl/install or CPP_DEP_PREFIXES=/path/one:/path/two and rebuild." >&2
+  fi
+}
+
 if [[ -z "$PYTHON_BIN" ]]; then
   for _candidate in \
     "$ROOT_DIR/.venv/bin/python" \
@@ -197,11 +250,26 @@ else
   echo "Bundling uv from: $UV_BIN"
 fi
 
-rm -rf build dist
+if command -v chflags >/dev/null 2>&1; then
+  for cleanup_path in build dist .build_cpp_deps; do
+    if [[ -e "$cleanup_path" ]]; then
+      chflags -R nouchg,noschg,nohidden "$cleanup_path" 2>/dev/null || true
+    fi
+  done
+fi
+rm -rf build dist .build_cpp_deps
+
+CPP_BUNDLE_PREFIX="$ROOT_DIR/.build_cpp_deps/lwrcl_cpp"
+copy_cpp_dependency_prefixes "$CPP_BUNDLE_PREFIX"
 
 UV_EXTRA_ARGS=()
 if [[ -n "$UV_BIN" && -x "$UV_BIN" ]]; then
   UV_EXTRA_ARGS+=("--add-binary" "${UV_BIN}:.")
+fi
+
+CPP_EXTRA_ARGS=()
+if [[ -d "$CPP_BUNDLE_PREFIX" && -n "$(find "$CPP_BUNDLE_PREFIX" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  CPP_EXTRA_ARGS+=("--add-data" "${CPP_BUNDLE_PREFIX}:lwrcl_cpp")
 fi
 
 "$PYTHON_BIN" -m PyInstaller \
@@ -214,6 +282,7 @@ fi
   --collect-all fastdds \
   --collect-all mcap \
   --collect-all mcap_ros2 \
+  --collect-all cmake \
   --collect-all webview \
   --hidden-import cv2 \
   --hidden-import yaml \
@@ -222,12 +291,14 @@ fi
   --hidden-import Cocoa \
   --hidden-import WebKit \
   "${UV_EXTRA_ARGS[@]}" \
+  "${CPP_EXTRA_ARGS[@]}" \
   --add-data "lwrclpy_web_node_editor/static:lwrclpy_web_node_editor/static" \
   --add-data "lwrclpy_web_node_editor/node_worker.py:lwrclpy_web_node_editor" \
   --add-data "lwrclpy_web_node_editor/video_dds_worker.py:lwrclpy_web_node_editor" \
   --add-data "lwrclpy_web_node_editor/dds_tap_worker.py:lwrclpy_web_node_editor" \
   --add-data "lwrclpy_web_node_editor/builtin_source_worker.py:lwrclpy_web_node_editor" \
   --add-data "scripts/install_lwrclpy.py:scripts" \
+  --add-data "samples:samples" \
   main.py
 
 DIST_DIR="$ROOT_DIR/dist/$APP_NAME"

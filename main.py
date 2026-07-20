@@ -5,6 +5,7 @@ import os
 import sys
 import builtins
 import importlib.util
+import shutil
 from pathlib import Path
 
 
@@ -175,6 +176,7 @@ def _prepare_standalone_runtime() -> None:
         return
     home = standalone_app_home()
     home.mkdir(parents=True, exist_ok=True)
+    _sync_bundled_samples(home)
     os.chdir(home)
     # Ensure lwrclpy_site exists and is in sys.path (may not have existed yet at
     # module load time when _frozen_site_dir() first ran).
@@ -191,6 +193,40 @@ def _prepare_standalone_runtime() -> None:
     elif not _bundled_lwrclpy_is_available():
         _auto_update_lwrclpy(site_dir)
         _prefer_lwrclpy_site_packages(site_dir)
+
+
+def _bundled_samples_dir() -> Path | None:
+    candidates: list[Path] = []
+    exe_dir = Path(sys.executable).resolve().parent
+    candidates.append(exe_dir / "_internal" / "samples")
+    candidates.append(exe_dir / "samples")
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        candidates.insert(0, Path(meipass) / "samples")
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+    return None
+
+
+def _sync_bundled_samples(home: Path) -> None:
+    source = _bundled_samples_dir()
+    if source is None:
+        return
+    target = home / "samples"
+    target.mkdir(parents=True, exist_ok=True)
+    for source_path in source.rglob("*"):
+        if not source_path.is_file():
+            continue
+        rel = source_path.relative_to(source)
+        target_path = target / rel
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if target_path.exists() and target_path.read_bytes() == source_path.read_bytes():
+                continue
+        except Exception:
+            pass
+        shutil.copy2(source_path, target_path)
 
 
 def _has_lwrclpy_site_packages(site_dir: Path) -> bool:
