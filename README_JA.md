@@ -6,6 +6,9 @@
 
 ROS 2本体のインストールは不要です。`lwrclpy` が提供する `rclpy` 互換APIを使い、ノードコードは `msg` を受け取って `publish(...)` で出力するcallbackスタイルで書けます。
 
+<img width="1407" height="902" alt="Screenshot 2026-07-21 at 13 48 16" src="https://github.com/user-attachments/assets/e570e712-fc23-4d9a-8852-60a61db4d8ca" />
+
+
 ## できること
 
 - ブラウザでノードを作成し、入力・処理・表示・グラフ化・topic出力を接続できます。

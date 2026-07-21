@@ -6,6 +6,9 @@
 
 The app does not require a full ROS 2 installation. Python nodes use the `rclpy`-compatible API provided by `lwrclpy`, and C++ custom nodes can use `lwrcl` + FastDDS.
 
+<img width="1407" height="902" alt="Screenshot 2026-07-21 at 13 48 16" src="https://github.com/user-attachments/assets/a8949bbb-3566-4616-be8b-50e65d4073a4" />
+
+
 ## Features
 
 - Create node graphs in the browser and connect inputs, processing nodes, viewers, graph plots, and topic outputs.
