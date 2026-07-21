@@ -2363,8 +2363,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("connection", "close")
             self.end_headers()
             last_seq = 0
+            last_stream_key = ""
             while True:
                 frame = self.runtime.get_node_frame(node_id)
+                stream_key = str((frame or {}).get("streamName") or (frame or {}).get("streamKey") or "")
+                if stream_key != last_stream_key:
+                    last_seq = 0
+                    last_stream_key = stream_key
                 stream_frame = self._read_stream_frame(frame or {})
                 if stream_frame is not None and int(stream_frame["seq"]) > last_seq:
                     payload = stream_frame["data"]

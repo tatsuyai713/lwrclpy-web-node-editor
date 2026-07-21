@@ -491,7 +491,9 @@ def _synthetic_video_frame(base_frame: dict[str, Any], params: dict[str, Any], s
             ended = True
     if width <= 0 or height <= 0 or not source:
         return base, elapsed, ended
-    frame_index = int(elapsed * fps)
+    start_frame = max(0, int(float(params.get("startFrame") or 0)))
+    frame_skip = max(0, int(float(params.get("frameSkip") or 0)))
+    frame_index = start_frame + int(elapsed * fps) * (frame_skip + 1)
     shift = frame_index % max(1, width)
     band = (frame_index * 3) % max(1, width + height)
     return {
@@ -741,12 +743,20 @@ def _run_video_input(config: dict[str, Any], publisher: Any) -> None:
         publisher.publish(_coerce_message(data_type, frame))
         count += 1
         if count == 1 or ended or now >= next_status_at:
+            start_frame = max(0, int(float(params.get("startFrame") or 0)))
+            frame_skip = max(0, int(float(params.get("frameSkip") or 0)))
+            current_frame = start_frame + max(0, count - 1) * (frame_skip + 1)
+            frame_count = max(0, int(float(params.get("frameCount") or 0)))
+            frame_text = f" / frame {current_frame + 1}/{frame_count}" if frame_count > 0 else f" / frame {current_frame + 1}"
             _write_status(
                 status_path,
                 running=not ended,
                 published=count,
                 ended=ended,
-                status=f"{params.get('fileName') or 'embedded video'} {elapsed:.2f}/{duration:.2f}s @ {publish_hz:g}Hz",
+                currentFrame=current_frame,
+                totalFrames=frame_count,
+                startFrame=start_frame,
+                status=f"{params.get('fileName') or 'embedded video'} {elapsed:.2f}/{duration:.2f}s{frame_text} @ {publish_hz:g}Hz",
             )
             next_status_at = now + 0.2
         if ended and not loop:

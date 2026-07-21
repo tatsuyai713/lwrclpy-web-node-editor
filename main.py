@@ -5,6 +5,7 @@ import os
 import sys
 import builtins
 import importlib.util
+import multiprocessing
 import shutil
 from pathlib import Path
 
@@ -60,6 +61,7 @@ def _ensure_orig_import_alias() -> None:
 
 
 _ensure_orig_import_alias()
+multiprocessing.freeze_support()
 
 
 from lwrclpy_web_node_editor.runtime_exec import standalone_app_home  # noqa: E402
@@ -177,6 +179,7 @@ def _prepare_standalone_runtime() -> None:
     home = standalone_app_home()
     home.mkdir(parents=True, exist_ok=True)
     _sync_bundled_samples(home)
+    _sync_bundled_custom_nodes(home)
     os.chdir(home)
     # Ensure lwrclpy_site exists and is in sys.path (may not have existed yet at
     # module load time when _frozen_site_dir() first ran).
@@ -193,6 +196,29 @@ def _prepare_standalone_runtime() -> None:
     elif not _bundled_lwrclpy_is_available():
         _auto_update_lwrclpy(site_dir)
         _prefer_lwrclpy_site_packages(site_dir)
+
+
+def _configure_standalone_fastdds_profile() -> None:
+    if not getattr(sys, "frozen", False):
+        return
+    if os.environ.get("FASTDDS_DEFAULT_PROFILES_FILE") or os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE"):
+        return
+    candidates: list[Path] = []
+    exe_dir = Path(sys.executable).resolve().parent
+    candidates.extend([
+        exe_dir / "_internal" / "fastdds.xml",
+        exe_dir / "_internal" / "fastdds.xml" / "fastdds.xml",
+        exe_dir / "fastdds.xml",
+        exe_dir / "fastdds.xml" / "fastdds.xml",
+    ])
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        candidates.insert(0, Path(meipass) / "fastdds.xml")
+    for candidate in candidates:
+        if candidate.is_file():
+            os.environ["FASTDDS_DEFAULT_PROFILES_FILE"] = str(candidate)
+            os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = str(candidate)
+            return
 
 
 def _bundled_samples_dir() -> Path | None:
@@ -226,6 +252,35 @@ def _sync_bundled_samples(home: Path) -> None:
                 continue
         except Exception:
             pass
+        shutil.copy2(source_path, target_path)
+
+
+def _bundled_custom_nodes_dir() -> Path | None:
+    candidates: list[Path] = []
+    exe_dir = Path(sys.executable).resolve().parent
+    candidates.append(exe_dir / "_internal" / "custom_nodes")
+    candidates.append(exe_dir / "custom_nodes")
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        candidates.insert(0, Path(meipass) / "custom_nodes")
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+    return None
+
+
+def _sync_bundled_custom_nodes(home: Path) -> None:
+    source = _bundled_custom_nodes_dir()
+    if source is None:
+        return
+    target = home / ".app_settings" / "custom_nodes"
+    target.mkdir(parents=True, exist_ok=True)
+    for source_path in sorted(source.glob("*.json")):
+        if not source_path.is_file():
+            continue
+        target_path = target / source_path.name
+        if target_path.exists():
+            continue
         shutil.copy2(source_path, target_path)
 
 
@@ -304,6 +359,7 @@ if __name__ == "__main__":
     exit_code: int | None = None
     try:
         argv = sys.argv[1:]
+        _configure_standalone_fastdds_profile()
         worker_exit = _dispatch_worker(argv)
         if worker_exit is not None:
             exit_code = int(worker_exit)

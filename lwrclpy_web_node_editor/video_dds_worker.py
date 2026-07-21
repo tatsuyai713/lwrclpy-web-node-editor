@@ -91,6 +91,17 @@ def _topic_qos(data_type: str, external: bool = False) -> Any:
 
 
 def _set_field(msg: Any, key: str, value: Any) -> None:
+    if key == "data" and isinstance(value, (bytes, bytearray, memoryview)):
+        resize = getattr(msg, "_lwrclpy_data_resize", None)
+        buffer_getter = getattr(msg, "_lwrclpy_data_memoryview", None)
+        if callable(resize) and callable(buffer_getter):
+            try:
+                source = memoryview(value)
+                resize(len(source))
+                memoryview(buffer_getter())[:len(source)] = source
+                return
+            except Exception:
+                pass
     field = getattr(msg, key, None)
     if callable(field):
         try:
@@ -101,14 +112,16 @@ def _set_field(msg: Any, key: str, value: Any) -> None:
     setattr(msg, key, value)
 
 
-def _populate_image_message(msg: Any, width: int, height: int, rgb: bytes) -> None:
+def _populate_image_message(msg: Any, width: int, height: int, data: bytes, encoding: str = "rgb8") -> None:
+    encoding = str(encoding or "rgb8").lower()
+    channels = 1 if encoding in {"mono8", "8uc1"} else 3
     fields = {
         "width": width,
         "height": height,
-        "encoding": "rgb8",
+        "encoding": encoding,
         "is_bigendian": 0,
-        "step": width * 3,
-        "data": rgb,
+        "step": width * channels,
+        "data": data,
     }
     for key, value in fields.items():
         if hasattr(msg, key):
@@ -122,17 +135,17 @@ def _populate_compressed_image_message(msg: Any, width: int, height: int, jpeg: 
         _set_field(msg, "data", jpeg)
 
 
-def _coerce_image(type_name: str, width: int, height: int, frame: bytes, output_encoding: str) -> Any:
+def _coerce_image(type_name: str, width: int, height: int, frame: bytes, output_encoding: str, frame_encoding: str = "rgb8") -> Any:
     msg = _import_type_class(type_name)()
     if str(type_name).endswith("/CompressedImage") or output_encoding == "jpeg":
         _populate_compressed_image_message(msg, width, height, frame)
     else:
-        _populate_image_message(msg, width, height, frame)
+        _populate_image_message(msg, width, height, frame, frame_encoding)
     return msg
 
 
-def _publish_frame(publisher: Any, type_name: str, width: int, height: int, frame: bytes, output_encoding: str, node: Any = None) -> None:
-    msg = _coerce_image(type_name, width, height, frame, output_encoding)
+def _publish_frame(publisher: Any, type_name: str, width: int, height: int, frame: bytes, output_encoding: str, frame_encoding: str = "rgb8", node: Any = None) -> None:
+    msg = _coerce_image(type_name, width, height, frame, output_encoding, frame_encoding)
     _stamp_header(msg, node)
     publisher.publish(msg)
 
@@ -283,16 +296,16 @@ class PreviewFrameWriter:
         if self.preview_encoding == "raw":
             preview_width, preview_height = _scaled_preview_size(self.width, self.height, self.preview_max_side)
             if preview_width == self.width and preview_height == self.height:
-                return frame, "rgb8", self.width, self.height
-            resized = _resize_rgb_bytes(self.width, self.height, frame, preview_width, preview_height)
+                return frame, self.source_encoding, self.width, self.height
+            resized = _resize_color_bytes(self.width, self.height, frame, preview_width, preview_height, self.source_encoding)
             if resized is None:
-                return frame, "rgb8", self.width, self.height
-            return resized, "rgb8", preview_width, preview_height
+                return frame, self.source_encoding, self.width, self.height
+            return resized, self.source_encoding, preview_width, preview_height
         if self.preview_encoding == "jpeg":
             try:
                 from PIL import Image
 
-                image = Image.frombytes("RGB", (self.width, self.height), frame)
+                image = Image.frombytes("RGB", (self.width, self.height), _rgb_preview_bytes(frame, self.source_encoding))
                 preview_width, preview_height = _scaled_preview_size(self.width, self.height, self.preview_max_side)
                 if preview_width != self.width or preview_height != self.height:
                     image = image.resize((preview_width, preview_height), Image.Resampling.BILINEAR)
@@ -302,19 +315,21 @@ class PreviewFrameWriter:
             except Exception:
                 pass
         preview_width, preview_height = _scaled_preview_size(self.width, self.height, self.preview_max_side)
+        rgb = _rgb_preview_bytes(frame, self.source_encoding)
         if preview_width != self.width or preview_height != self.height:
-            resized = _resize_rgb_bytes(self.width, self.height, frame, preview_width, preview_height)
+            resized = _resize_color_bytes(self.width, self.height, rgb, preview_width, preview_height, "rgb8")
             if resized is not None:
                 return _bmp_bytes(preview_width, preview_height, resized), "bmp", preview_width, preview_height
-        return _bmp_bytes(self.width, self.height, frame), "bmp", self.width, self.height
+        return _bmp_bytes(self.width, self.height, rgb), "bmp", self.width, self.height
 
 
-def _resize_rgb_bytes(width: int, height: int, rgb: bytes, preview_width: int, preview_height: int) -> bytes | None:
+def _resize_color_bytes(width: int, height: int, data: bytes, preview_width: int, preview_height: int, encoding: str = "rgb8") -> bytes | None:
     try:
         import cv2
         import numpy as np
 
-        array = np.frombuffer(rgb, dtype=np.uint8).reshape((height, width, 3))
+        channels = 1 if str(encoding).lower() in {"mono8", "8uc1"} else 3
+        array = np.frombuffer(data, dtype=np.uint8).reshape((height, width, channels))
         interpolation = cv2.INTER_AREA if preview_width < width or preview_height < height else cv2.INTER_LINEAR
         resized = cv2.resize(array, (preview_width, preview_height), interpolation=interpolation)
         return resized.tobytes()
@@ -323,25 +338,46 @@ def _resize_rgb_bytes(width: int, height: int, rgb: bytes, preview_width: int, p
     try:
         from PIL import Image
 
-        image = Image.frombytes("RGB", (width, height), rgb)
+        image = Image.frombytes("RGB", (width, height), _rgb_preview_bytes(data, encoding))
         image = image.resize((preview_width, preview_height), Image.Resampling.BILINEAR)
         return image.tobytes()
     except Exception:
         pass
     try:
-        source = memoryview(rgb)
-        output = bytearray(preview_width * preview_height * 3)
+        source = memoryview(data)
+        channels = 1 if str(encoding).lower() in {"mono8", "8uc1"} else 3
+        output = bytearray(preview_width * preview_height * channels)
         for y in range(preview_height):
             src_y = min(height - 1, int(y * height / preview_height))
-            src_row = src_y * width * 3
-            dst_row = y * preview_width * 3
+            src_row = src_y * width * channels
+            dst_row = y * preview_width * channels
             for x in range(preview_width):
-                src = src_row + min(width - 1, int(x * width / preview_width)) * 3
-                dst = dst_row + x * 3
-                output[dst:dst + 3] = source[src:src + 3]
+                src = src_row + min(width - 1, int(x * width / preview_width)) * channels
+                dst = dst_row + x * channels
+                output[dst:dst + channels] = source[src:src + channels]
         return bytes(output)
     except Exception:
         return None
+
+
+def _rgb_preview_bytes(data: Any, encoding: str) -> bytes:
+    raw = data if isinstance(data, (bytes, bytearray, memoryview)) else bytes(data)
+    encoding = str(encoding or "rgb8").lower()
+    if encoding == "rgb8":
+        return bytes(raw) if isinstance(raw, memoryview) else raw
+    if encoding == "bgr8":
+        rgb = bytearray(len(raw))
+        rgb[0::3] = raw[2::3]
+        rgb[1::3] = raw[1::3]
+        rgb[2::3] = raw[0::3]
+        return bytes(rgb)
+    if encoding in {"mono8", "8uc1"}:
+        rgb = bytearray(len(raw) * 3)
+        rgb[0::3] = raw
+        rgb[1::3] = raw
+        rgb[2::3] = raw
+        return bytes(rgb)
+    return bytes(raw) if isinstance(raw, memoryview) else raw
 
 
 def _bmp_bytes(width: int, height: int, rgb: bytes) -> bytes:
@@ -391,7 +427,7 @@ def _open_capture(path: Path) -> Any:
     return capture
 
 
-def _probe(path: Path) -> tuple[int, int, float]:
+def _probe(path: Path) -> tuple[int, int, float, int]:
     import cv2
 
     capture = _open_capture(path)
@@ -399,13 +435,36 @@ def _probe(path: Path) -> tuple[int, int, float]:
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     finally:
         capture.release()
     if width <= 0 or height <= 0:
         raise RuntimeError("OpenCV could not read video dimensions")
     if fps <= 0 or fps >= 10000:
         fps = 30.0
-    return width, height, fps
+    return width, height, fps, frame_count
+
+
+def _seek_start_frame(capture: Any, start_frame: int) -> int:
+    if start_frame <= 0:
+        return 0
+    try:
+        import cv2
+
+        capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(start_frame)))
+        return int(capture.get(cv2.CAP_PROP_POS_FRAMES) or start_frame)
+    except Exception:
+        return max(0, int(start_frame))
+
+
+def _capture_frame_index(capture: Any, fallback: int) -> int:
+    try:
+        import cv2
+
+        pos = int(capture.get(cv2.CAP_PROP_POS_FRAMES) or 0)
+        return max(0, pos - 1)
+    except Exception:
+        return max(0, int(fallback))
 
 
 def _scaled_size(width: int, height: int, max_side: int) -> tuple[int, int]:
@@ -428,28 +487,32 @@ def _scaled_preview_size(width: int, height: int, target_width: int) -> tuple[in
     return target_width, max(1, int(round(height * scale)))
 
 
-def _read_rgb_frame(capture: Any, width: int, height: int) -> bytes | None:
+def _read_bgr_frame(capture: Any, width: int, height: int) -> bytes | None:
     import cv2
+    import numpy as np
 
     ok, bgr = capture.read()
     if not ok or bgr is None:
         return None
     if int(bgr.shape[1]) != width or int(bgr.shape[0]) != height:
         bgr = cv2.resize(bgr, (width, height), interpolation=cv2.INTER_AREA)
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    return rgb.tobytes()
+    if not bgr.flags["C_CONTIGUOUS"]:
+        bgr = np.ascontiguousarray(bgr)
+    return bgr.tobytes()
 
 
-def _jpeg_from_rgb(width: int, height: int, rgb: bytes) -> bytes:
+def _jpeg_from_bgr(_width: int, _height: int, bgr: bytes) -> bytes:
     try:
-        from PIL import Image
+        import cv2
+        import numpy as np
 
-        image = Image.frombytes("RGB", (width, height), rgb)
-        out = io.BytesIO()
-        image.save(out, format="JPEG", quality=75, subsampling=1)
-        return out.getvalue()
+        array = np.frombuffer(bgr, dtype=np.uint8).reshape((_height, _width, 3))
+        ok, encoded = cv2.imencode(".jpg", array, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+        if ok:
+            return encoded.tobytes()
     except Exception:
-        return rgb
+        pass
+    return bgr
 
 
 def main() -> int:
@@ -473,11 +536,16 @@ def main() -> int:
     output_encoding = str(config.get("outputEncoding") or "raw").lower()
     if output_encoding not in {"raw", "jpeg"}:
         output_encoding = "raw"
+    frame_color_encoding = "jpeg" if output_encoding == "jpeg" else "bgr8"
     loop = bool(config.get("loop", True))
     try:
         frame_skip = max(0, int(float(config.get("frameSkip") or 0)))
     except Exception:
         frame_skip = 0
+    try:
+        start_frame = max(0, int(float(config.get("startFrame") or 0)))
+    except Exception:
+        start_frame = 0
     try:
         preview_hz = max(0.0, min(float(config.get("previewHz", DEFAULT_PREVIEW_HZ)), 120.0))
     except Exception:
@@ -495,8 +563,10 @@ def main() -> int:
         _write_status(status_path, running=True, phase="probe", error="", videoPath=str(video_path))
         if not video_path.is_file():
             raise RuntimeError(f"video file not found: {video_path}")
-        src_w, src_h, src_fps = _probe(video_path)
+        src_w, src_h, src_fps, frame_count = _probe(video_path)
         width, height = src_w, src_h
+        if frame_count > 0:
+            start_frame = min(start_frame, max(0, frame_count - 1))
         if use_source_fps and src_fps > 0:
             publish_hz = max(0.01, src_fps / (frame_skip + 1))
     except Exception as exc:
@@ -524,16 +594,19 @@ def main() -> int:
     ended = False
     next_preview_at = 0.0
     next_status_at = 0.0
-    frame_encoding = "jpeg" if output_encoding == "jpeg" else preview_encoding
-    preview_writer = PreviewFrameWriter(frame_path, status_path, width, height, output_encoding, frame_encoding, preview_max_side, stream_name, stream_size) if preview_hz > 0 else None
+    frame_encoding = "jpeg" if output_encoding == "jpeg" else frame_color_encoding
+    preview_writer = PreviewFrameWriter(frame_path, status_path, width, height, frame_encoding, "raw" if preview_encoding == "raw" else preview_encoding, preview_max_side, stream_name, stream_size) if preview_hz > 0 else None
     _write_status(
         status_path,
         running=True,
         error="",
         width=width,
         height=height,
-        encoding=output_encoding,
+        encoding=frame_encoding,
         sourceFps=src_fps,
+        totalFrames=frame_count,
+        startFrame=start_frame,
+        currentFrame=start_frame,
         frameSkip=frame_skip,
         published=0,
         matchedSubscriptions=_matched_subscriptions(publisher),
@@ -552,9 +625,12 @@ def main() -> int:
                     error="",
                     width=width,
                     height=height,
-                    encoding=output_encoding,
+                    encoding=frame_encoding,
                     sourceFps=src_fps,
                     frameSkip=frame_skip,
+                    totalFrames=frame_count,
+                    startFrame=start_frame,
+                    currentFrame=start_frame,
                     published=0,
                     matchedSubscriptions=_matched_subscriptions(publisher),
                     expectedSubscriptions=expected_subscriptions,
@@ -570,9 +646,12 @@ def main() -> int:
                 error="",
                 width=width,
                 height=height,
-                encoding=output_encoding,
+                encoding=frame_encoding,
                 sourceFps=src_fps,
                 frameSkip=frame_skip,
+                totalFrames=frame_count,
+                startFrame=start_frame,
+                currentFrame=start_frame,
                 published=0,
                 matchedSubscriptions=_matched_subscriptions(publisher),
                 expectedSubscriptions=expected_subscriptions,
@@ -584,18 +663,20 @@ def main() -> int:
         next_publish_at = time.perf_counter()
         while RUNNING:
             capture = _open_capture(video_path)
+            current_frame = _seek_start_frame(capture, start_frame)
             try:
                 while RUNNING:
                     delay = next_publish_at - time.perf_counter()
                     while RUNNING and delay > 0:
                         time.sleep(min(delay, 0.001))
                         delay = next_publish_at - time.perf_counter()
-                    rgb_frame = _read_rgb_frame(capture, width, height)
-                    if rgb_frame is None:
+                    bgr_frame = _read_bgr_frame(capture, width, height)
+                    if bgr_frame is None:
                         break
-                    frame = _jpeg_from_rgb(width, height, rgb_frame) if output_encoding == "jpeg" else rgb_frame
+                    current_frame = _capture_frame_index(capture, start_frame + count * (frame_skip + 1))
+                    frame = _jpeg_from_bgr(width, height, bgr_frame) if output_encoding == "jpeg" else bgr_frame
                     if publisher is not None:
-                        _publish_frame(publisher, type_name, width, height, frame, output_encoding, node)
+                        _publish_frame(publisher, type_name, width, height, frame, output_encoding, frame_encoding, node)
                     published_at = time.perf_counter()
                     next_publish_at += period_sec
                     if next_publish_at < published_at:
@@ -616,8 +697,11 @@ def main() -> int:
                                 "error": "",
                                 "width": width,
                                 "height": height,
-                                "encoding": output_encoding,
+                                "encoding": frame_encoding,
                                 "sourceFps": src_fps,
+                                "totalFrames": frame_count,
+                                "startFrame": start_frame,
+                                "currentFrame": current_frame,
                                 "frameSkip": frame_skip,
                                 "published": count,
                                 "actualHz": actual_hz,
@@ -635,8 +719,11 @@ def main() -> int:
                             error="",
                             width=width,
                             height=height,
-                            encoding=output_encoding,
+                            encoding=frame_encoding,
                             sourceFps=src_fps,
+                            totalFrames=frame_count,
+                            startFrame=start_frame,
+                            currentFrame=current_frame,
                             frameSkip=frame_skip,
                             published=count,
                             actualHz=actual_hz,
@@ -665,8 +752,11 @@ def main() -> int:
             error="",
             width=width,
             height=height,
-            encoding=output_encoding,
+            encoding=frame_encoding,
             sourceFps=src_fps,
+            totalFrames=frame_count,
+            startFrame=start_frame,
+            currentFrame=start_frame + max(0, count - 1) * (frame_skip + 1),
             frameSkip=frame_skip,
             published=count,
             **(preview_writer.status_snapshot() if preview_writer is not None else {}),

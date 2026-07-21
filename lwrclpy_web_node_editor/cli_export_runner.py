@@ -639,10 +639,13 @@ class RuntimeNode:
         if self.video_capture is None:
             status(f"{self.config.get('name')}: opening video {path}")
             self.video_capture = cv2.VideoCapture(path)
+            start_frame = max(0, int(float(self.params.get("startFrame") or 0)))
+            if start_frame > 0:
+                self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         ok, frame = self.video_capture.read()
         if not ok:
             if self.params.get("loop", True):
-                self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(float(self.params.get("startFrame") or 0))))
                 ok, frame = self.video_capture.read()
             if not ok:
                 return

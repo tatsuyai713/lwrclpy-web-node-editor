@@ -214,6 +214,8 @@ fi
   --add-data "lwrclpy_web_node_editor/dds_tap_worker.py:lwrclpy_web_node_editor" \
   --add-data "lwrclpy_web_node_editor/builtin_source_worker.py:lwrclpy_web_node_editor" \
   --add-data "scripts/install_lwrclpy.py:scripts" \
+  --add-data "resources/fastdds.xml:." \
+  --add-data ".app_settings/custom_nodes:custom_nodes" \
   main.py
 
 APP_DIR="$ROOT_DIR/dist/$APP_NAME.AppDir"

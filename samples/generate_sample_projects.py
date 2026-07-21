@@ -402,7 +402,7 @@ def image_input(node_id: str, name: str, x: int, y: int, image: dict, video: boo
 		"y": y,
 		"inputs": [],
 		"outputs": [{"id": "out1", "name": "frame" if video else "image", "dataType": "sensor_msgs/msg/Image"}],
-		"params": {"fileName": name + ".embedded.mp4", "dataUrl": image["dataUrl"], params_key: image, "baseFrameMessage": image, "embeddedVideo": True, "embeddedFps": 30, "publishHz": 30, "duration": 10, "loop": True} if video else {"fileName": name + ".embedded.png", "dataUrl": image["dataUrl"], params_key: image, "publishMode": "oneshot", "publishHz": 1},
+		"params": {"fileName": name + ".embedded.mp4", "dataUrl": image["dataUrl"], params_key: image, "baseFrameMessage": image, "embeddedVideo": True, "embeddedFps": 30, "publishHz": 30, "useSourceFps": False, "duration": 10, "loop": True} if video else {"fileName": name + ".embedded.png", "dataUrl": image["dataUrl"], params_key: image, "publishMode": "oneshot", "publishHz": 1},
 		"loopCode": "",
 		"toolType": "video_file_input" if video else "image_file_input",
 	}

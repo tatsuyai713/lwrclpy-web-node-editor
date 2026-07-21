@@ -132,7 +132,7 @@ def ros_image_to_bgr(img):
         return cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
     if enc == "mono8":
         return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
-    return arr.copy()
+    return arr if arr.flags["C_CONTIGUOUS"] else np.ascontiguousarray(arr)
 
 
 def bgr_to_ros_image(bgr):
@@ -1383,15 +1383,18 @@ class CustomLwrclNodeInstance:
         return bool(data.get("ended")) and not bool(data.get("running"))
 
     def _video_worker_signature(self) -> tuple[Any, ...]:
+        publish_hz = self._video_publish_hz()
         return (
             self.config.id,
             self.config.params.get("videoPath"),
-            float(self.config.params.get("publishHz") or 30.0),
+            publish_hz,
+            self._video_use_source_fps(),
             bool(self.config.params.get("loop", True)),
+            self._video_start_frame(),
             self._video_frame_skip(),
             bool(self.config.params.get("_externalDdsCompatible")),
             int(self.config.params.get("_expectedSubscriptions") or 0),
-            f"preview:raw:max640:{self._run_hz():g}hz",
+            f"preview:raw:max640:{min(self._run_hz(), publish_hz):g}hz",
             tuple((p.id, p.data_type, p.topics) for p in self.config.outputs),
         )
 
@@ -1399,28 +1402,41 @@ class CustomLwrclNodeInstance:
         output = next((port for port in self.config.outputs if port.topics), None)
         if output is None:
             raise RuntimeError("Video Input has no DDS output topic")
+        publish_hz = self._video_publish_hz()
         return {
             "nodeId": self.config.id,
             "videoPath": str(self.config.params.get("videoPath")),
             "topic": output.topics[0],
             "dataType": output.data_type or "sensor_msgs/msg/Image",
-            "publishHz": max(0.01, float(self.config.params.get("publishHz") or 30.0)),
-            "useSourceFps": True,
+            "publishHz": publish_hz,
+            "useSourceFps": self._video_use_source_fps(),
             "loop": bool(self.config.params.get("loop", True)),
+            "startFrame": self._video_start_frame(),
             "frameSkip": self._video_frame_skip(),
             "statusPath": str(status_path),
             "framePath": str(frame_path),
-            "streamName": f"ipn_{self.config.id}_video_{os.getpid()}",
+            "streamName": f"ipn_{self.config.id}_video_{os.getpid()}_{hashlib.sha1(repr(self._video_worker_signature()).encode('utf-8')).hexdigest()[:12]}",
             "streamSize": (640 * 2048 * 4) + 4096,
             "enableDdsPublish": True,
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
             "expectedSubscriptions": int(self.config.params.get("_expectedSubscriptions") or 0),
             "discoveryTimeoutSec": 10.0,
-            "previewHz": self._run_hz(),
+            "previewHz": min(self._run_hz(), publish_hz),
             "previewEncoding": "raw",
             "previewMaxSide": 640,
             "outputEncoding": "jpeg" if normalize_type(output.data_type) == "sensor_msgs/msg/CompressedImage" else "raw",
         }
+
+    def _video_publish_hz(self) -> float:
+        try:
+            return max(0.01, min(float(self.config.params.get("publishHz") or 30.0), 120.0))
+        except Exception:
+            return 30.0
+
+    def _video_use_source_fps(self) -> bool:
+        if "useSourceFps" not in self.config.params:
+            return True
+        return bool(self.config.params.get("useSourceFps"))
 
     def _update_video_worker_view(self) -> None:
         status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.video.status.json"
@@ -1442,7 +1458,8 @@ class CustomLwrclNodeInstance:
                     size = f"{data.get('width', '?')} x {data.get('height', '?')}"
                     actual = float(data.get("actualHz") or 0.0)
                     hz = f" / {actual:.1f} Hz actual" if actual > 0 else ""
-                    status = f"{self.config.params.get('fileName') or 'video'} DDS worker {size}{hz}"
+                    frame_text = self._video_frame_status_suffix(data)
+                    status = f"{self.config.params.get('fileName') or 'video'} DDS worker {size}{frame_text}{hz}"
             except Exception:
                 status = "video DDS worker running"
         if not status:
@@ -1455,6 +1472,12 @@ class CustomLwrclNodeInstance:
         preview_width = int(data.get("previewWidth") or width) if isinstance(data, dict) else 0
         preview_height = int(data.get("previewHeight") or height) if isinstance(data, dict) else 0
         encoding = str(data.get("frameEncoding") or data.get("encoding") or "jpeg").lower() if isinstance(data, dict) else "jpeg"
+        if isinstance(data, dict):
+            total_frames = int(data.get("totalFrames") or 0)
+            current_frame = int(data.get("currentFrame") or 0)
+            self.config.params["currentFrame"] = current_frame
+            if total_frames > 0:
+                self.config.params["frameCount"] = total_frames
         if seq > 0 and (stream_name or frame_path.is_file()):
             self.state["image_view_frame"] = {
                 "seq": seq,
@@ -1466,6 +1489,7 @@ class CustomLwrclNodeInstance:
                 "path": str(frame_path) if not stream_name else "",
                 "streamName": stream_name,
                 "streamSize": int(data.get("streamSize") or 0),
+                "streamKey": stream_name or str(frame_path),
                 "updatedAt": time.time(),
             }
             self.view = {
@@ -1479,6 +1503,7 @@ class CustomLwrclNodeInstance:
                     "sourceHeight": height,
                     "encoding": self.state["image_view_frame"]["encoding"],
                     "stream": bool(stream_name),
+                    "streamKey": stream_name or str(frame_path),
                 },
                 "status": status,
             }
@@ -1915,6 +1940,7 @@ class CustomLwrclNodeInstance:
             "path": str(frame_path) if not stream_name else "",
             "streamName": stream_name,
             "streamSize": int(status.get("streamSize") or 0),
+            "streamKey": stream_name or str(frame_path),
             "updatedAt": time.time(),
         }
 
@@ -2159,7 +2185,12 @@ class CustomLwrclNodeInstance:
             return self.state.get("video_worker_last_frame")
         self.state["video_worker_last_seq"] = seq
         if status_seq > 0:
-            self.state["video_file_current_time"] = status_seq / max(0.01, float(self.config.params.get("publishHz") or 30.0))
+            self.state["video_file_current_time"] = status_seq / self._effective_video_publish_hz()
+        current_frame = int(status.get("currentFrame") or (self._video_start_frame() + max(0, status_seq - 1) * (self._video_frame_skip() + 1)))
+        self.config.params["currentFrame"] = current_frame
+        total_frames = int(status.get("totalFrames") or 0)
+        if total_frames > 0:
+            self.config.params["frameCount"] = total_frames
         self.state["image_view_frame"] = {
             "seq": seq,
             "width": preview_width,
@@ -2168,6 +2199,7 @@ class CustomLwrclNodeInstance:
             "sourceHeight": height,
             "encoding": frame_encoding,
             "path": str(frame_path),
+            "streamKey": str(frame_path),
             "updatedAt": time.time(),
         }
         frame = {
@@ -2179,6 +2211,7 @@ class CustomLwrclNodeInstance:
                 "sourceWidth": width,
                 "sourceHeight": height,
                 "encoding": self.state["image_view_frame"]["encoding"],
+                "streamKey": str(frame_path),
             }
         }
         self.state["video_worker_last_frame"] = frame
@@ -2205,22 +2238,26 @@ class CustomLwrclNodeInstance:
 
     def _effective_video_publish_hz(self) -> float:
         divisor = self._video_frame_skip() + 1
-        status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.video.status.json"
-        if status_path.exists():
-            try:
-                status = json.loads(status_path.read_text(encoding="utf-8"))
-                source_fps = float(status.get("sourceFps") or 0.0)
-                if source_fps > 0:
-                    return max(0.01, source_fps / divisor)
-            except Exception:
-                pass
+        use_source_fps = self._video_use_source_fps()
+        if use_source_fps:
+            status_path = Path.cwd() / ".node_workers" / f"{self.config.id}.video.status.json"
+            if status_path.exists():
+                try:
+                    status = json.loads(status_path.read_text(encoding="utf-8"))
+                    source_fps = float(status.get("sourceFps") or 0.0)
+                    if source_fps > 0:
+                        return max(0.01, source_fps / divisor)
+                except Exception:
+                    pass
         base_hz = float(
-            self.config.params.get("detectedFps")
-            or self.config.params.get("nativeFps")
-            or self.config.params.get("sourceFps")
-            or self.config.params.get("embeddedFps")
-            or self.config.params.get("publishHz")
-            or 30.0
+            (
+                self.config.params.get("detectedFps")
+                or self.config.params.get("nativeFps")
+                or self.config.params.get("sourceFps")
+                or self.config.params.get("embeddedFps")
+            )
+            if use_source_fps
+            else (self.config.params.get("publishHz") or 30.0)
         )
         return max(0.01, base_hz / divisor)
 
@@ -2229,6 +2266,26 @@ class CustomLwrclNodeInstance:
             return max(0, int(float(self.config.params.get("frameSkip") or 0)))
         except Exception:
             return 0
+
+    def _video_start_frame(self) -> int:
+        try:
+            return max(0, int(float(self.config.params.get("startFrame") or 0)))
+        except Exception:
+            return 0
+
+    def _video_frame_status_suffix(self, data: dict[str, Any] | None = None) -> str:
+        source = data if isinstance(data, dict) else self.config.params
+        try:
+            current = int(float(source.get("currentFrame") or self.config.params.get("currentFrame") or self._video_start_frame() or 0))
+        except Exception:
+            current = self._video_start_frame()
+        try:
+            total = int(float(source.get("totalFrames") or self.config.params.get("frameCount") or 0))
+        except Exception:
+            total = 0
+        if total > 0:
+            return f" / frame {current + 1}/{total}"
+        return f" / frame {current + 1}"
 
     def _synthetic_video_frame(self, base_frame: dict[str, Any]) -> dict[str, Any]:
         base = self._normalize_image_message(base_frame)
@@ -2251,7 +2308,8 @@ class CustomLwrclNodeInstance:
             else:
                 elapsed = duration
         self.state["video_file_current_time"] = elapsed
-        frame_index = int(elapsed * fps) * (self._video_frame_skip() + 1)
+        frame_index = self._video_start_frame() + int(elapsed * fps) * (self._video_frame_skip() + 1)
+        self.config.params["currentFrame"] = frame_index
         shift = frame_index % max(1, width)
         band = (frame_index * 3) % max(1, width + height)
         return {
@@ -3750,7 +3808,6 @@ add_subdirectory({package_name})
             existing_path = env.get("PATH", "")
             env["PATH"] = os.pathsep.join([*path_items, *([existing_path] if existing_path else [])])
         env.setdefault("FASTDDS_BUILTIN_TRANSPORTS", os.environ.get("LWRCLPY_WEB_FASTDDS_TRANSPORTS", "LARGE_DATA"))
-        env.setdefault("LWRCLPY_NO_DATASHARING", "1")
         return env
 
     def _bundled_tool_candidates(self, name: str) -> list[Path]:

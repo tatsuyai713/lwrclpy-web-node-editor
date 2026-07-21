@@ -267,6 +267,22 @@ if [[ -n "$UV_BIN" && -x "$UV_BIN" ]]; then
   UV_EXTRA_ARGS+=("--add-binary" "${UV_BIN}:.")
 fi
 
+FASTDDS_EXTRA_ARGS=()
+VENDORED_FASTDDS_SO="$("$PYTHON_BIN" - <<'PY'
+from pathlib import Path
+import sysconfig
+
+purelib = Path(sysconfig.get_paths()["purelib"])
+candidate = purelib / "lwrclpy" / "_vendor" / "fastdds" / "_fastdds_python.so"
+print(candidate if candidate.exists() else "")
+PY
+)"
+if [[ -n "$VENDORED_FASTDDS_SO" && -f "$VENDORED_FASTDDS_SO" ]]; then
+  FASTDDS_EXTRA_ARGS+=("--add-binary" "${VENDORED_FASTDDS_SO}:lwrclpy/_vendor/fastdds")
+else
+  echo "WARNING: vendored lwrclpy FastDDS extension was not found; bundled lwrclpy may fail to import fastdds." >&2
+fi
+
 CPP_EXTRA_ARGS=()
 if [[ -d "$CPP_BUNDLE_PREFIX" && -n "$(find "$CPP_BUNDLE_PREFIX" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   CPP_EXTRA_ARGS+=("--add-data" "${CPP_BUNDLE_PREFIX}:lwrcl_cpp")
@@ -291,6 +307,7 @@ fi
   --hidden-import Cocoa \
   --hidden-import WebKit \
   "${UV_EXTRA_ARGS[@]}" \
+  "${FASTDDS_EXTRA_ARGS[@]}" \
   "${CPP_EXTRA_ARGS[@]}" \
   --add-data "lwrclpy_web_node_editor/static:lwrclpy_web_node_editor/static" \
   --add-data "lwrclpy_web_node_editor/node_worker.py:lwrclpy_web_node_editor" \
@@ -298,6 +315,8 @@ fi
   --add-data "lwrclpy_web_node_editor/dds_tap_worker.py:lwrclpy_web_node_editor" \
   --add-data "lwrclpy_web_node_editor/builtin_source_worker.py:lwrclpy_web_node_editor" \
   --add-data "scripts/install_lwrclpy.py:scripts" \
+  --add-data "resources/fastdds.xml:." \
+  --add-data ".app_settings/custom_nodes:custom_nodes" \
   --add-data "samples:samples" \
   main.py
 

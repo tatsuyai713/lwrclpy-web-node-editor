@@ -115,11 +115,12 @@ def framework_worker_tokens() -> list[str]:
 
 def resolve_worker_command(worker: WorkerKind, config_path: Path, python_bin: Path | None = None) -> list[str]:
     if is_frozen_app():
-        if python_bin is not None:
+        frozen_exe = Path(sys.executable).resolve()
+        if python_bin is not None and Path(python_bin).resolve() != frozen_exe:
             worker_script = _frozen_worker_script_path(worker)
             if worker_script is not None:
                 return [str(python_bin), str(worker_script), str(config_path)]
-        return [str(Path(sys.executable).resolve()), _WORKER_FLAGS[worker], str(config_path)]
+        return [str(frozen_exe), _WORKER_FLAGS[worker], str(config_path)]
     package_dir = Path(__file__).resolve().parent
     script_path = package_dir / _WORKER_SCRIPT_NAMES[worker]
     launcher = python_bin if python_bin is not None else Path(sys.executable)

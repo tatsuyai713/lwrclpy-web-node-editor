@@ -30,7 +30,6 @@ rate.sleep()
 """
 
 
-os.environ.setdefault("LWRCLPY_NO_DATASHARING", "1")
 EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
     "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
     "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=true",
@@ -434,11 +433,11 @@ class LwrclpyWorkerNode:
         if not fields:
             image_keys = ("height", "width", "encoding", "is_bigendian", "step", "data")
             if all(hasattr(value, key) for key in ("height", "width", "encoding", "data")):
-                result = {key: self._plain_value(getattr(value, key, None)) for key in image_keys if hasattr(value, key)}
+                result = {key: self._message_field_value(value, key) for key in image_keys if hasattr(value, key)}
                 result["__lwrclpy_msg_ref"] = value
                 return result
             if hasattr(value, "data"):
-                return {"data": self._plain_value(getattr(value, "data")), "__lwrclpy_msg_ref": value}
+                return {"data": self._message_field_value(value, "data"), "__lwrclpy_msg_ref": value}
             return value
         result: dict[str, Any] = {}
         for key in fields:
@@ -446,9 +445,24 @@ class LwrclpyWorkerNode:
             if hasattr(item, "_fields_and_field_types"):
                 item = self._message_to_value(item)
             else:
-                item = self._plain_value(item)
+                item = self._message_field_value(value, key)
             result[key] = item
         return result
+
+    def _message_field_value(self, message: Any, key: str) -> Any:
+        memoryview_getter = getattr(message, f"_lwrclpy_{key}_memoryview", None)
+        if callable(memoryview_getter):
+            try:
+                return memoryview(memoryview_getter())
+            except Exception:
+                pass
+        bytes_getter = getattr(message, f"_lwrclpy_{key}_bytes", None)
+        if callable(bytes_getter):
+            try:
+                return bytes_getter()
+            except Exception:
+                pass
+        return self._plain_value(getattr(message, key, None))
 
     def _plain_value(self, value: Any) -> Any:
         if callable(value):
@@ -457,7 +471,7 @@ class LwrclpyWorkerNode:
             except TypeError:
                 pass
         if isinstance(value, (bytes, bytearray, memoryview)):
-            return bytes(value)
+            return value
         if hasattr(value, "get_buffer"):
             return value
         if value.__class__.__name__.endswith("_vector"):
@@ -470,6 +484,17 @@ class LwrclpyWorkerNode:
         return value
 
     def _set_field(self, target: Any, key: str, value: Any) -> None:
+        if key == "data" and isinstance(value, (bytes, bytearray, memoryview)):
+            resize = getattr(target, "_lwrclpy_data_resize", None)
+            buffer_getter = getattr(target, "_lwrclpy_data_memoryview", None)
+            if callable(resize) and callable(buffer_getter):
+                try:
+                    source = memoryview(value)
+                    resize(len(source))
+                    memoryview(buffer_getter())[:len(source)] = source
+                    return
+                except Exception:
+                    pass
         field = getattr(target, key, None)
         if callable(field):
             try:

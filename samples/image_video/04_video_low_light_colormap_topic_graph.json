@@ -9258,7 +9258,8 @@
         "embeddedFps": 30,
         "publishHz": 30,
         "duration": 10,
-        "loop": true
+        "loop": true,
+        "useSourceFps": false
       },
       "loopCode": "",
       "toolType": "video_file_input"

@@ -241,7 +241,7 @@ const INTERFACE_NODE_TEMPLATES = [
       name: 'video_file_input',
       inputs: [],
       outputs: [{ id: 'out1', name: 'frame', dataType: VIDEO_RAW_IMAGE_TYPE }],
-      params: { loop: false, publishHz: 30, detectedFps: 0, frameSkip: 0 },
+      params: { loop: false, publishHz: 30, useSourceFps: true, detectedFps: 0, frameSkip: 0, startFrame: 0, frameCount: 0 },
       loopCode: '',
     },
   },
@@ -1349,35 +1349,50 @@ function openCodeDialog(node, kind) {
   const isTimer = kind === 'timerCode' || Boolean(timer);
   const isImport = kind === 'importCode';
   const isRequirements = kind === 'requirements';
+  const isParams = kind === 'params';
   const isCpp = kind === 'cppCode';
   const nodeIsCpp = node.language === 'cpp';
-  $('code-dialog-title').textContent = callbackPort
-    ? `${node.name}.${callbackPort.name}: Callback Code`
-    : (isCpp ? `${node.name}: Initialize Code` : (isTimer ? `${node.name}.${timer?.name || 'timer'}: Timer Callback Code` : (isImport ? `${node.name}: ${nodeIsCpp ? 'Header' : 'Import Code'}` : (isRequirements ? `${node.name}: ${nodeIsCpp ? 'Link Libraries' : 'requirements.txt'}` : `${node.name}: ${nodeIsCpp ? 'Loop Code' : 'Main Loop Code'}`))));
-  $('code-editor').value = callbackPort
-    ? (callbackPort.callbackCode || '')
-    : (isCpp ? (node.cppCode || DEFAULT_CPP_CODE) : (isTimer ? (timer?.callbackCode || node.timerCode || DEFAULT_TIMER_CODE) : (isImport ? (node.importCode || DEFAULT_IMPORT_CODE) : (isRequirements ? (node.requirements || (nodeIsCpp ? DEFAULT_CPP_LINK_LIBRARIES_CODE : DEFAULT_REQUIREMENTS_CODE)) : (node.loopCode || '')))));
-  $('code-hint').textContent = callbackPort
-    ? (nodeIsCpp
+  let title = `${node.name}: ${nodeIsCpp ? 'Loop Code' : 'Main Loop Code'}`;
+  let value = node.loopCode || '';
+  let hint = nodeIsCpp
+    ? 'C++ loop scope: node, loop_rate, now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg). Use spin_some + loop_rate.sleep() for periodic work, or replace it with rclcpp::spin(node) for callback-only blocking execution.'
+    : 'Optional lwrclpy-compatible spin tick scope: node, state, now, publish(output_id, value), log(...). Prefer input callbacks for data-dependent processing.';
+  if (callbackPort) {
+    title = `${node.name}.${callbackPort.name}: Callback Code`;
+    value = callbackPort.callbackCode || '';
+    hint = nodeIsCpp
       ? 'C++ callback scope: msg, now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg). This runs when the input subscription receives a message.'
-      : 'lwrclpy callback scope: node, input_id, msg/request, response, state, publish(output_id, value), log(...). Use publish(...) instead of direct graph outputs.')
-    : (isCpp
-      ? 'C++ initialize scope: runs once in the generated node constructor after publishers/subscriptions are created and before timers start. Use classes or objects declared in Header.'
-      : (isTimer
-      ? (nodeIsCpp
-        ? 'C++ timer scope: now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg).'
-        : 'lwrclpy timer scope: node, timer_id, timer_name, state, now, period, publish(output_id, value), log(...).')
-      : (isImport
-        ? (nodeIsCpp
-          ? 'C++ header section inserted after generated includes. Put #include lines, helper functions, constants, class definitions, structs, or static objects here.'
-          : 'Import code runs once after this node venv is ready. Put imports such as import cv2 and import numpy as np here.')
-        : (isRequirements
-          ? (nodeIsCpp
-            ? 'C++ link libraries/options, one or more per line, for example -lm, -lmy_library, /path/to/libfoo.a.'
-            : 'One requirement per line. uv creates this node venv and installs these packages before execution.')
-          : (nodeIsCpp
-            ? 'C++ loop scope: node, loop_rate, now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg). Use spin_some + loop_rate.sleep() for periodic work, or replace it with rclcpp::spin(node) for callback-only blocking execution.'
-            : 'Optional lwrclpy-compatible spin tick scope: node, state, now, publish(output_id, value), log(...). Prefer input callbacks for data-dependent processing.')))));
+      : 'lwrclpy callback scope: node, input_id, msg/request, response, state, publish(output_id, value), log(...). Use publish(...) instead of direct graph outputs.';
+  } else if (isCpp) {
+    title = `${node.name}: Initialize Code`;
+    value = node.cppCode || DEFAULT_CPP_CODE;
+    hint = 'C++ initialize scope: runs once in the generated node constructor after publishers/subscriptions are created and before timers start. Use classes or objects declared in Header.';
+  } else if (isTimer) {
+    title = `${node.name}.${timer?.name || 'timer'}: Timer Callback Code`;
+    value = timer?.callbackCode || node.timerCode || DEFAULT_TIMER_CODE;
+    hint = nodeIsCpp
+      ? 'C++ timer scope: now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg).'
+      : 'lwrclpy timer scope: node, timer_id, timer_name, state, now, period, publish(output_id, value), log(...).';
+  } else if (isImport) {
+    title = `${node.name}: ${nodeIsCpp ? 'Header' : 'Import Code'}`;
+    value = node.importCode || DEFAULT_IMPORT_CODE;
+    hint = nodeIsCpp
+      ? 'C++ header section inserted after generated includes. Put #include lines, helper functions, constants, class definitions, structs, or static objects here.'
+      : 'Import code runs once after this node venv is ready. Put imports such as import cv2 and import numpy as np here.';
+  } else if (isRequirements) {
+    title = `${node.name}: ${nodeIsCpp ? 'Link Libraries' : 'requirements.txt'}`;
+    value = node.requirements || (nodeIsCpp ? DEFAULT_CPP_LINK_LIBRARIES_CODE : DEFAULT_REQUIREMENTS_CODE);
+    hint = nodeIsCpp
+      ? 'C++ link libraries/options, one or more per line, for example -lm, -lmy_library, /path/to/libfoo.a.'
+      : 'One requirement per line. uv creates this node venv and installs these packages before execution.';
+  } else if (isParams) {
+    title = `${node.name}: Parameters`;
+    value = JSON.stringify(node.params || {}, null, 2);
+    hint = 'JSON parameters passed to this node as params. For AI nodes, use devicePreference: auto, cuda, mps, or cpu.';
+  }
+  $('code-dialog-title').textContent = title;
+  $('code-editor').value = value;
+  $('code-hint').textContent = hint;
   $('code-dialog').showModal();
 }
 
@@ -1403,6 +1418,15 @@ function saveCodeDialog(ev) {
     node.cppCode = $('code-editor').value;
   } else if (node && kind === 'requirements') {
     node.requirements = $('code-editor').value;
+  } else if (node && kind === 'params') {
+    try {
+      const parsed = JSON.parse($('code-editor').value || '{}');
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('parameters must be a JSON object');
+      node.params = parsed;
+    } catch (err) {
+      alert(`Invalid parameters JSON: ${err.message}`);
+      return;
+    }
   } else if (node) {
     node.loopCode = $('code-editor').value;
   }
@@ -1850,12 +1874,21 @@ function inspectorHint(node) {
 
 function effectiveVideoHz(node) {
   const p = node.params || {};
-  const baseHz = Math.max(0.01, Number(p.detectedFps || p.nativeFps || p.sourceFps || p.publishHz || 30));
+  const sourceHz = Number(p.detectedFps || p.nativeFps || p.sourceFps || 0);
+  const baseHz = Math.max(0.01, Number(p.useSourceFps && sourceHz > 0 ? sourceHz : (p.publishHz || 30)));
   return Math.max(0.01, baseHz / (videoFrameSkip(node) + 1));
 }
 
 function videoFrameSkip(node) {
   return Math.max(0, Math.floor(Number(node?.params?.frameSkip || 0)));
+}
+
+function videoStartFrame(node) {
+  return Math.max(0, Math.floor(Number(node?.params?.startFrame || 0)));
+}
+
+function videoFrameCount(node) {
+  return Math.max(0, Math.floor(Number(node?.params?.frameCount || node?.params?.totalFrames || 0)));
 }
 
 function videoOutputType(node) {
@@ -2013,14 +2046,23 @@ function toolActionHtml(node) {
     const loopChecked = node.params?.loop ? 'checked' : '';
     const videoPath = node.params?.videoPath || '';
     const detectedFps = Number(node.params?.detectedFps || 0);
+    const publishHz = Math.max(0.01, Number(node.params?.publishHz || 30));
     const frameSkip = videoFrameSkip(node);
+    const startFrame = videoStartFrame(node);
+    const frameCount = videoFrameCount(node);
+    const frameCountLabel = frameCount > 0 ? `${frameCount.toLocaleString()} frames` : 'unknown';
     const outputType = videoOutputType(node);
+    const sourceChecked = node.params?.useSourceFps ? 'checked' : '';
     const fpsLabel = detectedFps > 0 ? detectedFps.toFixed(2) + ' fps' : 'auto (30 fps)';
     return `<div class="node-actions tool-actions">
       <label class="tool-field tool-field-wide"><span>Path</span><input data-tool-video-path type="text" value="${escapeAttr(videoPath)}" placeholder="No video selected" readonly tabindex="-1"></label>
       <button data-action="select-video-file">Select Video</button>
-      <label class="tool-field"><span>FPS</span><span class="tool-value-display">${escapeHtml(fpsLabel)}</span></label>
+      <label class="tool-field"><span>Source</span><span class="tool-value-display">${escapeHtml(fpsLabel)}</span></label>
+      <label class="tool-field"><span>Hz</span><input data-tool-video-hz type="number" min="0.01" step="0.1" value="${escapeAttr(publishHz)}"></label>
+      <label class="tool-check"><input data-tool-video-source-fps type="checkbox" ${sourceChecked}> Source FPS</label>
       <label class="tool-field"><span>Output</span><select data-tool-video-output-type><option value="${VIDEO_RAW_IMAGE_TYPE}" ${outputType === VIDEO_RAW_IMAGE_TYPE ? 'selected' : ''}>Raw Image</option><option value="${VIDEO_COMPRESSED_IMAGE_TYPE}" ${outputType === VIDEO_COMPRESSED_IMAGE_TYPE ? 'selected' : ''}>Compressed JPEG</option></select></label>
+      <label class="tool-field"><span>Start Frame</span><input data-tool-video-start-frame type="number" min="0" step="1" value="${escapeAttr(startFrame)}"></label>
+      <label class="tool-field"><span>Frames</span><span class="tool-value-display">${escapeHtml(frameCountLabel)}</span></label>
       <label class="tool-field"><span>Skip</span><input data-tool-video-frame-skip type="number" min="0" step="1" value="${escapeAttr(frameSkip)}"></label>
       <label class="tool-check"><input data-tool-video-loop type="checkbox" ${loopChecked}> Loop</label>
     </div>`;
@@ -2275,10 +2317,13 @@ function bindToolActions(el, node) {
       videoPath: path,
       serverDecode: true,
       publishHz,
-      detectedFps: detectedFps > 0 ? publishHz : 0,
+      useSourceFps: true,
+      detectedFps: detectedFps > 0 ? detectedFps : 0,
       sourceFps: detectedFps > 0 ? detectedFps : undefined,
       sourceWidth: Number(metadata.width || 0) || undefined,
       sourceHeight: Number(metadata.height || 0) || undefined,
+      frameCount: Math.max(0, Math.floor(Number(metadata.frameCount || 0))),
+      startFrame: videoStartFrame(node),
       frameSkip: videoFrameSkip(node),
       outputType: videoOutputType(node),
       embeddedVideo: false,
@@ -2342,6 +2387,53 @@ function bindToolActions(el, node) {
         pushRunPayloadUpdate();
       }
       renderAll();
+    };
+  }
+  const videoStartFrameInput = el.querySelector('[data-tool-video-start-frame]');
+  if (videoStartFrameInput) {
+    videoStartFrameInput.onchange = (ev) => {
+      const frameCount = videoFrameCount(node);
+      let startFrame = Math.max(0, Math.floor(Number(ev.target.value || 0)));
+      if (frameCount > 0) startFrame = Math.min(startFrame, Math.max(0, frameCount - 1));
+      node.params = { ...(node.params || {}), startFrame, currentFrame: startFrame };
+      const controller = state.videoInputs[node.id];
+      if (controller) {
+        controller.nextCaptureAt = 0;
+        const fps = effectiveVideoHz(node);
+        if (fps > 0) controller.video.currentTime = startFrame / fps;
+      }
+      if (node.params?.serverDecode && node.params?.videoPath) {
+        state.videoPayloadDirty = true;
+        state.videoDirtyNodes.add(node.id);
+        pushRunPayloadUpdate();
+      }
+      renderAll();
+    };
+  }
+  const videoHzInput = el.querySelector('[data-tool-video-hz]');
+  if (videoHzInput) {
+    videoHzInput.onchange = (ev) => {
+      node.params = { ...(node.params || {}), publishHz: Math.max(0.01, Number(ev.target.value || 30)) };
+      if (node.params?.serverDecode && node.params?.videoPath) {
+        state.videoPayloadDirty = true;
+        state.videoDirtyNodes.add(node.id);
+        pushRunPayloadUpdate();
+      }
+      renderAll();
+      scheduleRun();
+    };
+  }
+  const videoSourceFpsInput = el.querySelector('[data-tool-video-source-fps]');
+  if (videoSourceFpsInput) {
+    videoSourceFpsInput.onchange = (ev) => {
+      node.params = { ...(node.params || {}), useSourceFps: Boolean(ev.target.checked) };
+      if (node.params?.serverDecode && node.params?.videoPath) {
+        state.videoPayloadDirty = true;
+        state.videoDirtyNodes.add(node.id);
+        pushRunPayloadUpdate();
+      }
+      renderAll();
+      scheduleRun();
     };
   }
   const selectMcapFile = el.querySelector('[data-action="select-mcap-file"]');
@@ -2637,6 +2729,7 @@ function renderInspector() {
         <button id="inspect-export-custom-node">Export Custom Node</button>
         <button id="inspect-imports">Header</button>
         <button id="inspect-cpp-code">Initialize Code</button>
+        <button id="inspect-params">Parameters</button>
         <button id="inspect-callback">Subscribe Callback Code</button>
         ${timerActionButtons(node)}
         <button id="inspect-loop">Loop Code</button>
@@ -2645,6 +2738,7 @@ function renderInspector() {
         <button id="inspect-export-custom-node">Export Custom Node</button>
         <button id="inspect-imports">Import Code</button>
         <button id="inspect-requirements">Requirements</button>
+        <button id="inspect-params">Parameters</button>
         <button id="inspect-callback">Subscribe Callback Code</button>
         ${timerActionButtons(node)}
         <button id="inspect-loop">Main Loop Code</button>
@@ -2675,6 +2769,8 @@ function renderInspector() {
   if (inspectImports) inspectImports.onclick = () => openCodeDialog(node, 'importCode');
   const inspectRequirements = $('inspect-requirements');
   if (inspectRequirements) inspectRequirements.onclick = () => openCodeDialog(node, 'requirements');
+  const inspectParams = $('inspect-params');
+  if (inspectParams) inspectParams.onclick = () => openCodeDialog(node, 'params');
   const inspectCppCode = $('inspect-cpp-code');
   if (inspectCppCode) inspectCppCode.onclick = () => openCodeDialog(node, 'cppCode');
   box.querySelectorAll('[data-timer-input]').forEach((button) => {
@@ -3238,7 +3334,9 @@ function videoRuntimeParams(node) {
       serverDecode: true,
       loop: Boolean(p.loop),
       publishHz: effectiveVideoHz(node),
+      startFrame: videoStartFrame(node),
       frameSkip: videoFrameSkip(node),
+      frameCount: videoFrameCount(node),
       outputType: videoOutputType(node),
     };
   }
@@ -3247,7 +3345,9 @@ function videoRuntimeParams(node) {
     frameMessage: p.frameMessage,
     loop: Boolean(p.loop),
     publishHz: effectiveVideoHz(node),
+    startFrame: videoStartFrame(node),
     frameSkip: videoFrameSkip(node),
+    frameCount: videoFrameCount(node),
     outputType: videoOutputType(node),
     duration: Number(p.duration || 0),
     currentTime: Number(p.currentTime || 0),
@@ -3300,7 +3400,7 @@ function runHasStartingNodes(nodes) {
     const envRunning = /\brunning\b/.test(env);
     if (isStartupStatusText(env)) return true;
     if (isStartupStatusText(status)) {
-      if (envRunning && /source worker starting/.test(status)) return false;
+      if (envRunning && /worker starting/.test(status)) return false;
       return true;
     }
     const view = payload?.view;
@@ -3475,7 +3575,7 @@ function nodeViewSignature(view) {
   if (!view) return '';
   if (view.kind === 'image') {
     if (view.frameRef) {
-      return `image:frame:${view.frameRef.nodeId}:${view.frameRef.seq || 0}:${view.frameRef.width || 0}:${view.frameRef.height || 0}:${view.frameRef.sourceWidth || 0}:${view.frameRef.sourceHeight || 0}:${view.frameRef.encoding || ''}:${view.status || ''}`;
+      return `image:frame:${view.frameRef.nodeId}:${view.frameRef.seq || 0}:${view.frameRef.width || 0}:${view.frameRef.height || 0}:${view.frameRef.sourceWidth || 0}:${view.frameRef.sourceHeight || 0}:${view.frameRef.encoding || ''}:${view.frameRef.streamKey || ''}:${view.status || ''}`;
     }
     if (view.raw) return `image:raw:${view.raw.width}:${view.raw.height}:${view.raw.encoding}:${String(view.raw.data || '').length}:${view.status || ''}`;
     if (view.dataUrl) return `image:data:${view.dataUrl.length}:${view.status || ''}`;
@@ -3548,6 +3648,7 @@ function stopFramePullLoop(canvas) {
   if (!canvas) return;
   canvas._framePullActive = false;
   canvas._frameStreamActive = false;
+  canvas._frameStreamKey = '';
   if (canvas._framePullTimer) {
     clearTimeout(canvas._framePullTimer);
     canvas._framePullTimer = null;
@@ -3661,10 +3762,12 @@ function appendBytes(a, b) {
 function scheduleFrameStreamDraw(canvas, frameRef) {
   if (!canvas || !frameRef?.nodeId) return;
   canvas._framePullRef = frameRef;
-  if (canvas._frameStreamActive && canvas._frameStreamNodeId === frameRef.nodeId) return;
+  const streamKey = `${frameRef.nodeId}:${frameRef.streamKey || ''}`;
+  if (canvas._frameStreamActive && canvas._frameStreamKey === streamKey) return;
   stopFramePullLoop(canvas);
   canvas._frameStreamActive = true;
   canvas._frameStreamNodeId = frameRef.nodeId;
+  canvas._frameStreamKey = streamKey;
   const controller = new AbortController();
   canvas._frameStreamController = controller;
   pullFrameStreamToCanvas(canvas, frameRef.nodeId, controller).catch((err) => {
@@ -4966,18 +5069,22 @@ async function loadVideoFile(node, file) {
   state.videoInputs[node.id] = controller;
   video.onloadeddata = () => {
     video.pause();
+    const fps = effectiveVideoHz(node);
+    if (videoStartFrame(node) > 0 && fps > 0) video.currentTime = videoStartFrame(node) / fps;
     captureVideoFrame(node, controller, { updateGraph: false });
     renderAll();
     // Detect native FPS by observing frame timestamps
     _detectVideoNativeFps(video, (fps) => {
       video.pause();
-      video.currentTime = 0;
       if (fps && Number.isFinite(fps) && fps > 0) {
         const detectedFps = Math.round(fps * 100) / 100;
+        const frameCount = Number.isFinite(video.duration) && video.duration > 0 ? Math.max(0, Math.round(video.duration * detectedFps)) : videoFrameCount(node);
+        video.currentTime = videoStartFrame(node) > 0 ? videoStartFrame(node) / detectedFps : 0;
         node.params = {
           ...(node.params || {}),
           detectedFps,
           publishHz: detectedFps,
+          frameCount,
         };
         if (node.params.serverDecode && node.params.videoPath) {
           state.videoPayloadDirty = true;
@@ -5132,6 +5239,9 @@ function captureVideoFrame(node, controller, options = {}) {
   const video = controller.video;
   if (!video.videoWidth || !video.videoHeight || video.readyState < 2 || video.seeking) return;
   const frame = imageElementToMessage(video, 0, { includeDataUrl: options.includeDataUrl !== false });
+  const fps = effectiveVideoHz(node);
+  const frameCount = videoFrameCount(node) || (Number.isFinite(video.duration) && video.duration > 0 && fps > 0 ? Math.max(0, Math.round(video.duration * fps)) : 0);
+  const currentFrame = fps > 0 ? Math.max(0, Math.floor((video.currentTime || 0) * fps)) : videoStartFrame(node);
   node.params = {
     ...(node.params || {}),
     fileName: controller.fileName,
@@ -5139,7 +5249,10 @@ function captureVideoFrame(node, controller, options = {}) {
     frameMessage: frame.message,
     loop: controller.loop,
     publishHz: effectiveVideoHz(node),
+    startFrame: videoStartFrame(node),
     frameSkip: videoFrameSkip(node),
+    frameCount,
+    currentFrame,
     duration: Number.isFinite(video.duration) ? video.duration : 0,
     currentTime: video.currentTime || 0,
     ended: controller.ended,
@@ -5161,8 +5274,11 @@ function videoStatus(controller) {
   const node = nodeFor(controller.nodeId);
   const fps = node ? effectiveVideoHz(node) : 30;
   const duration = Number.isFinite(video.duration) && video.duration > 0 ? ` / ${video.duration.toFixed(1)}s` : '';
+  const frameCount = node ? videoFrameCount(node) : 0;
+  const currentFrame = node ? Math.max(0, Math.floor((video.currentTime || 0) * fps)) : 0;
+  const frameText = frameCount > 0 ? ` / frame ${currentFrame + 1}/${frameCount}` : ` / frame ${currentFrame + 1}`;
   const stateText = controller.ended ? 'ended' : video.paused ? 'paused' : 'playing';
-  return `${controller.fileName} ${stateText} ${video.currentTime.toFixed(1)}s${duration} @ ${fps.toFixed(1)}fps`;
+  return `${controller.fileName} ${stateText} ${video.currentTime.toFixed(1)}s${duration}${frameText} @ ${fps.toFixed(1)}fps`;
 }
 
 function updateVideoInputsForRun(options = {}) {
@@ -5234,7 +5350,8 @@ function updateEmbeddedVideoInputsForRun() {
         controller.ended = true;
       }
     }
-    const frameIndex = Math.floor(elapsed * fps) * (videoFrameSkip(node) + 1);
+    const startFrame = videoStartFrame(node);
+    const frameIndex = startFrame + Math.floor(elapsed * fps) * (videoFrameSkip(node) + 1);
     const frame = syntheticVideoFrame(controller.baseFrame, frameIndex);
     if (!frame) return;
     node.params = {
@@ -5246,26 +5363,32 @@ function updateEmbeddedVideoInputsForRun() {
       embeddedVideo: true,
       embeddedFps: fps,
       publishHz: Math.max(0.01, Number(params.publishHz || fps)),
+      startFrame,
       frameSkip: videoFrameSkip(node),
+      frameCount: videoFrameCount(node),
+      currentFrame: frameIndex,
       duration,
       currentTime: elapsed,
       ended: controller.ended,
       loop,
     };
     const stateText = controller.ended ? 'ended' : 'playing';
-    state.nodeViews[node.id] = { kind: 'image', dataUrl: frame.dataUrl, status: `${controller.fileName} ${stateText} ${elapsed.toFixed(1)}s / ${duration.toFixed(1)}s` };
+    const frameCount = videoFrameCount(node);
+    const frameText = frameCount > 0 ? ` / frame ${frameIndex + 1}/${frameCount}` : ` / frame ${frameIndex + 1}`;
+    state.nodeViews[node.id] = { kind: 'image', dataUrl: frame.dataUrl, status: `${controller.fileName} ${stateText} ${elapsed.toFixed(1)}s / ${duration.toFixed(1)}s${frameText}` };
     updateNodeViews({ [node.id]: { view: state.nodeViews[node.id] } });
   });
 }
 
 function startVideoInputs() {
   Object.values(state.videoInputs).forEach((controller) => {
-    // Always rewind to the beginning when starting a new run, regardless of loop setting
+    const node = nodeFor(controller.nodeId);
+    const fps = node ? effectiveVideoHz(node) : 30;
+    // Always rewind to the configured start frame when starting a new run.
+    controller.video.currentTime = node && fps > 0 ? videoStartFrame(node) / fps : 0;
     if (controller.ended) {
-      controller.video.currentTime = 0;
       controller.ended = false;
     }
-    const node = nodeFor(controller.nodeId);
     if (node) controller.video.playbackRate = 1.0;
     controller.video.play().catch(() => {});
   });
@@ -5312,7 +5435,8 @@ function handleVideoEnded(controller) {
   const node = nodeFor(controller.nodeId);
   if (controller.loop) {
     controller.ended = false;
-    controller.video.currentTime = 0;
+    const fps = node ? effectiveVideoHz(node) : 30;
+    controller.video.currentTime = node && fps > 0 ? videoStartFrame(node) / fps : 0;
     if (state.autoTimer) controller.video.play().catch(() => {});
     return;
   }
@@ -7493,7 +7617,13 @@ function normalizeImportedNode(node) {
       normalized.outputs[0].name = portDisplayName(normalized.outputs[0].name || 'frame');
       normalized.outputs[0].dataType = videoType;
     }
-    normalized.params = { ...(normalized.params || {}), outputType: videoType };
+    normalized.params = {
+      ...(normalized.params || {}),
+      outputType: videoType,
+      startFrame: videoStartFrame(normalized),
+      frameSkip: videoFrameSkip(normalized),
+      frameCount: videoFrameCount(normalized),
+    };
   }
   if (!normalized.toolType) {
     normalized.params = {
