@@ -428,7 +428,7 @@ The app itself runs in `.venv`. Each Python custom node gets its own `.node_envs
 
 When a node has `requirements.txt`, `uv` creates the node environment and installs its dependencies. `lwrclpy` is selected automatically from the GitHub Releases `latest` tag for the current Python ABI, OS, and CPU architecture.
 
-`Stop` asks all custom-node workers to stop. If they do not stop normally, the server escalates to force-stop. `Force Stop` terminates all custom-node workers. Startup and shutdown also clean up stale worker processes created by this framework.
+`Stop` stops the active run and cleans up worker processes created by this framework. Startup and shutdown also remove stale worker processes.
 
 ## Troubleshooting
 

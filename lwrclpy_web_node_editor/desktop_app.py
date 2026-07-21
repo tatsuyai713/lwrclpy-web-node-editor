@@ -82,8 +82,8 @@ def _shutdown_runtime(server_proc: subprocess.Popen[str] | None, app_url: str) -
         return
     try:
         req = urllib.request.Request(
-            f"{app_url}/api/force-stop",
-            data=b"{}",
+            f"{app_url}/api/stop",
+            data=b'{"force": true}',
             headers={"content-type": "application/json"},
             method="POST",
         )

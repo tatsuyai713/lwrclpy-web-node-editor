@@ -1310,6 +1310,10 @@ class CustomLwrclNodeInstance:
             log_path.unlink(missing_ok=True)
         except Exception:
             pass
+        self.state.pop("video_worker_last_seq", None)
+        self.state.pop("video_worker_last_stream", None)
+        self.state.pop("video_worker_last_frame", None)
+        self.state["video_file_current_time"] = self._video_start_frame() / max(0.01, self._effective_video_publish_hz())
         write_json_atomic(config_path, self._video_worker_config(status_path, frame_path))
         try:
             log_file = log_path.open("a", encoding="utf-8")
@@ -2166,12 +2170,14 @@ class CustomLwrclNodeInstance:
         if status.get("ended") and not bool(self.config.params.get("loop", True)):
             return None
         frame_path = Path(str(status.get("framePath") or ""))
+        stream_name = str(status.get("streamName") or "")
+        stream_size = int(status.get("streamSize") or 0)
         width = int(status.get("width") or 0)
         height = int(status.get("height") or 0)
         preview_width = int(status.get("previewWidth") or width)
         preview_height = int(status.get("previewHeight") or height)
         frame_encoding = str(status.get("frameEncoding") or status.get("encoding") or "jpeg").lower()
-        if width <= 0 or height <= 0 or not frame_path.exists():
+        if width <= 0 or height <= 0 or (not stream_name and not frame_path.exists()):
             return None
         try:
             stat = frame_path.stat()
@@ -2198,8 +2204,10 @@ class CustomLwrclNodeInstance:
             "sourceWidth": width,
             "sourceHeight": height,
             "encoding": frame_encoding,
-            "path": str(frame_path),
-            "streamKey": str(frame_path),
+            "path": str(frame_path) if not stream_name else "",
+            "streamName": stream_name,
+            "streamSize": stream_size,
+            "streamKey": stream_name or str(frame_path),
             "updatedAt": time.time(),
         }
         frame = {
@@ -2211,7 +2219,8 @@ class CustomLwrclNodeInstance:
                 "sourceWidth": width,
                 "sourceHeight": height,
                 "encoding": self.state["image_view_frame"]["encoding"],
-                "streamKey": str(frame_path),
+                "stream": bool(stream_name),
+                "streamKey": stream_name or str(frame_path),
             }
         }
         self.state["video_worker_last_frame"] = frame

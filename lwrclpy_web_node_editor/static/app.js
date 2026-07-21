@@ -473,7 +473,6 @@ function bindToolbar() {
   $('ready-model').onclick = readyRun;
   $('run-model').onclick = startRun;
   $('stop-model').onclick = stopRun;
-  $('force-stop-model').onclick = forceStopRun;
   $('run-duration-model').onclick = runForDuration;
   $('save-project').onclick = () => saveProject(false);
   $('load-project').onchange = loadProject;
@@ -3418,33 +3417,24 @@ function isStartupStatusText(text) {
   return /starting|dds discovery|worker startup|waiting for node startup|waiting for worker|waiting for dds/.test(text);
 }
 
-async function stopWorkers(force = false) {
+async function stopWorkers() {
   const controller = new AbortController();
-  const timeoutMs = force ? 8000 : 2000;
+  const timeoutMs = 5000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const endpoint = force ? '/api/force-stop' : '/api/stop';
-    const data = await fetch(endpoint, {
+    const data = await fetch('/api/stop', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       signal: controller.signal,
-      body: JSON.stringify({ force }),
+      body: JSON.stringify({ force: true }),
     }).then((res) => res.json());
     const stoppedCount = Object.keys(data.stopped || {}).length;
     const orphanCount = Array.isArray(data.orphanProcesses?.killed) ? data.orphanProcesses.killed.length : 0;
     const count = stoppedCount + orphanCount;
-    if (!force && data.pending) {
-      setExecutionStatus('stopping', 'Stop is taking too long, escalating to force stop');
-      return await stopWorkers(true);
-    }
     freezeAllPlotViews();
-    setExecutionStatus('stopped', `${force ? 'Force stopped' : 'Stopped'} ${count} worker process${count === 1 ? '' : 'es'}`);
+    setExecutionStatus('stopped', `Stopped ${count} worker process${count === 1 ? '' : 'es'}`);
     return data;
   } catch (err) {
-    if (err?.name === 'AbortError' && !force) {
-      setExecutionStatus('stopping', 'Stop timed out, escalating to force stop');
-      return await stopWorkers(true);
-    }
     setExecutionStatus('error', `Stop API error: ${err.message}`);
     return null;
   } finally {
@@ -3772,6 +3762,17 @@ function scheduleFrameStreamDraw(canvas, frameRef) {
   canvas._frameStreamController = controller;
   pullFrameStreamToCanvas(canvas, frameRef.nodeId, controller).catch((err) => {
     if (err?.name !== 'AbortError') console.warn('Frame stream failed', err);
+  }).finally(() => {
+    if (canvas._frameStreamController === controller) {
+      canvas._frameStreamController = null;
+    }
+    if (!controller.signal.aborted && canvas._frameStreamActive && canvas.isConnected) {
+      const currentRef = canvas._framePullRef;
+      canvas._frameStreamActive = false;
+      canvas._framePullTimer = setTimeout(() => {
+        if (canvas.isConnected && currentRef?.stream) scheduleFrameStreamDraw(canvas, currentRef);
+      }, 250);
+    }
   });
 }
 
@@ -5601,28 +5602,7 @@ function stopRun(message = null) {
   freezeAllPlotViews();
   $('run-model').classList.remove('active');
   setExecutionStatus('stopping', message || `Stopping after ${state.tickCount} ticks`);
-  stopWorkers(false);
-}
-
-function forceStopRun() {
-  if (state.autoTimer) {
-    clearTimeout(state.autoTimer);
-    state.autoTimer = null;
-  }
-  if (state.videoTimer) {
-    clearInterval(state.videoTimer);
-    state.videoTimer = null;
-  }
-  if (state.runStopTimer) {
-    clearTimeout(state.runStopTimer);
-    state.runStopTimer = null;
-  }
-  pauseVideoInputs();
-  stopAllFramePullLoops();
-  freezeAllPlotViews();
-  $('run-model').classList.remove('active');
-  setExecutionStatus('stopping', `Force stopping after ${state.tickCount} ticks`);
-  stopWorkers(true);
+  stopWorkers();
 }
 
 async function resetGraphRuntimeState({ stopServer = false } = {}) {
@@ -5658,7 +5638,7 @@ async function resetGraphRuntimeState({ stopServer = false } = {}) {
   state.readyInFlight = false;
   $('run-model')?.classList.remove('active');
   $('ready-model')?.classList.remove('active');
-  if (stopServer) await stopWorkers(true);
+  if (stopServer) await stopWorkers();
 }
 
 function runForDuration() {

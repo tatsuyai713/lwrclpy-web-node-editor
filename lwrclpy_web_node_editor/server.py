@@ -11,8 +11,10 @@ import math
 import mimetypes
 import os
 import re
+import select
 import signal
 import shutil
+import socket
 import subprocess
 import struct
 import sys
@@ -2147,7 +2149,6 @@ class Handler(BaseHTTPRequestHandler):
             "/api/update-run-payload",
             "/api/update-node-params",
             "/api/stop",
-            "/api/force-stop",
             "/api/custom-nodes/save",
             "/api/custom-nodes/delete",
             "/api/custom-nodes/import",
@@ -2229,21 +2230,14 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.runner.update_payload(payload)
             elif path == "/api/update-node-params":
                 result = self.runner.update_node_params(payload)
-            elif path == "/api/force-stop":
-                runner_status = self.runner.stop()
-                result = self.runtime.stop(force=True, lock_timeout=0.2)
-                result["orphanProcesses"] = cleanup_framework_processes(force=True)
-                # Killing worker processes can unblock a runner thread that was
-                # previously stuck in runtime cleanup. Re-check after force
-                # cleanup so the UI does not keep a stale timeout state.
-                runner_status = self.runner.stop()
-                result["runner"] = runner_status.get("run", {}) if isinstance(runner_status, dict) else {}
             else:
-                runner_status = self.runner.stop()
                 requested_force = bool(payload.get("force", True))
+                orphan_processes = cleanup_framework_processes(force=True) if requested_force else {"killed": [], "failed": []}
+                runner_status = self.runner.stop()
                 run_state = runner_status.get("run", {}) if isinstance(runner_status, dict) else {}
                 should_force = requested_force or str(run_state.get("error") or "") == "runner stop timed out"
-                result = self.runtime.stop(force=should_force, lock_timeout=0.2 if should_force else 1.0)
+                result = self.runtime.stop(force=should_force, lock_timeout=0.0 if should_force else 1.0)
+                result["orphanProcesses"] = orphan_processes
                 result["runner"] = run_state
                 if should_force and not requested_force:
                     result["escalatedForce"] = True
@@ -2364,7 +2358,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             last_seq = 0
             last_stream_key = ""
+            last_write_at = time.time()
             while True:
+                if self._client_connection_closed():
+                    return
                 frame = self.runtime.get_node_frame(node_id)
                 stream_key = str((frame or {}).get("streamName") or (frame or {}).get("streamKey") or "")
                 if stream_key != last_stream_key:
@@ -2386,9 +2383,23 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(payload)
                     self.wfile.flush()
                     last_seq = int(stream_frame["seq"])
+                    last_write_at = time.time()
+                elif time.time() - last_write_at > 2.0:
+                    return
                 time.sleep(1.0 / max(1.0, GRAPH_RUN_HZ))
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
+
+    def _client_connection_closed(self) -> bool:
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            if not readable:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (BlockingIOError, InterruptedError):
+            return False
+        except Exception:
+            return True
 
     def _send_no_content(self) -> None:
         try:
