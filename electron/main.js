@@ -1,19 +1,38 @@
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, dialog, protocol } = require('electron');
 const childProcess = require('child_process');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const { Readable } = require('stream');
 
 const APP_NAME = 'lwrclpy-web-node-editor';
 const BACKEND_NAME = 'lwrclpy-web-node-editor-server';
 const BACKEND_EXE_NAME = process.platform === 'win32' ? `${BACKEND_NAME}.exe` : BACKEND_NAME;
+const USE_BACKEND_PROXY = process.platform === 'win32' && process.arch === 'arm64';
+const PROXY_SCHEME = 'lwrclpy';
+const PROXY_HOST = 'app';
 let backendProcess = null;
 let appUrl = null;
 let extractedBackendDir = null;
 let backendExitError = null;
 let backendLog = '';
+
+if (USE_BACKEND_PROXY) {
+  protocol.registerSchemesAsPrivileged([
+    {
+      scheme: PROXY_SCHEME,
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        corsEnabled: true,
+        stream: true,
+      },
+    },
+  ]);
+}
 
 function configurePlatformRendering() {
   if (process.platform !== 'win32' || process.arch !== 'arm64') {
@@ -116,6 +135,96 @@ function requestOk(url, options = {}) {
 }
 
 const requestJson = requestOk;
+
+function rendererUrl() {
+  return USE_BACKEND_PROXY ? `${PROXY_SCHEME}://${PROXY_HOST}/` : appUrl;
+}
+
+async function requestBodyBuffer(request) {
+  if (!request.body) {
+    return null;
+  }
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    const chunk = Buffer.from(value);
+    chunks.push(chunk);
+    total += chunk.length;
+  }
+  return Buffer.concat(chunks, total);
+}
+
+async function proxyBackendRequest(request) {
+  if (!appUrl) {
+    return new Response('Backend is not ready', { status: 503 });
+  }
+  const requested = new URL(request.url);
+  if (requested.hostname !== PROXY_HOST) {
+    return new Response('Unknown app host', { status: 404 });
+  }
+
+  const target = new URL(`${requested.pathname}${requested.search}`, appUrl);
+  const headers = {};
+  for (const [key, value] of request.headers.entries()) {
+    const normalized = key.toLowerCase();
+    if (!['host', 'content-length', 'connection', 'origin', 'referer'].includes(normalized)) {
+      headers[key] = value;
+    }
+  }
+
+  const method = request.method || 'GET';
+  const body = method === 'GET' || method === 'HEAD' ? null : await requestBodyBuffer(request);
+  return new Promise((resolve) => {
+    const backendRequest = http.request(
+      target,
+      {
+        method,
+        headers,
+      },
+      (backendResponse) => {
+        const responseHeaders = new Headers();
+        for (const [key, value] of Object.entries(backendResponse.headers)) {
+          if (['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'].includes(key.toLowerCase())) {
+            continue;
+          }
+          if (value === undefined) {
+            continue;
+          }
+          if (Array.isArray(value)) {
+            for (const item of value) {
+              responseHeaders.append(key, item);
+            }
+          } else {
+            responseHeaders.set(key, String(value));
+          }
+        }
+        resolve(new Response(Readable.toWeb(backendResponse), {
+          status: backendResponse.statusCode || 500,
+          headers: responseHeaders,
+        }));
+      },
+    );
+    backendRequest.on('error', (error) => {
+      resolve(new Response(`Backend request failed: ${error.message}`, { status: 502 }));
+    });
+    if (body) {
+      backendRequest.write(body);
+    }
+    backendRequest.end();
+  });
+}
+
+function registerBackendProxy() {
+  if (!USE_BACKEND_PROXY) {
+    return;
+  }
+  protocol.handle(PROXY_SCHEME, proxyBackendRequest);
+}
 
 async function waitForServer(url, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
@@ -273,10 +382,11 @@ async function createWindow() {
   window.on('closed', () => {
     stopBackend();
   });
-  await loadUrlWithRetry(window, appUrl, 30000);
+  await loadUrlWithRetry(window, rendererUrl(), 30000);
 }
 
 app.whenReady().then(() => {
+  registerBackendProxy();
   createWindow().catch(async (error) => {
     await stopBackend();
     dialog.showErrorBox(APP_NAME, error && error.stack ? error.stack : String(error));
