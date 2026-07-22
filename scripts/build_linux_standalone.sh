@@ -227,7 +227,7 @@ case "$APP_ARCH" in
     ;;
 esac
 npm install --prefix electron --no-save electron@latest @electron/packager@latest
-node electron/node_modules/@electron/packager/bin/electron-packager.js \
+electron/node_modules/.bin/electron-packager \
   electron \
   "$APP_NAME" \
   --platform=linux \

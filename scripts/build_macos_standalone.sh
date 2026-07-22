@@ -335,7 +335,7 @@ APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
 "$BACKEND_EXE" --server-import-check
 
 npm install --prefix electron --no-save electron@latest @electron/packager@latest
-node electron/node_modules/@electron/packager/bin/electron-packager.js \
+electron/node_modules/.bin/electron-packager \
   electron \
   "$APP_NAME" \
   --platform=darwin \
