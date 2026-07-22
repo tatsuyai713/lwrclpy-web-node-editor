@@ -127,11 +127,13 @@ Invoke-Checked -FilePath (Join-Path $RootDir "dist\$BackendName\$BackendName.exe
 
 $ElectronArch = if ($IsArm64) { "arm64" } else { "x64" }
 Invoke-Checked -FilePath "npm" -Arguments @("install", "--prefix", "electron", "--no-save", "electron@latest", "@electron/packager@latest")
+$ElectronVersion = (& node -p "require('./electron/node_modules/electron/package.json').version").Trim()
 Invoke-Checked -FilePath "electron\node_modules\.bin\electron-packager.cmd" -Arguments @(
   "electron",
   $AppName,
   "--platform=win32",
   "--arch=$ElectronArch",
+  "--electron-version=$ElectronVersion",
   "--out=dist-electron",
   "--overwrite",
   "--asar=false",

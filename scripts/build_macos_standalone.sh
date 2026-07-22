@@ -335,11 +335,13 @@ APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
 "$BACKEND_EXE" --server-import-check
 
 npm install --prefix electron --no-save electron@latest @electron/packager@latest
+ELECTRON_VERSION="$(node -p "require('./electron/node_modules/electron/package.json').version")"
 electron/node_modules/.bin/electron-packager \
   electron \
   "$APP_NAME" \
   --platform=darwin \
   --arch=arm64 \
+  --electron-version="$ELECTRON_VERSION" \
   --out=dist-electron \
   --overwrite \
   --asar=false \
