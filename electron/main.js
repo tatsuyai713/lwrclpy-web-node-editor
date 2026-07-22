@@ -94,7 +94,7 @@ async function backendExecutable() {
   throw new Error(`Backend executable not found: ${BACKEND_EXE_NAME}`);
 }
 
-function requestJson(url, options = {}) {
+function requestOk(url, options = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(url, options, (res) => {
       res.resume();
@@ -115,6 +115,8 @@ function requestJson(url, options = {}) {
   });
 }
 
+const requestJson = requestOk;
+
 async function waitForServer(url, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
@@ -133,6 +135,50 @@ async function waitForServer(url, timeoutMs) {
   const details = backendLog.trim();
   throw new Error(
     `Backend did not become ready: ${lastError ? lastError.message : 'timeout'}`
+    + (details ? `\n\nBackend log:\n${details.slice(-4000)}` : ''),
+  );
+}
+
+async function waitForPage(url, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    if (backendExitError) {
+      throw backendExitError;
+    }
+    try {
+      await requestOk(url);
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+  const details = backendLog.trim();
+  throw new Error(
+    `Backend page did not become ready: ${lastError ? lastError.message : 'timeout'}`
+    + (details ? `\n\nBackend log:\n${details.slice(-4000)}` : ''),
+  );
+}
+
+async function loadUrlWithRetry(window, url, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    if (backendExitError) {
+      throw backendExitError;
+    }
+    try {
+      await window.loadURL(url);
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  const details = backendLog.trim();
+  throw new Error(
+    `Electron failed to load ${url}: ${lastError ? lastError.message : 'timeout'}`
     + (details ? `\n\nBackend log:\n${details.slice(-4000)}` : ''),
   );
 }
@@ -210,6 +256,7 @@ async function createWindow() {
   });
 
   await waitForServer(appUrl, 90000);
+  await waitForPage(appUrl, 90000);
 
   const window = new BrowserWindow({
     title: 'lwrclpy Web Node Editor',
@@ -226,7 +273,7 @@ async function createWindow() {
   window.on('closed', () => {
     stopBackend();
   });
-  await window.loadURL(appUrl);
+  await loadUrlWithRetry(window, appUrl, 30000);
 }
 
 app.whenReady().then(() => {
