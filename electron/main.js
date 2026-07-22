@@ -13,6 +13,12 @@ let backendProcess = null;
 let appUrl = null;
 let extractedBackendDir = null;
 
+if (process.platform === 'win32' && process.arch === 'arm64') {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+}
+
 function findFreePort(host) {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
