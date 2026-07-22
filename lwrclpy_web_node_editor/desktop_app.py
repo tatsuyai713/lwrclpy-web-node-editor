@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import webbrowser
 from pathlib import Path
 
 from .runtime_exec import configure_local_lwrclpy_wheel, local_lwrclpy_wheel
@@ -117,6 +118,47 @@ def _shutdown_runtime(server_proc: subprocess.Popen[str] | None, app_url: str) -
         pass
 
 
+def _run_external_browser_window(app_url: str, title: str, width: int, height: int, server_proc: subprocess.Popen[str]) -> int:
+    try:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QPushButton, QVBoxLayout, QWidget
+    except Exception:
+        try:
+            webbrowser.open(app_url, new=1)
+        except Exception:
+            pass
+        try:
+            while server_proc.poll() is None:
+                time.sleep(0.25)
+        except KeyboardInterrupt:
+            return 0
+        return int(server_proc.returncode or 0)
+
+    app = QApplication(sys.argv[:1])
+    window = QMainWindow()
+    window.setWindowTitle(title)
+    window.resize(max(480, min(max(800, int(width)), 900)), max(240, min(max(360, int(height)), 600)))
+
+    root = QWidget(window)
+    layout = QVBoxLayout(root)
+    label = QLabel(
+        "lwrclpy Web Node Editor is running in your browser.\n"
+        f"{app_url}\n\n"
+        "Close this window to stop the local server."
+    )
+    label.setWordWrap(True)
+    open_button = QPushButton("Open Browser")
+    open_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(app_url)))
+    layout.addWidget(label)
+    layout.addWidget(open_button)
+    window.setCentralWidget(root)
+
+    QDesktopServices.openUrl(QUrl(app_url))
+    window.show()
+    return int(app.exec())
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
@@ -191,6 +233,12 @@ def main(argv: list[str] | None = None) -> int:
         from PySide6.QtWebEngineWidgets import QWebEngineView
         from PySide6.QtWidgets import QApplication, QMainWindow
     except Exception as exc:
+        if getattr(sys, "frozen", False) and sys.platform.startswith("win"):
+            print(f"PySide6 WebEngine unavailable, opening external browser: {exc}", file=sys.stderr)
+            try:
+                return _run_external_browser_window(app_url, args.title, args.width, args.height, server_proc)
+            finally:
+                _shutdown_runtime(server_proc, app_url)
         _shutdown_runtime(server_proc, app_url)
         print("pywebview or PySide6 is required for desktop mode. Install with: pip install pywebview", file=sys.stderr)
         print(str(exc), file=sys.stderr)

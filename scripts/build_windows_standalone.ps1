@@ -91,8 +91,6 @@ $Args = @(
   "--hidden-import", "PySide6.QtGui",
   "--hidden-import", "PySide6.QtNetwork",
   "--hidden-import", "PySide6.QtWidgets",
-  "--hidden-import", "PySide6.QtWebEngineCore",
-  "--hidden-import", "PySide6.QtWebEngineWidgets",
   "--exclude-module", "webview",
   "--exclude-module", "pythonnet",
   "--exclude-module", "clr",
@@ -117,7 +115,11 @@ $Args = @(
 )
 
 if (-not $IsArm64) {
-  $Args = @("--hidden-import", "cv2") + $Args
+  $Args = @(
+    "--hidden-import", "cv2",
+    "--hidden-import", "PySide6.QtWebEngineCore",
+    "--hidden-import", "PySide6.QtWebEngineWidgets"
+  ) + $Args
 }
 
 if ($UvBin) {
