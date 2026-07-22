@@ -12,6 +12,8 @@ const BACKEND_EXE_NAME = process.platform === 'win32' ? `${BACKEND_NAME}.exe` : 
 let backendProcess = null;
 let appUrl = null;
 let extractedBackendDir = null;
+let backendExitError = null;
+let backendLog = '';
 
 if (process.platform === 'win32' && process.arch === 'arm64') {
   app.disableHardwareAcceleration();
@@ -93,6 +95,9 @@ async function waitForServer(url, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
+    if (backendExitError) {
+      throw backendExitError;
+    }
     try {
       await requestJson(`${url}/api/health`);
       return;
@@ -101,7 +106,11 @@ async function waitForServer(url, timeoutMs) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-  throw new Error(`Backend did not become ready: ${lastError ? lastError.message : 'timeout'}`);
+  const details = backendLog.trim();
+  throw new Error(
+    `Backend did not become ready: ${lastError ? lastError.message : 'timeout'}`
+    + (details ? `\n\nBackend log:\n${details.slice(-4000)}` : ''),
+  );
 }
 
 async function stopBackend() {
@@ -136,22 +145,47 @@ async function createWindow() {
   const host = '127.0.0.1';
   const port = await findFreePort(host);
   const backend = await backendExecutable();
+  backendExitError = null;
+  backendLog = '';
+  appUrl = `http://${host}:${port}`;
   backendProcess = childProcess.spawn(
     backend,
     ['--server', '--host', host, '--port', String(port)],
     {
       cwd: path.dirname(backend),
       detached: false,
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     },
   );
-  backendProcess.on('exit', () => {
+  const appendBackendLog = (chunk) => {
+    backendLog += String(chunk);
+    if (backendLog.length > 12000) {
+      backendLog = backendLog.slice(-12000);
+    }
+  };
+  if (backendProcess.stdout) {
+    backendProcess.stdout.on('data', appendBackendLog);
+  }
+  if (backendProcess.stderr) {
+    backendProcess.stderr.on('data', appendBackendLog);
+  }
+  backendProcess.on('error', (error) => {
+    backendExitError = new Error(`Backend failed to start: ${error.message}`);
+    backendProcess = null;
+  });
+  backendProcess.on('exit', (code, signal) => {
+    if (appUrl) {
+      const details = backendLog.trim();
+      backendExitError = new Error(
+        `Backend exited before the UI was ready: code=${code} signal=${signal}`
+        + (details ? `\n\nBackend log:\n${details.slice(-4000)}` : ''),
+      );
+    }
     backendProcess = null;
   });
 
-  appUrl = `http://${host}:${port}`;
-  await waitForServer(appUrl, 15000);
+  await waitForServer(appUrl, 90000);
 
   const window = new BrowserWindow({
     title: 'lwrclpy Web Node Editor',
