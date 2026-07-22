@@ -126,7 +126,9 @@ Invoke-Checked -FilePath $PythonBin -Arguments (@("-m", "PyInstaller") + $Args)
 Invoke-Checked -FilePath (Join-Path $RootDir "dist\$BackendName\$BackendName.exe") -Arguments @("--server-import-check")
 
 $ElectronArch = if ($IsArm64) { "arm64" } else { "x64" }
-Invoke-Checked -FilePath "npm" -Arguments @("install", "--prefix", "electron", "--no-save", "electron@latest", "@electron/packager@latest", "extract-zip@latest")
+$ElectronVersionPinned = if ($env:ELECTRON_VERSION) { $env:ELECTRON_VERSION } else { "36.9.5" }
+$ElectronPackagerVersionPinned = if ($env:ELECTRON_PACKAGER_VERSION) { $env:ELECTRON_PACKAGER_VERSION } else { "20.0.3" }
+Invoke-Checked -FilePath "npm" -Arguments @("install", "--prefix", "electron", "--no-save", "electron@$ElectronVersionPinned", "@electron/packager@$ElectronPackagerVersionPinned", "extract-zip@latest")
 $ElectronVersion = (& node -p "require('./electron/node_modules/electron/package.json').version").Trim()
 Invoke-Checked -FilePath "electron\node_modules\.bin\electron-packager.cmd" -Arguments @(
   "electron",

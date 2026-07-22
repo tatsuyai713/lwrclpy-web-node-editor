@@ -336,7 +336,9 @@ APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
 "$BACKEND_EXE" --server-import-check
 ditto -c -k --sequesterRsrc --keepParent "$BACKEND_DIR" "$BACKEND_ZIP"
 
-npm install --prefix electron --no-save electron@latest @electron/packager@latest extract-zip@latest
+ELECTRON_VERSION_PINNED="${ELECTRON_VERSION:-36.9.5}"
+ELECTRON_PACKAGER_VERSION_PINNED="${ELECTRON_PACKAGER_VERSION:-20.0.3}"
+npm install --prefix electron --no-save "electron@${ELECTRON_VERSION_PINNED}" "@electron/packager@${ELECTRON_PACKAGER_VERSION_PINNED}" extract-zip@latest
 ELECTRON_VERSION="$(node -p "require('./electron/node_modules/electron/package.json').version")"
 electron/node_modules/.bin/electron-packager \
   electron \

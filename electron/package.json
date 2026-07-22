@@ -5,6 +5,8 @@
   "main": "main.js",
   "description": "Desktop shell for lwrclpy Web Node Editor",
   "dependencies": {
+    "@electron/packager": "20.0.3",
+    "electron": "36.9.5",
     "extract-zip": "latest"
   }
 }

@@ -10,7 +10,7 @@ const { Readable } = require('stream');
 const APP_NAME = 'lwrclpy-web-node-editor';
 const BACKEND_NAME = 'lwrclpy-web-node-editor-server';
 const BACKEND_EXE_NAME = process.platform === 'win32' ? `${BACKEND_NAME}.exe` : BACKEND_NAME;
-const USE_BACKEND_PROXY = process.platform === 'win32' && process.arch === 'arm64';
+const USE_BACKEND_PROXY = process.platform === 'win32' || process.env.LWRCLPY_FORCE_BACKEND_PROXY === '1';
 const PROXY_SCHEME = 'lwrclpy';
 const PROXY_HOST = 'app';
 let backendProcess = null;
@@ -35,7 +35,7 @@ if (USE_BACKEND_PROXY) {
 }
 
 function configurePlatformRendering() {
-  if (process.platform !== 'win32' || process.arch !== 'arm64') {
+  if (process.platform !== 'win32' && process.env.LWRCLPY_FORCE_SOFTWARE_RENDERING !== '1') {
     return;
   }
 
@@ -49,7 +49,7 @@ function configurePlatformRendering() {
     ['disable-accelerated-2d-canvas'],
     ['disable-accelerated-video-decode'],
     ['enable-unsafe-swiftshader'],
-    ['disable-features', 'UseSkiaRenderer,VizDisplayCompositor,CanvasOopRasterization,VaapiVideoDecoder'],
+    ['disable-features', 'UseSkiaRenderer,VizDisplayCompositor,CanvasOopRasterization,VaapiVideoDecoder,D3D11VideoDecoder'],
     ['in-process-gpu'],
     ['use-angle', 'warp'],
   ];
@@ -140,6 +140,27 @@ function rendererUrl() {
   return USE_BACKEND_PROXY ? `${PROXY_SCHEME}://${PROXY_HOST}/` : appUrl;
 }
 
+function startupLogPath() {
+  try {
+    const directory = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(directory, { recursive: true });
+    return path.join(directory, 'startup.log');
+  } catch (_) {
+    return null;
+  }
+}
+
+function appendStartupLog(message) {
+  const file = startupLogPath();
+  if (!file) {
+    return;
+  }
+  try {
+    fs.appendFileSync(file, `[${new Date().toISOString()}] ${message}\n`, 'utf8');
+  } catch (_) {
+  }
+}
+
 async function requestBodyBuffer(request) {
   if (!request.body) {
     return null;
@@ -223,6 +244,7 @@ function registerBackendProxy() {
   if (!USE_BACKEND_PROXY) {
     return;
   }
+  appendStartupLog(`Registering ${PROXY_SCHEME}:// backend proxy for ${process.platform}-${process.arch}`);
   protocol.handle(PROXY_SCHEME, proxyBackendRequest);
 }
 
@@ -327,6 +349,7 @@ async function createWindow() {
   backendExitError = null;
   backendLog = '';
   appUrl = `http://${host}:${port}`;
+  appendStartupLog(`Starting backend: ${backend} --server --host ${host} --port ${port}`);
   backendProcess = childProcess.spawn(
     backend,
     ['--server', '--host', host, '--port', String(port)],
@@ -338,10 +361,12 @@ async function createWindow() {
     },
   );
   const appendBackendLog = (chunk) => {
-    backendLog += String(chunk);
+    const text = String(chunk);
+    backendLog += text;
     if (backendLog.length > 12000) {
       backendLog = backendLog.slice(-12000);
     }
+    appendStartupLog(text.trimEnd());
   };
   if (backendProcess.stdout) {
     backendProcess.stdout.on('data', appendBackendLog);
@@ -350,10 +375,12 @@ async function createWindow() {
     backendProcess.stderr.on('data', appendBackendLog);
   }
   backendProcess.on('error', (error) => {
+    appendStartupLog(`Backend failed to start: ${error.message}`);
     backendExitError = new Error(`Backend failed to start: ${error.message}`);
     backendProcess = null;
   });
   backendProcess.on('exit', (code, signal) => {
+    appendStartupLog(`Backend exited: code=${code} signal=${signal}`);
     if (appUrl) {
       const details = backendLog.trim();
       backendExitError = new Error(
@@ -365,7 +392,9 @@ async function createWindow() {
   });
 
   await waitForServer(appUrl, 90000);
+  appendStartupLog(`Backend health OK: ${appUrl}/api/health`);
   await waitForPage(appUrl, 90000);
+  appendStartupLog(`Backend page OK: ${appUrl}/`);
 
   const window = new BrowserWindow({
     title: 'lwrclpy Web Node Editor',
@@ -382,7 +411,10 @@ async function createWindow() {
   window.on('closed', () => {
     stopBackend();
   });
-  await loadUrlWithRetry(window, rendererUrl(), 30000);
+  const url = rendererUrl();
+  appendStartupLog(`Loading renderer URL: ${url}`);
+  await loadUrlWithRetry(window, url, 30000);
+  appendStartupLog(`Renderer loaded: ${url}`);
 }
 
 app.whenReady().then(() => {
