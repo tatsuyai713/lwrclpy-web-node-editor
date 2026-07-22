@@ -6,12 +6,44 @@ Set-Location $RootDir
 $AppName = "lwrclpy-web-node-editor"
 $PythonBin = if ($env:PYTHON_BIN) { $env:PYTHON_BIN } else { Join-Path $RootDir "venv\Scripts\python.exe" }
 
+function Invoke-Checked {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$FilePath,
+    [string[]]$Arguments
+  )
+  & $FilePath @Arguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "$FilePath failed with exit code $LASTEXITCODE"
+  }
+}
+
 if (-not (Test-Path $PythonBin)) {
   Write-Error "Python executable not found: $PythonBin`nSet PYTHON_BIN to your python.exe path and retry."
 }
 
-& $PythonBin -m pip install --upgrade pip
-& $PythonBin -m pip install --prefer-binary --progress-bar off -r requirements.txt pyinstaller PySide6
+Invoke-Checked -FilePath $PythonBin -Arguments @("-m", "pip", "install", "--upgrade", "pip")
+
+$Machine = (& $PythonBin -c "import platform; print(platform.machine().lower())").Trim()
+$IsArm64 = @("arm64", "aarch64") -contains $Machine
+$RequirementsPath = "requirements.txt"
+if ($IsArm64) {
+  Write-Warning "opencv-python-headless has no Windows arm64 wheel; building the Windows arm64 app without bundled OpenCV."
+  $TempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+  $RequirementsPath = Join-Path $TempRoot "requirements-windows-arm64.txt"
+  Get-Content requirements.txt |
+    Where-Object { $_ -notmatch "^\s*opencv-python-headless\b" } |
+    Set-Content -Encoding utf8 $RequirementsPath
+}
+
+Invoke-Checked -FilePath $PythonBin -Arguments @(
+  "-m", "pip", "install",
+  "--prefer-binary",
+  "--progress-bar", "off",
+  "-r", $RequirementsPath,
+  "pyinstaller",
+  "PySide6"
+)
 
 $UvCandidates = @(
   (Join-Path (Split-Path $PythonBin -Parent) "uv.exe"),
@@ -54,7 +86,6 @@ $Args = @(
   "--collect-all", "fastdds",
   "--collect-all", "mcap",
   "--collect-all", "mcap_ros2",
-  "--hidden-import", "cv2",
   "--hidden-import", "yaml",
   "--hidden-import", "PySide6.QtCore",
   "--hidden-import", "PySide6.QtGui",
@@ -85,11 +116,15 @@ $Args = @(
   "main.py"
 )
 
+if (-not $IsArm64) {
+  $Args = @("--hidden-import", "cv2") + $Args
+}
+
 if ($UvBin) {
   $Args = @("--add-binary", "$UvBin;.") + $Args
 }
 
-& $PythonBin -m PyInstaller @Args
+Invoke-Checked -FilePath $PythonBin -Arguments (@("-m", "PyInstaller") + $Args)
 
 Write-Host ""
 Write-Host "Build complete: $RootDir\dist\$AppName"
