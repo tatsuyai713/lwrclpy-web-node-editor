@@ -288,37 +288,45 @@ if [[ -d "$CPP_BUNDLE_PREFIX" && -n "$(find "$CPP_BUNDLE_PREFIX" -mindepth 1 -ma
   CPP_EXTRA_ARGS+=("--add-data" "${CPP_BUNDLE_PREFIX}:lwrcl_cpp")
 fi
 
-"$PYTHON_BIN" -m PyInstaller \
-  --noconfirm \
-  --clean \
-  --name "$APP_NAME" \
-  --onedir \
-  --collect-all lwrclpy \
-  --collect-all rclpy \
-  --collect-all fastdds \
-  --collect-all mcap \
-  --collect-all mcap_ros2 \
-  --collect-all cmake \
-  --collect-all webview \
-  --hidden-import cv2 \
-  --hidden-import yaml \
-  --hidden-import webview.platforms.cocoa \
-  --hidden-import objc \
-  --hidden-import Cocoa \
-  --hidden-import WebKit \
-  "${UV_EXTRA_ARGS[@]}" \
-  "${FASTDDS_EXTRA_ARGS[@]}" \
-  "${CPP_EXTRA_ARGS[@]}" \
-  --add-data "lwrclpy_web_node_editor/static:lwrclpy_web_node_editor/static" \
-  --add-data "lwrclpy_web_node_editor/node_worker.py:lwrclpy_web_node_editor" \
-  --add-data "lwrclpy_web_node_editor/video_dds_worker.py:lwrclpy_web_node_editor" \
-  --add-data "lwrclpy_web_node_editor/dds_tap_worker.py:lwrclpy_web_node_editor" \
-  --add-data "lwrclpy_web_node_editor/builtin_source_worker.py:lwrclpy_web_node_editor" \
-  --add-data "scripts/install_lwrclpy.py:scripts" \
-  --add-data "resources/fastdds.xml:." \
-  --add-data ".app_settings/custom_nodes:custom_nodes" \
-  --add-data "samples:samples" \
-  main.py
+PYINSTALLER_ARGS=(
+  --noconfirm
+  --clean
+  --name "$APP_NAME"
+  --onedir
+  --collect-all lwrclpy
+  --collect-all rclpy
+  --collect-all fastdds
+  --collect-all mcap
+  --collect-all mcap_ros2
+  --collect-all cmake
+  --collect-all webview
+  --hidden-import cv2
+  --hidden-import yaml
+  --hidden-import webview.platforms.cocoa
+  --hidden-import objc
+  --hidden-import Cocoa
+  --hidden-import WebKit
+  --add-data "lwrclpy_web_node_editor/static:lwrclpy_web_node_editor/static"
+  --add-data "lwrclpy_web_node_editor/node_worker.py:lwrclpy_web_node_editor"
+  --add-data "lwrclpy_web_node_editor/video_dds_worker.py:lwrclpy_web_node_editor"
+  --add-data "lwrclpy_web_node_editor/dds_tap_worker.py:lwrclpy_web_node_editor"
+  --add-data "lwrclpy_web_node_editor/builtin_source_worker.py:lwrclpy_web_node_editor"
+  --add-data "scripts/install_lwrclpy.py:scripts"
+  --add-data "resources/fastdds.xml:."
+  --add-data ".app_settings/custom_nodes:custom_nodes"
+  --add-data "samples:samples"
+)
+if [[ ${#UV_EXTRA_ARGS[@]} -gt 0 ]]; then
+  PYINSTALLER_ARGS+=("${UV_EXTRA_ARGS[@]}")
+fi
+if [[ ${#FASTDDS_EXTRA_ARGS[@]} -gt 0 ]]; then
+  PYINSTALLER_ARGS+=("${FASTDDS_EXTRA_ARGS[@]}")
+fi
+if [[ ${#CPP_EXTRA_ARGS[@]} -gt 0 ]]; then
+  PYINSTALLER_ARGS+=("${CPP_EXTRA_ARGS[@]}")
+fi
+
+"$PYTHON_BIN" -m PyInstaller "${PYINSTALLER_ARGS[@]}" main.py
 
 DIST_DIR="$ROOT_DIR/dist/$APP_NAME"
 APP_EXE="$DIST_DIR/$APP_NAME"
