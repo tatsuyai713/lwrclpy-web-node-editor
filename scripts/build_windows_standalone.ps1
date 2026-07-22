@@ -91,9 +91,6 @@ $Args = @(
   "--hidden-import", "PySide6.QtGui",
   "--hidden-import", "PySide6.QtNetwork",
   "--hidden-import", "PySide6.QtWidgets",
-  "--exclude-module", "webview",
-  "--exclude-module", "pythonnet",
-  "--exclude-module", "clr",
   "--exclude-module", "PyQt5",
   "--exclude-module", "PyQt6",
   "--exclude-module", "PySide2",
@@ -118,7 +115,23 @@ if (-not $IsArm64) {
   $Args = @(
     "--hidden-import", "cv2",
     "--hidden-import", "PySide6.QtWebEngineCore",
-    "--hidden-import", "PySide6.QtWebEngineWidgets"
+    "--hidden-import", "PySide6.QtWebEngineWidgets",
+    "--exclude-module", "webview",
+    "--exclude-module", "pythonnet",
+    "--exclude-module", "clr"
+  ) + $Args
+} else {
+  $Args = @(
+    "--collect-all", "webview",
+    "--collect-all", "pythonnet",
+    "--collect-all", "clr_loader",
+    "--hidden-import", "webview.platforms.edgechromium",
+    "--hidden-import", "webview.platforms.winforms",
+    "--hidden-import", "clr",
+    "--hidden-import", "pythonnet",
+    "--hidden-import", "clr_loader",
+    "--hidden-import", "clr_loader.netfx",
+    "--hidden-import", "clr_loader.coreclr"
   ) + $Args
 }
 
@@ -127,6 +140,7 @@ if ($UvBin) {
 }
 
 Invoke-Checked -FilePath $PythonBin -Arguments (@("-m", "PyInstaller") + $Args)
+Invoke-Checked -FilePath (Join-Path $RootDir "dist\$AppName\$AppName.exe") -Arguments @("--desktop-import-check")
 
 Write-Host ""
 Write-Host "Build complete: $RootDir\dist\$AppName"

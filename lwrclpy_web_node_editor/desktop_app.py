@@ -9,7 +9,6 @@ import subprocess
 import sys
 import time
 import urllib.request
-import webbrowser
 from pathlib import Path
 
 from .runtime_exec import configure_local_lwrclpy_wheel, local_lwrclpy_wheel
@@ -118,45 +117,28 @@ def _shutdown_runtime(server_proc: subprocess.Popen[str] | None, app_url: str) -
         pass
 
 
-def _run_external_browser_window(app_url: str, title: str, width: int, height: int, server_proc: subprocess.Popen[str]) -> int:
+def _is_windows_arm64() -> bool:
+    machine = os.environ.get("PROCESSOR_ARCHITECTURE", "").strip().lower()
+    if machine in {"arm64", "aarch64"}:
+        return True
     try:
-        from PySide6.QtCore import QUrl
-        from PySide6.QtGui import QDesktopServices
-        from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QPushButton, QVBoxLayout, QWidget
+        import platform
+
+        return platform.machine().lower() in {"arm64", "aarch64"}
     except Exception:
-        try:
-            webbrowser.open(app_url, new=1)
-        except Exception:
-            pass
-        try:
-            while server_proc.poll() is None:
-                time.sleep(0.25)
-        except KeyboardInterrupt:
-            return 0
-        return int(server_proc.returncode or 0)
+        return False
 
-    app = QApplication(sys.argv[:1])
-    window = QMainWindow()
-    window.setWindowTitle(title)
-    window.resize(max(480, min(max(800, int(width)), 900)), max(240, min(max(360, int(height)), 600)))
 
-    root = QWidget(window)
-    layout = QVBoxLayout(root)
-    label = QLabel(
-        "lwrclpy Web Node Editor is running in your browser.\n"
-        f"{app_url}\n\n"
-        "Close this window to stop the local server."
-    )
-    label.setWordWrap(True)
-    open_button = QPushButton("Open Browser")
-    open_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(app_url)))
-    layout.addWidget(label)
-    layout.addWidget(open_button)
-    window.setCentralWidget(root)
+def desktop_import_check() -> int:
+    if sys.platform.startswith("win") and _is_windows_arm64():
+        import webview  # noqa: F401
+        import webview.platforms.edgechromium  # noqa: F401
+        return 0
+    from PySide6.QtCore import QUrl  # noqa: F401
+    from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+    from PySide6.QtWidgets import QApplication, QMainWindow  # noqa: F401
 
-    QDesktopServices.openUrl(QUrl(app_url))
-    window.show()
-    return int(app.exec())
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -199,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     desktop_backend = os.environ.get("LWRCLPY_DESKTOP_BACKEND", "").strip().lower()
-    if not desktop_backend and getattr(sys, "frozen", False) and sys.platform.startswith("win"):
+    if not desktop_backend and getattr(sys, "frozen", False) and sys.platform.startswith("win") and not _is_windows_arm64():
         desktop_backend = "pyside6"
     webview = None
     if desktop_backend != "pyside6":
@@ -223,6 +205,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             webview.start(debug=False, http_server=False, gui=os.environ.get("LWRCLPY_WEBVIEW_GUI") or None)
         except Exception as exc:
+            if sys.platform.startswith("win") and _is_windows_arm64():
+                _shutdown_runtime(server_proc, app_url)
+                print(f"pywebview/WebView2 failed on Windows arm64: {exc}", file=sys.stderr)
+                return 2
             print(f"pywebview failed, falling back to PySide6: {exc}", file=sys.stderr)
         else:
             _shutdown_runtime(server_proc, app_url)
@@ -233,12 +219,6 @@ def main(argv: list[str] | None = None) -> int:
         from PySide6.QtWebEngineWidgets import QWebEngineView
         from PySide6.QtWidgets import QApplication, QMainWindow
     except Exception as exc:
-        if getattr(sys, "frozen", False) and sys.platform.startswith("win"):
-            print(f"PySide6 WebEngine unavailable, opening external browser: {exc}", file=sys.stderr)
-            try:
-                return _run_external_browser_window(app_url, args.title, args.width, args.height, server_proc)
-            finally:
-                _shutdown_runtime(server_proc, app_url)
         _shutdown_runtime(server_proc, app_url)
         print("pywebview or PySide6 is required for desktop mode. Install with: pip install pywebview", file=sys.stderr)
         print(str(exc), file=sys.stderr)
