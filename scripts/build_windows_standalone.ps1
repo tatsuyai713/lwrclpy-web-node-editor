@@ -122,16 +122,10 @@ if (-not $IsArm64) {
   ) + $Args
 } else {
   $Args = @(
-    "--collect-all", "webview",
-    "--collect-all", "pythonnet",
-    "--collect-all", "clr_loader",
-    "--hidden-import", "webview.platforms.edgechromium",
-    "--hidden-import", "webview.platforms.winforms",
-    "--hidden-import", "clr",
-    "--hidden-import", "pythonnet",
-    "--hidden-import", "clr_loader",
-    "--hidden-import", "clr_loader.netfx",
-    "--hidden-import", "clr_loader.coreclr"
+    "--exclude-module", "webview",
+    "--exclude-module", "pythonnet",
+    "--exclude-module", "clr",
+    "--exclude-module", "clr_loader"
   ) + $Args
 }
 
@@ -140,6 +134,32 @@ if ($UvBin) {
 }
 
 Invoke-Checked -FilePath $PythonBin -Arguments (@("-m", "PyInstaller") + $Args)
+
+if ($IsArm64) {
+  $AppDir = Join-Path $RootDir "dist\$AppName"
+  $BackendExe = Join-Path $AppDir "$AppName-backend.exe"
+  Move-Item -Path (Join-Path $AppDir "$AppName.exe") -Destination $BackendExe -Force
+
+  $Dotnet = (Get-Command dotnet -ErrorAction Stop).Source
+  $LauncherPublishDir = Join-Path $RootDir "build\windows-launcher-publish"
+  if (Test-Path $LauncherPublishDir) { Remove-Item $LauncherPublishDir -Recurse -Force }
+  Invoke-Checked -FilePath $Dotnet -Arguments @(
+    "publish",
+    "desktop_windows_launcher\LwrclpyWebNodeEditor.Launcher.csproj",
+    "-c", "Release",
+    "-r", "win-arm64",
+    "--self-contained", "true",
+    "-p:PublishSingleFile=true",
+    "-p:IncludeNativeLibrariesForSelfExtract=true",
+    "-p:PublishDir=$LauncherPublishDir"
+  )
+  Copy-Item -Path (Join-Path $LauncherPublishDir "$AppName.exe") -Destination (Join-Path $AppDir "$AppName.exe") -Force
+  $WebViewLoader = Join-Path $LauncherPublishDir "WebView2Loader.dll"
+  if (Test-Path $WebViewLoader) {
+    Copy-Item -Path $WebViewLoader -Destination $AppDir -Force
+  }
+}
+
 Invoke-Checked -FilePath (Join-Path $RootDir "dist\$AppName\$AppName.exe") -Arguments @("--desktop-import-check")
 
 Write-Host ""
