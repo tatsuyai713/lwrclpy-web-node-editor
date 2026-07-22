@@ -49,11 +49,11 @@ sign_macos_target() {
   fi
 
   echo "Signing Mach-O files in: $target_dir"
-  while IFS= read -r -d '' candidate; do
+  while IFS= read -r candidate; do
     if is_macho_file "$candidate"; then
       codesign "${sign_args[@]}" "$candidate"
     fi
-  done < <(find "$target_dir" -type f -print0)
+  done < <(find "$target_dir" -type f -print | awk '{ print length($0) "\t" $0 }' | sort -rn | cut -f2-)
 
   # Sign the top-level target last so its signature reflects signed dependencies.
   if [[ -e "$verify_target" ]]; then
