@@ -216,6 +216,7 @@ fi
   --add-data "scripts/install_lwrclpy.py:scripts" \
   --add-data "resources/fastdds.xml:." \
   --add-data ".app_settings/custom_nodes:custom_nodes" \
+  --add-data "samples:samples" \
   main.py
 
 APP_DIR="$ROOT_DIR/dist/$APP_NAME.AppDir"

@@ -20,10 +20,20 @@ jobs:
             artifact_label: ubuntu-x86_64
             archive_name: lwrclpy-web-node-editor-ubuntu-x86_64.tar.gz
             archive_path: dist/lwrclpy-web-node-editor-ubuntu-x86_64.tar.gz
+            package_arch: x86_64
+          - os: ubuntu-22.04-arm
+            artifact_label: ubuntu-arm64
+            archive_name: lwrclpy-web-node-editor-ubuntu-arm64.tar.gz
+            archive_path: dist/lwrclpy-web-node-editor-ubuntu-arm64.tar.gz
+            package_arch: aarch64
           - os: windows-2022
             artifact_label: windows-x86_64
             archive_name: lwrclpy-web-node-editor-windows-x86_64.zip
             archive_path: dist/lwrclpy-web-node-editor-windows-x86_64.zip
+          - os: windows-11-arm
+            artifact_label: windows-arm64
+            archive_name: lwrclpy-web-node-editor-windows-arm64.zip
+            archive_path: dist/lwrclpy-web-node-editor-windows-arm64.zip
           - os: macos-14
             artifact_label: macos-arm64
             archive_name: lwrclpy-web-node-editor-macos-arm64.zip
@@ -173,15 +183,18 @@ jobs:
 
       - name: Package Linux app
         if: runner.os == 'Linux'
+        env:
+          APP_ARCH: ${{ matrix.package_arch }}
         run: |
+          app_arch="${APP_ARCH:-$(uname -m)}"
           assets=(
             lwrclpy-web-node-editor
             lwrclpy-web-node-editor.AppDir
-            lwrclpy-web-node-editor-x86_64.run
+            "lwrclpy-web-node-editor-${app_arch}.run"
           )
           for optional_asset in \
-            lwrclpy-web-node-editor-x86_64.AppImage \
-            lwrclpy-web-node-editor-x86_64.AppImage.runtime; do
+            "lwrclpy-web-node-editor-${app_arch}.AppImage" \
+            "lwrclpy-web-node-editor-${app_arch}.AppImage.runtime"; do
             if [[ -e "dist/$optional_asset" ]]; then
               assets+=("$optional_asset")
             fi
