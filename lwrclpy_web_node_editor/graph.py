@@ -574,17 +574,23 @@ class CustomLwrclNodeInstance:
         if pid <= 0 or (self.worker_process is not None and pid == self.worker_process.pid):
             return
         try:
-            if os.name != "nt":
-                os.killpg(pid, signal.SIGKILL)
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
             else:
-                os.kill(pid, signal.SIGKILL)
+                os.killpg(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         except Exception:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except Exception:
-                pass
+            if os.name != "nt":
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except Exception:
+                    pass
 
     def stop_worker(self, force: bool = False, timeout: float | None = None) -> bool:
         process = self.worker_process
@@ -631,12 +637,17 @@ class CustomLwrclNodeInstance:
         return True
 
     def _signal_worker(self, process: subprocess.Popen, force: bool) -> None:
-        sig = signal.SIGKILL if force else signal.SIGTERM
         try:
             if os.name != "nt":
+                sig = signal.SIGKILL if force else signal.SIGTERM
                 os.killpg(process.pid, sig)
             elif force:
-                process.kill()
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
             else:
                 process.terminate()
         except ProcessLookupError:

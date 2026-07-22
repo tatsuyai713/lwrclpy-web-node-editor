@@ -54,7 +54,15 @@ def _stop_existing_app_server() -> None:
                     break
                 time.sleep(0.05)
             else:
-                os.kill(pid, signal.SIGKILL)
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                else:
+                    os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         except Exception:

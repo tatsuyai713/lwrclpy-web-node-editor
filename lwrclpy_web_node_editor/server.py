@@ -1664,12 +1664,11 @@ def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
     targets = _framework_worker_pids()
     killed: list[int] = []
     failed: list[int] = []
-    sig = signal.SIGKILL if force else signal.SIGTERM
     for pid in sorted(targets):
         if pid == os.getpid():
             continue
         try:
-            _signal_process_tree(pid, sig)
+            _signal_process_tree(pid, force=force)
             killed.append(pid)
         except ProcessLookupError:
             continue
@@ -1683,7 +1682,7 @@ def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
             if pid == os.getpid() or not _pid_alive(pid):
                 continue
             try:
-                _signal_process_tree(pid, signal.SIGKILL)
+                _signal_process_tree(pid, force=True)
             except ProcessLookupError:
                 pass
             except Exception:
@@ -1696,10 +1695,19 @@ def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
     return {"killed": killed, "failed": failed}
 
 
-def _signal_process_tree(pid: int, sig: int) -> None:
+def _signal_process_tree(pid: int, force: bool) -> None:
     if os.name == "nt":
-        os.kill(pid, sig)
+        if force:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            os.kill(pid, signal.SIGTERM)
         return
+    sig = signal.SIGKILL if force else signal.SIGTERM
     try:
         os.killpg(pid, sig)
     except ProcessLookupError:
