@@ -3,5 +3,8 @@
   "version": "0.0.0",
   "private": true,
   "main": "main.js",
-  "description": "Desktop shell for lwrclpy Web Node Editor"
+  "description": "Desktop shell for lwrclpy Web Node Editor",
+  "dependencies": {
+    "extract-zip": "latest"
+  }
 }

@@ -226,7 +226,7 @@ case "$APP_ARCH" in
     ELECTRON_ARCH="$(uname -m)"
     ;;
 esac
-npm install --prefix electron --no-save electron@latest @electron/packager@latest
+npm install --prefix electron --no-save electron@latest @electron/packager@latest extract-zip@latest
 ELECTRON_VERSION="$(node -p "require('./electron/node_modules/electron/package.json').version")"
 electron/node_modules/.bin/electron-packager \
   electron \

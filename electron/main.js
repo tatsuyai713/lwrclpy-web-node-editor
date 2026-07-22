@@ -3,6 +3,7 @@ const childProcess = require('child_process');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
+const os = require('os');
 const path = require('path');
 
 const APP_NAME = 'lwrclpy-web-node-editor';
@@ -10,6 +11,7 @@ const BACKEND_NAME = 'lwrclpy-web-node-editor-server';
 const BACKEND_EXE_NAME = process.platform === 'win32' ? `${BACKEND_NAME}.exe` : BACKEND_NAME;
 let backendProcess = null;
 let appUrl = null;
+let extractedBackendDir = null;
 
 function findFreePort(host) {
   return new Promise((resolve, reject) => {
@@ -23,7 +25,22 @@ function findFreePort(host) {
   });
 }
 
-function backendExecutable() {
+async function extractBackendZip(zipPath) {
+  const extractZip = require('extract-zip');
+  const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), `${BACKEND_NAME}-`));
+  await extractZip(zipPath, { dir: targetDir });
+  extractedBackendDir = targetDir;
+  const executable = path.join(targetDir, BACKEND_NAME, BACKEND_EXE_NAME);
+  if (!fs.existsSync(executable)) {
+    throw new Error(`Backend executable not found after extracting ${zipPath}`);
+  }
+  if (process.platform !== 'win32') {
+    fs.chmodSync(executable, 0o755);
+  }
+  return executable;
+}
+
+async function backendExecutable() {
   const candidates = [
     path.join(process.resourcesPath, BACKEND_NAME, BACKEND_EXE_NAME),
     path.join(__dirname, '..', 'dist', BACKEND_NAME, BACKEND_EXE_NAME),
@@ -31,6 +48,15 @@ function backendExecutable() {
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
       return candidate;
+    }
+  }
+  const zipCandidates = [
+    path.join(process.resourcesPath, `${BACKEND_NAME}.zip`),
+    path.join(__dirname, '..', 'dist', `${BACKEND_NAME}.zip`),
+  ];
+  for (const candidate of zipCandidates) {
+    if (fs.existsSync(candidate)) {
+      return extractBackendZip(candidate);
     }
   }
   throw new Error(`Backend executable not found: ${BACKEND_EXE_NAME}`);
@@ -91,12 +117,19 @@ async function stopBackend() {
   } catch (_) {
   }
   backendProcess = null;
+  if (extractedBackendDir) {
+    try {
+      fs.rmSync(extractedBackendDir, { recursive: true, force: true });
+    } catch (_) {
+    }
+    extractedBackendDir = null;
+  }
 }
 
 async function createWindow() {
   const host = '127.0.0.1';
   const port = await findFreePort(host);
-  const backend = backendExecutable();
+  const backend = await backendExecutable();
   backendProcess = childProcess.spawn(
     backend,
     ['--server', '--host', host, '--port', String(port)],

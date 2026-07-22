@@ -330,11 +330,13 @@ fi
 
 BACKEND_DIR="$ROOT_DIR/dist/$BACKEND_NAME"
 BACKEND_EXE="$BACKEND_DIR/$BACKEND_NAME"
+BACKEND_ZIP="$ROOT_DIR/dist/$BACKEND_NAME.zip"
 APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
 
 "$BACKEND_EXE" --server-import-check
+ditto -c -k --sequesterRsrc --keepParent "$BACKEND_DIR" "$BACKEND_ZIP"
 
-npm install --prefix electron --no-save electron@latest @electron/packager@latest
+npm install --prefix electron --no-save electron@latest @electron/packager@latest extract-zip@latest
 ELECTRON_VERSION="$(node -p "require('./electron/node_modules/electron/package.json').version")"
 electron/node_modules/.bin/electron-packager \
   electron \
@@ -346,13 +348,12 @@ electron/node_modules/.bin/electron-packager \
   --overwrite \
   --asar=false \
   --executable-name="$APP_NAME" \
-  --extra-resource="dist/$BACKEND_NAME"
+  --extra-resource="$BACKEND_ZIP"
 
 rm -rf "$APP_BUNDLE"
 mv "$ROOT_DIR/dist-electron/$APP_NAME-darwin-arm64/$APP_NAME.app" "$APP_BUNDLE"
 rm -rf "$ROOT_DIR/dist-electron"
 
-sign_macos_target "$BACKEND_DIR" "$BACKEND_EXE" "$MAC_CODESIGN_IDENTITY" "$MAC_CODESIGN_ENTITLEMENTS"
 sign_macos_target "$APP_BUNDLE" "$APP_BUNDLE" "$MAC_CODESIGN_IDENTITY" "$MAC_CODESIGN_ENTITLEMENTS"
 
 echo ""
