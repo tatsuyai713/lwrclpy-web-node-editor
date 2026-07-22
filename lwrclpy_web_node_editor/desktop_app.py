@@ -157,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     desktop_backend = os.environ.get("LWRCLPY_DESKTOP_BACKEND", "").strip().lower()
+    if not desktop_backend and getattr(sys, "frozen", False) and sys.platform.startswith("win"):
+        desktop_backend = "pyside6"
     webview = None
     if desktop_backend != "pyside6":
         try:
