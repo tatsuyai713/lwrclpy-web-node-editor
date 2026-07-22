@@ -370,6 +370,10 @@ if __name__ == "__main__":
                 from lwrclpy_web_node_editor import cli_run
 
                 exit_code = int(cli_run.main(argv[1:]))
+            elif argv and argv[0] == "--server-import-check":
+                from lwrclpy_web_node_editor import server  # noqa: F401
+
+                exit_code = 0
             elif argv and argv[0] == "--desktop-import-check":
                 from lwrclpy_web_node_editor import desktop_app
 

@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 APP_NAME="lwrclpy-web-node-editor"
 APP_TITLE="lwrclpy Web Node Editor"
+BACKEND_NAME="$APP_NAME-server"
 APPIMAGE_TOOL_URL_X86_64="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
 APPIMAGE_TOOL_URL_AARCH64="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage"
 
@@ -129,7 +130,7 @@ if [[ -z "${PYTHON_BIN:-}" || ! -x "$PYTHON_BIN" ]]; then
 fi
 
 "$PYTHON_BIN" -m pip install --upgrade pip
-"$PYTHON_BIN" -m pip install --prefer-binary --progress-bar off -r requirements.txt pyinstaller PySide6
+"$PYTHON_BIN" -m pip install --prefer-binary --progress-bar off -r requirements.txt pyinstaller
 
 # Locate the uv binary to bundle with the frozen app so auto-update works
 # even when uv is not on the user's PATH at runtime.
@@ -152,7 +153,7 @@ else
   echo "Bundling uv from: $UV_BIN"
 fi
 
-rm -rf build dist
+rm -rf build dist dist-electron
 
 UV_EXTRA_ARGS=()
 if [[ -n "$UV_BIN" && -x "$UV_BIN" ]]; then
@@ -162,7 +163,7 @@ fi
 "$PYTHON_BIN" -m PyInstaller \
   --noconfirm \
   --clean \
-  --name "$APP_NAME" \
+  --name "$BACKEND_NAME" \
   --onedir \
   --collect-all lwrclpy \
   --collect-all rclpy \
@@ -171,12 +172,6 @@ fi
   --collect-all mcap_ros2 \
   --hidden-import cv2 \
   --hidden-import yaml \
-  --hidden-import PySide6.QtCore \
-  --hidden-import PySide6.QtGui \
-  --hidden-import PySide6.QtNetwork \
-  --hidden-import PySide6.QtWidgets \
-  --hidden-import PySide6.QtWebEngineCore \
-  --hidden-import PySide6.QtWebEngineWidgets \
   --hidden-import asyncio \
   --hidden-import atexit \
   --hidden-import collections \
@@ -197,16 +192,14 @@ fi
   --hidden-import uuid \
   --hidden-import weakref \
   --exclude-module webview \
+  --exclude-module pythonnet \
+  --exclude-module clr \
   --exclude-module qtpy \
   --exclude-module gi \
   --exclude-module PyQt5 \
   --exclude-module PyQt6 \
   --exclude-module PySide2 \
-  --exclude-module PySide6.QtQml \
-  --exclude-module PySide6.QtQuick \
-  --exclude-module PySide6.QtQuickWidgets \
-  --exclude-module PySide6.QtDesigner \
-  --exclude-module PySide6.QtDBus \
+  --exclude-module PySide6 \
   "${UV_EXTRA_ARGS[@]}" \
   --add-data "lwrclpy_web_node_editor/static:lwrclpy_web_node_editor/static" \
   --add-data "lwrclpy_web_node_editor/node_worker.py:lwrclpy_web_node_editor" \
@@ -219,6 +212,36 @@ fi
   --add-data "samples:samples" \
   main.py
 
+"$ROOT_DIR/dist/$BACKEND_NAME/$BACKEND_NAME" --server-import-check
+
+APP_ARCH="$(detect_output_arch)"
+case "$APP_ARCH" in
+  x86_64)
+    ELECTRON_ARCH="x64"
+    ;;
+  aarch64)
+    ELECTRON_ARCH="arm64"
+    ;;
+  *)
+    ELECTRON_ARCH="$(uname -m)"
+    ;;
+esac
+npm install --prefix electron --no-save electron@latest @electron/packager@latest
+node electron/node_modules/@electron/packager/bin/electron-packager.js \
+  electron \
+  "$APP_NAME" \
+  --platform=linux \
+  --arch="$ELECTRON_ARCH" \
+  --out=dist-electron \
+  --overwrite \
+  --asar=false \
+  --executable-name="$APP_NAME" \
+  --extra-resource="dist/$BACKEND_NAME"
+
+rm -rf "$ROOT_DIR/dist/$APP_NAME"
+mv "$ROOT_DIR/dist-electron/$APP_NAME-linux-$ELECTRON_ARCH" "$ROOT_DIR/dist/$APP_NAME"
+rm -rf "$ROOT_DIR/dist-electron"
+
 APP_DIR="$ROOT_DIR/dist/$APP_NAME.AppDir"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/usr/bin" "$APP_DIR/usr/share/applications" "$APP_DIR/usr/share/icons/hicolor/256x256/apps"
@@ -228,7 +251,6 @@ cat > "$APP_DIR/AppRun" <<EOF
 set -euo pipefail
 HERE="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 export UV_LINK_MODE="\${UV_LINK_MODE:-copy}"
-export LWRCLPY_DESKTOP_BACKEND="\${LWRCLPY_DESKTOP_BACKEND:-pyside6}"
 exec "\$HERE/usr/bin/$APP_NAME/$APP_NAME" "\$@"
 EOF
 chmod +x "$APP_DIR/AppRun"
@@ -306,7 +328,6 @@ for _arch in "${ARCH_CANDIDATES[@]}"; do
   fi
 done
 
-APP_ARCH="$(detect_output_arch)"
 APPIMAGE_PATH="$ROOT_DIR/dist/$APP_NAME-$APP_ARCH.AppImage"
 APPIMAGE_BUILT=0
 for _tool in "${APPIMAGE_TOOL_CANDIDATES[@]}"; do
@@ -364,7 +385,6 @@ if [[ ! -x "\$APP_RUN" ]]; then
   tail -n +"\$PAYLOAD_LINE" "\$SELF" | tar -xz -C "\$RUN_DIR"
 fi
 export UV_LINK_MODE="\${UV_LINK_MODE:-copy}"
-export LWRCLPY_DESKTOP_BACKEND="\${LWRCLPY_DESKTOP_BACKEND:-pyside6}"
 exec "\$APP_RUN" "\$@"
 exit 127
 \$MARKER

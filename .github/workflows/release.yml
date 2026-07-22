@@ -187,9 +187,9 @@ jobs:
         if: runner.os == 'Windows'
         run: powershell -ExecutionPolicy Bypass -File scripts\build_windows_standalone.ps1
 
-      - name: Smoke test Windows desktop imports
+      - name: Smoke test Windows backend imports
         if: runner.os == 'Windows'
-        run: '& "dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe" --desktop-import-check'
+        run: '& "dist\lwrclpy-web-node-editor\resources\lwrclpy-web-node-editor-server\lwrclpy-web-node-editor-server.exe" --server-import-check'
 
       - name: Package Linux app
         if: runner.os == 'Linux'

@@ -13,7 +13,10 @@ __pycache__/
 .appimage-tools/
 .build_cpp_deps/
 dist/
+dist-electron/
 build/
+electron/node_modules/
+electron/package-lock.json
 *.spec
 *.pt
 *.pth

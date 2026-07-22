@@ -49,7 +49,7 @@ python3.13 -m venv .venv
 
 ## Linux向けスタンドアロンアプリ化
 
-LinuxではPyInstallerで `onedir` 形式のスタンドアロン実行ファイルを作成できます。
+LinuxではElectronのネイティブウィンドウとPyInstaller製の同梱Pythonサーバーを含むスタンドアロン実行ファイルを作成できます。ビルド時はNode.js/npmも必要です。
 
 1. 通常どおりvenvを準備し、依存を入れます。
 
@@ -64,7 +64,7 @@ venv/bin/python -m pip install -r requirements.txt
 scripts/build_linux_standalone.sh
 ```
 
-1. 生成物を起動します（外部ブラウザ不要、アプリ内にWebUIを表示）。
+1. 生成物を起動します（外部ブラウザ不要、Electronのネイティブウィンドウ内にWebUIを表示）。
 
 ```bash
 dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
@@ -73,7 +73,7 @@ dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
 従来どおりHTTPサーバーとして起動したい場合は次を使います。
 
 ```bash
-dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor --server --host 127.0.0.1 --port 8765
+dist/lwrclpy-web-node-editor/resources/lwrclpy-web-node-editor-server/lwrclpy-web-node-editor-server --server --host 127.0.0.1 --port 8765
 ```
 
 デスクトップ起動時は内部サーバーを別プロセスでlocalhost起動し、アプリ内WebViewから接続します。
@@ -110,7 +110,7 @@ Another lwrclpy Web Node Editor server is already running (lock: .../server.lock
 
 ## macOS向けスタンドアロンアプリ化
 
-macOSでは、macOS上で次のスクリプトを実行して `onedir` 形式を作成します。
+macOSでは、macOS上で次のスクリプトを実行してElectron版 `.app` を作成します。ビルド時はNode.js/npmも必要です。
 
 ```bash
 python3.13 -m venv venv
@@ -173,14 +173,13 @@ xattr -dr com.apple.quarantine dist/lwrclpy-web-node-editor.app
 生成物の起動例:
 
 ```bash
-dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
 open dist/lwrclpy-web-node-editor.app
-dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor --server --host 127.0.0.1 --port 8765
+dist/lwrclpy-web-node-editor.app/Contents/Resources/lwrclpy-web-node-editor-server/lwrclpy-web-node-editor-server --server --host 127.0.0.1 --port 8765
 ```
 
 ## Windows向けスタンドアロンアプリ化
 
-Windowsでは、Windows上でPowerShellから次を実行します。
+Windowsでは、Windows上でPowerShellから次を実行します。ビルド時はNode.js/npmも必要です。
 
 ```powershell
 py -3.13 -m venv venv
@@ -192,7 +191,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows_standalone.ps1
 
 ```powershell
 dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe
-dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe --server --host 127.0.0.1 --port 8765
+dist\lwrclpy-web-node-editor\resources\lwrclpy-web-node-editor-server\lwrclpy-web-node-editor-server.exe --server --host 127.0.0.1 --port 8765
 ```
 
 補足:

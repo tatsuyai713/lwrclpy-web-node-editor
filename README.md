@@ -59,7 +59,7 @@ Use another port when needed:
 
 ## Standalone Builds
 
-Each OS must build its own standalone package on that OS. By default the build scripts use `venv`; set `PYTHON_BIN` to use a different Python executable.
+Each OS must build its own standalone package on that OS. By default the build scripts use `venv`; set `PYTHON_BIN` to use a different Python executable. Standalone desktop packages use an Electron native window and bundle the Python server under the app resources, so Node.js/npm must be available during the build.
 
 ### Linux
 
@@ -78,7 +78,7 @@ dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
 Run server mode:
 
 ```bash
-dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor --server --host 127.0.0.1 --port 8765
+dist/lwrclpy-web-node-editor/resources/lwrclpy-web-node-editor-server/lwrclpy-web-node-editor-server --server --host 127.0.0.1 --port 8765
 ```
 
 Standalone mode uses this default working directory:
@@ -137,9 +137,8 @@ scripts/build_macos_standalone.sh
 Run the generated app:
 
 ```bash
-dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
 open dist/lwrclpy-web-node-editor.app
-dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor --server --host 127.0.0.1 --port 8765
+dist/lwrclpy-web-node-editor.app/Contents/Resources/lwrclpy-web-node-editor-server/lwrclpy-web-node-editor-server --server --host 127.0.0.1 --port 8765
 ```
 
 For a signed build:
@@ -178,7 +177,7 @@ Run the generated app:
 
 ```powershell
 dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe
-dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe --server --host 127.0.0.1 --port 8765
+dist\lwrclpy-web-node-editor\resources\lwrclpy-web-node-editor-server\lwrclpy-web-node-editor-server.exe --server --host 127.0.0.1 --port 8765
 ```
 
 ## First Run

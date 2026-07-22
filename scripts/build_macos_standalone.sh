@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 PYTHON_BIN="${PYTHON_BIN:-}"
 APP_NAME="lwrclpy-web-node-editor"
 APP_TITLE="lwrclpy Web Node Editor"
+BACKEND_NAME="$APP_NAME-server"
 MAC_CODESIGN_IDENTITY="${MAC_CODESIGN_IDENTITY:--}"
 MAC_CODESIGN_ENTITLEMENTS="${MAC_CODESIGN_ENTITLEMENTS:-}"
 LWRCL_PREFIX="${LWRCL_PREFIX:-}"
@@ -257,7 +258,7 @@ if command -v chflags >/dev/null 2>&1; then
     fi
   done
 fi
-rm -rf build dist .build_cpp_deps
+rm -rf build dist dist-electron .build_cpp_deps
 
 CPP_BUNDLE_PREFIX="$ROOT_DIR/.build_cpp_deps/lwrcl_cpp"
 copy_cpp_dependency_prefixes "$CPP_BUNDLE_PREFIX"
@@ -291,7 +292,7 @@ fi
 PYINSTALLER_ARGS=(
   --noconfirm
   --clean
-  --name "$APP_NAME"
+  --name "$BACKEND_NAME"
   --onedir
   --collect-all lwrclpy
   --collect-all rclpy
@@ -299,13 +300,12 @@ PYINSTALLER_ARGS=(
   --collect-all mcap
   --collect-all mcap_ros2
   --collect-all cmake
-  --collect-all webview
   --hidden-import cv2
   --hidden-import yaml
-  --hidden-import webview.platforms.cocoa
-  --hidden-import objc
-  --hidden-import Cocoa
-  --hidden-import WebKit
+  --exclude-module webview
+  --exclude-module pythonnet
+  --exclude-module clr
+  --exclude-module PySide6
   --add-data "lwrclpy_web_node_editor/static:lwrclpy_web_node_editor/static"
   --add-data "lwrclpy_web_node_editor/node_worker.py:lwrclpy_web_node_editor"
   --add-data "lwrclpy_web_node_editor/video_dds_worker.py:lwrclpy_web_node_editor"
@@ -328,18 +328,33 @@ fi
 
 "$PYTHON_BIN" -m PyInstaller "${PYINSTALLER_ARGS[@]}" main.py
 
-DIST_DIR="$ROOT_DIR/dist/$APP_NAME"
-APP_EXE="$DIST_DIR/$APP_NAME"
+BACKEND_DIR="$ROOT_DIR/dist/$BACKEND_NAME"
+BACKEND_EXE="$BACKEND_DIR/$BACKEND_NAME"
 APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
 
-create_macos_app_bundle "$DIST_DIR" "$APP_BUNDLE" "$APP_NAME" "$APP_TITLE"
+"$BACKEND_EXE" --server-import-check
 
-sign_macos_target "$DIST_DIR" "$APP_EXE" "$MAC_CODESIGN_IDENTITY" "$MAC_CODESIGN_ENTITLEMENTS"
+npm install --prefix electron --no-save electron@latest @electron/packager@latest
+node electron/node_modules/@electron/packager/bin/electron-packager.js \
+  electron \
+  "$APP_NAME" \
+  --platform=darwin \
+  --arch=arm64 \
+  --out=dist-electron \
+  --overwrite \
+  --asar=false \
+  --executable-name="$APP_NAME" \
+  --extra-resource="dist/$BACKEND_NAME"
+
+rm -rf "$APP_BUNDLE"
+mv "$ROOT_DIR/dist-electron/$APP_NAME-darwin-arm64/$APP_NAME.app" "$APP_BUNDLE"
+rm -rf "$ROOT_DIR/dist-electron"
+
+sign_macos_target "$BACKEND_DIR" "$BACKEND_EXE" "$MAC_CODESIGN_IDENTITY" "$MAC_CODESIGN_ENTITLEMENTS"
 sign_macos_target "$APP_BUNDLE" "$APP_BUNDLE" "$MAC_CODESIGN_IDENTITY" "$MAC_CODESIGN_ENTITLEMENTS"
 
 echo ""
-echo "Build complete: $DIST_DIR"
+echo "Build complete: $BACKEND_DIR"
 echo "App bundle: $APP_BUNDLE"
-echo "Run desktop app: $APP_EXE"
 echo "Open macOS app: open $APP_BUNDLE"
-echo "Run server mode: $APP_EXE --server --host 127.0.0.1 --port 8765"
+echo "Run server mode: $BACKEND_EXE --server --host 127.0.0.1 --port 8765"
