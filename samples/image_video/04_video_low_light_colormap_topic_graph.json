@@ -9259,7 +9259,8 @@
         "publishHz": 30,
         "duration": 10,
         "loop": true,
-        "useSourceFps": false
+        "useSourceFps": false,
+        "outputMaxSide": 160
       },
       "loopCode": "",
       "toolType": "video_file_input"
@@ -9298,7 +9299,7 @@
       "importCode": "from std_msgs.msg import Float32\n",
       "requirements": "",
       "pythonVersion": "3.13",
-      "lwrclpyVersion": "0.5.1",
+      "lwrclpyVersion": "",
       "params": {}
     },
     {
@@ -9330,7 +9331,7 @@
       "importCode": "",
       "requirements": "",
       "pythonVersion": "3.13",
-      "lwrclpyVersion": "0.5.1",
+      "lwrclpyVersion": "",
       "params": {}
     },
     {

@@ -27,7 +27,31 @@ def _configure_fastdds_transport(config: dict[str, Any]) -> None:
     if config.get("externalDdsCompatible"):
         os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = EXTERNAL_FASTDDS_TRANSPORTS
     else:
-        os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
+        os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = os.environ.get(
+            "LWRCLPY_WEB_INTERNAL_FASTDDS_TRANSPORTS",
+            "UDPv4",
+        )
+
+
+def _disable_lwrclpy_side_channels() -> None:
+    if os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS") == "1":
+        return
+    try:
+        import lwrclpy.node as lwrclpy_node
+
+        node_cls = getattr(lwrclpy_node, "Node", None)
+        if node_cls is None:
+            return
+        for name in (
+            "_configure_cuda_ipc_publisher",
+            "_configure_cuda_ipc_subscription",
+            "_configure_shared_memory_publisher",
+            "_configure_shared_memory_subscription",
+        ):
+            if hasattr(node_cls, name):
+                setattr(node_cls, name, lambda self, *args, **kwargs: None)
+    except Exception:
+        pass
 
 
 def _dependency_site_dir() -> Path:
@@ -895,6 +919,7 @@ def main() -> int:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     _configure_fastdds_transport(config)
     import rclpy
+    _disable_lwrclpy_side_channels()
 
     if not rclpy.ok():
         rclpy.init(args=None)
@@ -923,22 +948,30 @@ def main() -> int:
         else:
             data_type = str(config["dataType"])
             if config.get("toolType") == "function_generator":
+                _write_status(Path(config["statusPath"]), running=True, status="creating publisher")
                 publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                _write_status(Path(config["statusPath"]), running=True, status="publisher ready")
                 _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_function_generator(config, publisher)
             elif config.get("toolType") == "interactive_text_input":
+                _write_status(Path(config["statusPath"]), running=True, status="creating publisher")
                 publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                _write_status(Path(config["statusPath"]), running=True, status="publisher ready")
                 _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_interactive_text_input(config_path, config, publisher)
             elif config.get("toolType") == "urdf_static_tf_publisher":
                 _wait_for_expected_subscriptions(config, {}, Path(config["statusPath"]))
                 _run_urdf_static_tf(config, node)
             elif config.get("toolType") == "image_file_input":
+                _write_status(Path(config["statusPath"]), running=True, status="creating publisher")
                 publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                _write_status(Path(config["statusPath"]), running=True, status="publisher ready")
                 _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_image_input(config, publisher)
             elif config.get("toolType") == "video_file_input":
+                _write_status(Path(config["statusPath"]), running=True, status="creating publisher")
                 publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                _write_status(Path(config["statusPath"]), running=True, status="publisher ready")
                 _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_video_input(config, publisher)
     except Exception as exc:

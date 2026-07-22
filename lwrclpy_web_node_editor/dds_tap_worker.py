@@ -36,7 +36,31 @@ def _configure_fastdds_transport(config: dict[str, Any]) -> None:
     if config.get("externalDdsCompatible"):
         os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = EXTERNAL_FASTDDS_TRANSPORTS
     else:
-        os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
+        os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = os.environ.get(
+            "LWRCLPY_WEB_INTERNAL_FASTDDS_TRANSPORTS",
+            "UDPv4",
+        )
+
+
+def _disable_lwrclpy_side_channels() -> None:
+    if os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS") == "1":
+        return
+    try:
+        import lwrclpy.node as lwrclpy_node
+
+        node_cls = getattr(lwrclpy_node, "Node", None)
+        if node_cls is None:
+            return
+        for name in (
+            "_configure_cuda_ipc_publisher",
+            "_configure_cuda_ipc_subscription",
+            "_configure_shared_memory_publisher",
+            "_configure_shared_memory_subscription",
+        ):
+            if hasattr(node_cls, name):
+                setattr(node_cls, name, lambda self, *args, **kwargs: None)
+    except Exception:
+        pass
 
 
 def _stop(_signum, _frame) -> None:
@@ -1060,6 +1084,7 @@ def main() -> int:
     _write_json(tap.status_path, {"running": True, "mode": tap.mode, "topic": tap.topic, "dataType": tap.data_type, "hz": 0.0, "count": 0})
 
     import rclpy
+    _disable_lwrclpy_side_channels()
 
     if not rclpy.ok():
         rclpy.init(args=None)

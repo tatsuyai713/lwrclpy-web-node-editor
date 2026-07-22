@@ -77,7 +77,7 @@
       "importCode": "import math\n\nfrom geometry_msgs.msg import TransformStamped\nfrom tf2_ros.transform_broadcaster import TransformBroadcaster\n\n\ndef ensure_tf_broadcaster(state, node):\n    if \"tf_broadcaster\" not in state:\n        state[\"tf_broadcaster\"] = TransformBroadcaster(node)\n    return state[\"tf_broadcaster\"]\n\n\ndef _field(value, name, default=None):\n    attr = getattr(value, name, default)\n    if callable(attr):\n        try:\n            return attr()\n        except TypeError:\n            return attr\n    return attr\n\n\ndef _set_field(value, name, item):\n    attr = getattr(value, name, None)\n    if callable(attr):\n        try:\n            attr(item)\n            return\n        except TypeError:\n            pass\n    setattr(value, name, item)\n\n\ndef make_transform(parent, child, translation, rotation):\n    transform = TransformStamped()\n    header = _field(transform, \"header\")\n    stamp = _field(header, \"stamp\")\n    _set_field(stamp, \"sec\", 0)\n    _set_field(stamp, \"nanosec\", 0)\n    _set_field(header, \"frame_id\", str(parent))\n    _set_field(transform, \"child_frame_id\", str(child))\n    body = _field(transform, \"transform\")\n    trans = _field(body, \"translation\")\n    rot = _field(body, \"rotation\")\n    _set_field(trans, \"x\", float(translation[0]))\n    _set_field(trans, \"y\", float(translation[1]))\n    _set_field(trans, \"z\", float(translation[2]))\n    _set_field(rot, \"x\", float(rotation[0]))\n    _set_field(rot, \"y\", float(rotation[1]))\n    _set_field(rot, \"z\", float(rotation[2]))\n    _set_field(rot, \"w\", float(rotation[3]))\n    return transform\n",
       "requirements": "",
       "pythonVersion": "3.13",
-      "lwrclpyVersion": "0.5.1",
+      "lwrclpyVersion": "",
       "params": {
         "tfInputEnabled": false,
         "tfOutputEnabled": true
@@ -133,7 +133,7 @@
       "importCode": "import rclpy\nfrom rclpy.node import Node\nfrom rclpy.time import Time\nfrom tf2_ros import TransformException\nfrom tf2_ros.buffer import Buffer\nfrom tf2_ros.transform_listener import TransformListener\n\n\ndef ensure_tf_listener(state, node):\n    if \"tf_buffer\" not in state:\n        state[\"tf_buffer\"] = Buffer()\n        state[\"tf_listener\"] = TransformListener(state[\"tf_buffer\"], node)\n    return state[\"tf_buffer\"]\n\n\ndef _field(value, name, default=None):\n    attr = getattr(value, name, default)\n    if callable(attr):\n        try:\n            return attr()\n        except TypeError:\n            return attr\n    return attr\n\n\ndef lookup_with_tf2_ros(state, node, parent, child):\n    buffer = ensure_tf_listener(state, node)\n    try:\n        transform = buffer.lookup_transform(parent, child, Time())\n        trans = _field(_field(transform, \"transform\"), \"translation\")\n        return (\n            float(_field(trans, \"x\", 0.0)),\n            float(_field(trans, \"y\", 0.0)),\n            float(_field(trans, \"z\", 0.0)),\n        )\n    except TransformException as exc:\n        state[\"last_tf2_ros_error\"] = str(exc)\n        return None\n",
       "requirements": "",
       "pythonVersion": "3.13",
-      "lwrclpyVersion": "0.5.1",
+      "lwrclpyVersion": "",
       "toolType": "",
       "params": {
         "tfInputEnabled": true,

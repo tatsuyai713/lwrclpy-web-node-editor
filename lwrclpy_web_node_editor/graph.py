@@ -641,6 +641,14 @@ class CustomLwrclNodeInstance:
                 process.terminate()
         except ProcessLookupError:
             pass
+        except PermissionError:
+            try:
+                if force:
+                    process.kill()
+                else:
+                    process.terminate()
+            except ProcessLookupError:
+                pass
 
     def tick(self, linked_inputs: dict[str, Any]) -> dict[str, Any]:
         if self.config.language in {"cpp", "c++"}:
@@ -1398,6 +1406,7 @@ class CustomLwrclNodeInstance:
             self._video_frame_skip(),
             bool(self.config.params.get("_externalDdsCompatible")),
             int(self.config.params.get("_expectedSubscriptions") or 0),
+            int(self.config.params.get("outputMaxSide") or 0),
             f"preview:raw:max640:{min(self._run_hz(), publish_hz):g}hz",
             tuple((p.id, p.data_type, p.topics) for p in self.config.outputs),
         )
@@ -1428,6 +1437,7 @@ class CustomLwrclNodeInstance:
             "previewHz": min(self._run_hz(), publish_hz),
             "previewEncoding": "raw",
             "previewMaxSide": 640,
+            "outputMaxSide": int(self.config.params.get("outputMaxSide") or 0),
             "outputEncoding": "jpeg" if normalize_type(output.data_type) == "sensor_msgs/msg/CompressedImage" else "raw",
         }
 
@@ -3060,7 +3070,7 @@ class GraphRuntime:
             instance = self._instance_for(config)
             ok = True
             if config.language in {"cpp", "c++"}:
-                ok = self._ensure_cpp_worker_process(config, instance)
+                ok = self._ensure_cpp_worker_process(config, instance, start=False)
             elif self._config_needs_node_environment(config):
                 ok = self._ensure_node_environment(config, instance)
             else:
@@ -3116,7 +3126,7 @@ class GraphRuntime:
             self._apply_runtime_param_overrides(instance)
             setup_ok = True
             if config.language in {"cpp", "c++"}:
-                setup_ok = self._ensure_cpp_worker_process(config, instance)
+                setup_ok = self._ensure_cpp_worker_process(config, instance, start=False)
             elif self._config_needs_node_environment(config):
                 setup_ok = self._ensure_node_environment(config, instance)
             else:
@@ -3128,7 +3138,20 @@ class GraphRuntime:
                     "lwrclpy": self.runtime.status(instance.env_status),
                     "setup": {"complete": False},
                 }
-            if self._config_needs_node_environment(config):
+        if needs_lwrclpy:
+            self.runtime.spin_some(1)
+        for config in sorted(self._sort(configs, links), key=self._execution_phase):
+            instance = self._instance_for(config)
+            self._apply_runtime_param_overrides(instance)
+            if self._config_runs_as_node_worker(config):
+                if not self._source_publishers_ready(configs):
+                    instance.env_status = "waiting for source publishers"
+                    response_nodes[config.id] = {
+                        "meta": {"environment": instance.env_status, "logs": instance.logs[-20:]},
+                        "values": {},
+                        "view": {"kind": "text", "status": instance.env_status},
+                    }
+                    continue
                 if instance.env_python_bin is None:
                     instance.env_status = "python venv missing"
                     return {
@@ -3142,12 +3165,19 @@ class GraphRuntime:
                         "lwrclpy": self.runtime.status(instance.env_status),
                         "setup": {"complete": False},
                     }
-
-        if needs_lwrclpy:
-            self.runtime.spin_some(1)
-        for config in self._sort(configs, links):
-            instance = self._instance_for(config)
-            self._apply_runtime_param_overrides(instance)
+            if config.language in {"cpp", "c++"}:
+                if not self._source_publishers_ready(configs):
+                    instance.env_status = "waiting for source publishers"
+                    meta = instance.tick({})
+                    response_nodes[config.id] = {"meta": meta, "values": meta.get("outputs", {}), "view": instance.view}
+                    continue
+                if not self._ensure_cpp_worker_process(config, instance, start=True):
+                    response_nodes[config.id] = {"meta": {"environment": instance.env_status, "logs": instance.logs[-20:]}, "values": {}, "view": instance.view}
+                    return {
+                        "nodes": response_nodes,
+                        "lwrclpy": self.runtime.status(instance.env_status),
+                        "setup": {"complete": False},
+                    }
             meta = instance.tick({})
             if needs_lwrclpy:
                 self.runtime.spin_some(1)
@@ -3160,7 +3190,48 @@ class GraphRuntime:
             "setup": {"complete": True},
         }
 
+    def _execution_phase(self, config: CustomLwrclNodeConfig) -> int:
+        if config.tool_type in {"image_file_input", "video_file_input", "mcap_file_input", "function_generator", "interactive_text_input", "urdf_static_tf_publisher"}:
+            return 0
+        if config.tool_type in {"image_view", "string_view", "chat_string_view", "topic_hz_monitor", "graph_view", "image_file_save", "tf_viewer", "3d_viewer", "mcap_record"}:
+            return 2
+        return 1
+
+    def _source_publishers_ready(self, configs: list[CustomLwrclNodeConfig]) -> bool:
+        source_configs = [
+            config
+            for config in configs
+            if config.tool_type in {"image_file_input", "video_file_input", "mcap_file_input", "function_generator", "interactive_text_input", "urdf_static_tf_publisher"}
+            and any(port.topics for port in config.outputs)
+        ]
+        for config in source_configs:
+            status_path = Path.cwd() / ".node_workers" / f"{config.id}.source.status.json"
+            if not status_path.exists():
+                return False
+            try:
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+            except Exception:
+                return False
+            if status.get("error"):
+                return True
+            try:
+                if int(status.get("published") or 0) > 0:
+                    continue
+            except Exception:
+                pass
+            phase = str(status.get("phase") or "")
+            text = str(status.get("status") or "")
+            if phase == "waiting_subscribers" or text == "publisher ready" or "waiting for DDS subscribers" in text:
+                continue
+            return False
+        return True
+
     def _config_needs_node_environment(self, config: CustomLwrclNodeConfig) -> bool:
+        if config.language in {"cpp", "c++"}:
+            return False
+        return self._config_runs_as_node_worker(config) or self._config_runs_in_background(config)
+
+    def _config_runs_as_node_worker(self, config: CustomLwrclNodeConfig) -> bool:
         if config.language in {"cpp", "c++"}:
             return False
         return not config.tool_type or config.tool_type in {"image_crop_resize", "llm_text"}
@@ -3219,10 +3290,8 @@ class GraphRuntime:
             instance.env_status = "ready (built-in venv)" if config.tool_type else "ready"
             return True
         requested_python = self._python_for_config(config)
-        expected_python = self._python_runtime_signature(requested_python, desired_python)
         try:
-            current_python = python_marker.read_text(encoding="utf-8") if python_marker.exists() else ""
-            if python_bin.exists() and (current_python != expected_python or not self._venv_python_matches(env_root)):
+            if python_bin.exists() and not self._venv_python_matches(python_bin, desired_python):
                 instance.stop_worker(force=True)
                 shutil.rmtree(env_root, ignore_errors=True)
                 instance.env_signature = None
@@ -3416,16 +3485,23 @@ class GraphRuntime:
         except Exception:
             return f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
 
-    def _venv_python_matches(self, env_root: Path) -> bool:
-        cfg = env_root / "pyvenv.cfg"
-        if not cfg.exists():
+    def _venv_python_matches(self, python_bin: Path, requested_version: str) -> bool:
+        if not python_bin.exists():
             return False
         try:
-            text = cfg.read_text(encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    str(python_bin),
+                    "-c",
+                    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
         except Exception:
             return False
-        expected = "version_info = "
-        return expected in text
+        return completed.stdout.strip() == str(requested_version or f"{sys.version_info.major}.{sys.version_info.minor}")
 
     def _requirements_text_for(self, config: CustomLwrclNodeConfig) -> str:
         if not config.tool_type:
@@ -3630,12 +3706,13 @@ class GraphRuntime:
             score += 3
         return score, name
 
-    def _ensure_cpp_worker_process(self, config: CustomLwrclNodeConfig, instance: CustomLwrclNodeInstance) -> bool:
+    def _ensure_cpp_worker_process(self, config: CustomLwrclNodeConfig, instance: CustomLwrclNodeInstance, *, start: bool = True) -> bool:
         signature = self._cpp_worker_signature(config)
         if instance.worker_process is not None and instance.worker_process.poll() is None and instance.worker_signature == signature:
             instance.env_status = "C++ worker running"
             return True
-        instance.stop_worker()
+        if start:
+            instance.stop_worker()
         worker_dir = Path.cwd() / ".node_workers"
         cpp_root = worker_dir / "cpp" / config.id
         package_name = self._cpp_package_name(config)
@@ -3681,6 +3758,12 @@ class GraphRuntime:
                 instance.env_status = f"C++ executable missing: {exe_path}"
                 instance.log(instance.env_status)
                 return False
+            if not start:
+                instance.worker_signature = signature
+                instance.worker_config_path = package_dir / "src" / f"{package_name}.cpp"
+                instance.worker_log_path = log_path
+                instance.env_status = "C++ worker ready"
+                return True
             log_file = log_path.open("a", encoding="utf-8")
             instance.worker_process = subprocess.Popen(
                 [str(exe_path)],
@@ -3816,7 +3899,10 @@ add_subdirectory({package_name})
         if path_items:
             existing_path = env.get("PATH", "")
             env["PATH"] = os.pathsep.join([*path_items, *([existing_path] if existing_path else [])])
-        env.setdefault("FASTDDS_BUILTIN_TRANSPORTS", os.environ.get("LWRCLPY_WEB_FASTDDS_TRANSPORTS", "LARGE_DATA"))
+        env["FASTDDS_BUILTIN_TRANSPORTS"] = os.environ.get(
+            "LWRCLPY_WEB_INTERNAL_FASTDDS_TRANSPORTS",
+            "UDPv4",
+        )
         return env
 
     def _bundled_tool_candidates(self, name: str) -> list[Path]:
@@ -4234,20 +4320,7 @@ add_subdirectory({package_name})
             if port.topics
         }
         subscribers_by_output: dict[tuple[str, str], set[tuple[str, str]]] = {}
-        external_topics: set[str] = {
-            topic
-            for node in nodes
-            if node.id in pre_external_node_ids
-            for port in [*node.inputs, *node.outputs]
-            for topic in port.topics
-        }
-        external_topics.update(
-            topic
-            for node in nodes
-            for port in [*node.inputs, *node.outputs]
-            for topic in port.topics
-            if topic not in linked_topics
-        )
+        external_node_ids = set(pre_external_node_ids)
         for link in links:
             src = by_id.get(str(link.get("fromNode")))
             dst = by_id.get(str(link.get("toNode")))
@@ -4278,8 +4351,10 @@ add_subdirectory({package_name})
                     str(link.get("toNode")),
                     str(link.get("toPort")),
                 ))
-            if (src and src.tool_type == "topic_input") or (dst and dst.tool_type == "topic_output"):
-                external_topics.add(topic)
+            if src and src.tool_type == "topic_input":
+                external_node_ids.add(src.id)
+            if dst and dst.tool_type == "topic_output":
+                external_node_ids.add(dst.id)
         for node in nodes:
             for port in node.inputs:
                 port.topic = ""
@@ -4295,24 +4370,8 @@ add_subdirectory({package_name})
             if expected_by_output:
                 node.params["_expectedSubscriptionsByOutput"] = expected_by_output
                 node.params["_expectedSubscriptions"] = sum(expected_by_output.values())
-        if external_topics:
-            topics_by_node = {
-                node.id: {topic for port in [*node.inputs, *node.outputs] for topic in port.topics}
-                for node in nodes
-            }
-            changed = True
-            while changed:
-                changed = False
-                for node_topics in topics_by_node.values():
-                    if not node_topics.intersection(external_topics):
-                        continue
-                    before = len(external_topics)
-                    external_topics.update(node_topics)
-                    if len(external_topics) != before:
-                        changed = True
         for node in nodes:
-            node_topics = {topic for port in [*node.inputs, *node.outputs] for topic in port.topics}
-            if node_topics.intersection(external_topics):
+            if node.id in external_node_ids:
                 node.params["_externalDdsCompatible"] = True
 
     def _apply_builtin_param_topics(self, nodes: list[CustomLwrclNodeConfig]) -> None:

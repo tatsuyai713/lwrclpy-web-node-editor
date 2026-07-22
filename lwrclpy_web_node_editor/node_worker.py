@@ -40,7 +40,31 @@ def configure_fastdds_transport(config: dict[str, Any]) -> None:
     if config.get("externalDdsCompatible"):
         os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = EXTERNAL_FASTDDS_TRANSPORTS
     else:
-        os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
+        os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = os.environ.get(
+            "LWRCLPY_WEB_INTERNAL_FASTDDS_TRANSPORTS",
+            "UDPv4",
+        )
+
+
+def disable_lwrclpy_side_channels() -> None:
+    if os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS") == "1":
+        return
+    try:
+        import lwrclpy.node as lwrclpy_node
+
+        node_cls = getattr(lwrclpy_node, "Node", None)
+        if node_cls is None:
+            return
+        for name in (
+            "_configure_cuda_ipc_publisher",
+            "_configure_cuda_ipc_subscription",
+            "_configure_shared_memory_publisher",
+            "_configure_shared_memory_subscription",
+        ):
+            if hasattr(node_cls, name):
+                setattr(node_cls, name, lambda self, *args, **kwargs: None)
+    except Exception:
+        pass
 
 def sanitize_node_name(name: str) -> str:
     """Make *name* a valid ROS 2 node name ([A-Za-z0-9_], not starting with a digit)."""
@@ -551,6 +575,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     config = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
     configure_fastdds_transport(config)
+    disable_lwrclpy_side_channels()
     worker = LwrclpyWorkerNode(config)
     try:
         while worker.rclpy.ok():

@@ -653,6 +653,17 @@ class RuntimeNode:
         for _ in range(frame_skip):
             self.video_capture.grab()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        output_max_side = max(0, int(float(self.params.get("outputMaxSide") or 0)))
+        h, w = rgb.shape[:2]
+        if output_max_side > 0 and max(w, h) > output_max_side:
+            scale = output_max_side / max(w, h)
+            target_w = max(2, int(round(w * scale)))
+            target_h = max(2, int(round(h * scale)))
+            if target_w % 2:
+                target_w += 1
+            if target_h % 2:
+                target_h += 1
+            rgb = cv2.resize(rgb, (target_w, target_h), interpolation=cv2.INTER_AREA)
         rgb = rgb.copy()
         h, w = rgb.shape[:2]
         self.publish("out1", {"height": h, "width": w, "encoding": "rgb8", "is_bigendian": 0, "step": w * 3, "data": rgb.tobytes()})

@@ -68,7 +68,7 @@
       "importCode": "class LowPassFilter {\npublic:\n  void configure(double alpha) {\n    alpha_ = alpha;\n    initialized_ = false;\n    value_ = 0.0;\n  }\n\n  double update(double raw) {\n    if (!initialized_) {\n      value_ = raw;\n      initialized_ = true;\n      return value_;\n    }\n    value_ = value_ * (1.0 - alpha_) + raw * alpha_;\n    return value_;\n  }\n\nprivate:\n  double alpha_ = 0.1;\n  double value_ = 0.0;\n  bool initialized_ = false;\n};\n\nstatic LowPassFilter filter;\n",
       "requirements": "",
       "pythonVersion": "3.13",
-      "lwrclpyVersion": "0.5.1",
+      "lwrclpyVersion": "",
       "params": {},
       "language": "cpp",
       "cppCode": "filter.configure(0.08);\n"

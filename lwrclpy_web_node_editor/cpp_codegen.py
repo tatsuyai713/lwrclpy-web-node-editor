@@ -22,6 +22,8 @@ rclcpp::spin_some(node);
 //   }
 loop_rate.sleep();"""
 
+PYTHON_DEFAULT_IMPORT_MARKER = "Import Code runs once after this node's Python venv is ready"
+
 
 def safe_cpp_identifier(value: object, fallback: str = "node") -> str:
     text = re.sub(r"[^A-Za-z0-9_]", "_", str(value or "").strip())
@@ -149,12 +151,26 @@ def cmake_link_item(item: str) -> str:
     return json.dumps(item, ensure_ascii=True)
 
 
+def cpp_qos_expr(data_type: object) -> str:
+    normalized = str(data_type or "").replace(".", "/")
+    if normalized in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
+        return "rclcpp::SensorDataQoS()"
+    return "rclcpp::QoS(10)"
+
+
+def cpp_header_text(value: object) -> str:
+    text = str(value or "").strip()
+    if PYTHON_DEFAULT_IMPORT_MARKER in text:
+        return ""
+    return text
+
+
 def render_cpp_node_source(node: dict[str, Any], run_hz: float = 60.0) -> str:
     inputs = [port for port in node.get("inputs", []) if isinstance(port, dict) and is_cpp_message_type(port.get("dataType"))]
     outputs = [port for port in node.get("outputs", []) if isinstance(port, dict) and is_cpp_message_type(port.get("dataType"))]
     includes = sorted({"rclcpp/rclcpp.hpp", "chrono", "cstdint", "memory", "string", "vector", *(cpp_include(port.get("dataType")) for port in [*inputs, *outputs])})
     include_text = "\n".join(f"#include <{item}>" for item in includes)
-    header_text = str(node.get("importCode") or "").strip()
+    header_text = cpp_header_text(node.get("importCode"))
     header_block = f"\n\n{header_text}" if header_text else ""
     class_name = node.get("class_name") or "GeneratedNode"
     loop_hz = max(1.0, float(run_hz or 60.0))
@@ -167,11 +183,11 @@ def render_cpp_node_source(node: dict[str, Any], run_hz: float = 60.0) -> str:
         for port in inputs
     )
     publisher_setup = "\n".join(
-        f"    pubs_{safe_cpp_identifier(port.get('id'), 'out')}_.push_back(create_publisher<{cpp_type(port.get('dataType'))}>({cpp_string_literal(topic)}, 10));"
+        f"    pubs_{safe_cpp_identifier(port.get('id'), 'out')}_.push_back(create_publisher<{cpp_type(port.get('dataType'))}>({cpp_string_literal(topic)}, {cpp_qos_expr(port.get('dataType'))}));"
         for port in outputs for topic in (port.get("topics") or [])
     )
     subscription_setup = "\n".join(
-        f"    subs_{safe_cpp_identifier(port.get('id'), 'in')}_.push_back(create_subscription<{cpp_type(port.get('dataType'))}>({cpp_string_literal(topic)}, 10, [this](const {cpp_type(port.get('dataType'))}& msg) {{ latest_{safe_cpp_identifier(port.get('id'), 'in')}_ = std::make_shared<{cpp_type(port.get('dataType'))}>(msg); {callback_invocation(port)} }}));"
+        f"    subs_{safe_cpp_identifier(port.get('id'), 'in')}_.push_back(create_subscription<{cpp_type(port.get('dataType'))}>({cpp_string_literal(topic)}, {cpp_qos_expr(port.get('dataType'))}, [this](const {cpp_type(port.get('dataType'))}& msg) {{ latest_{safe_cpp_identifier(port.get('id'), 'in')}_ = std::make_shared<{cpp_type(port.get('dataType'))}>(msg); {callback_invocation(port)} }}));"
         for port in inputs for topic in (port.get("topics") or [])
     )
     subscription_members = "\n".join(

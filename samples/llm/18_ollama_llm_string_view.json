@@ -33,7 +33,7 @@
         "prompt": "Summarize in one short paragraph why ROS 2 topic based node graphs are useful for robotics prototyping."
       },
       "pythonVersion": "3.13",
-      "lwrclpyVersion": "0.5.1"
+      "lwrclpyVersion": ""
     },
     {
       "id": "n2",

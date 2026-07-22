@@ -1044,6 +1044,10 @@ function updateDraftRuntimeVersions() {
   renderRuntimeVersionSelects(draft);
 }
 
+function defaultImportCodeForLanguage(language) {
+  return language === 'cpp' ? DEFAULT_CPP_HEADER_CODE : DEFAULT_IMPORT_CODE;
+}
+
 function renderConfigPorts() {
   const dialog = $('node-dialog');
   const draft = JSON.parse(dialog.dataset.draft || JSON.stringify(createDefaultNode()));
@@ -1374,7 +1378,7 @@ function openCodeDialog(node, kind) {
       : 'lwrclpy timer scope: node, timer_id, timer_name, state, now, period, publish(output_id, value), log(...).';
   } else if (isImport) {
     title = `${node.name}: ${nodeIsCpp ? 'Header' : 'Import Code'}`;
-    value = node.importCode || DEFAULT_IMPORT_CODE;
+    value = node.importCode || defaultImportCodeForLanguage(nodeIsCpp ? 'cpp' : 'python');
     hint = nodeIsCpp
       ? 'C++ header section inserted after generated includes. Put #include lines, helper functions, constants, class definitions, structs, or static objects here.'
       : 'Import code runs once after this node venv is ready. Put imports such as import cv2 and import numpy as np here.';
@@ -7580,7 +7584,7 @@ function normalizeImportedNode(node) {
     timerEnabled: Boolean(node.timerEnabled),
     timerPeriodSec: Number(node.timerPeriodSec || 1.0),
     timerCode: Object.prototype.hasOwnProperty.call(node, 'timerCode') ? node.timerCode : DEFAULT_TIMER_CODE,
-    importCode: node.importCode || DEFAULT_IMPORT_CODE,
+    importCode: node.importCode || defaultImportCodeForLanguage(node.language === 'cpp' ? 'cpp' : 'python'),
     cppCode: node.cppCode || DEFAULT_CPP_CODE,
     language: isTool ? '' : (node.language === 'cpp' ? 'cpp' : 'python'),
     requirements: node.requirements || DEFAULT_REQUIREMENTS_CODE,
@@ -7606,6 +7610,7 @@ function normalizeImportedNode(node) {
     };
   }
   if (!normalized.toolType) {
+    normalizeNodeLanguageDefaults(normalized);
     normalized.params = {
       ...(normalized.params || {}),
       tfInputEnabled: Boolean(normalized.params?.tfInputEnabled),
