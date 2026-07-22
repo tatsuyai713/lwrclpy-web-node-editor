@@ -15,11 +15,35 @@ let extractedBackendDir = null;
 let backendExitError = null;
 let backendLog = '';
 
-if (process.platform === 'win32' && process.arch === 'arm64') {
+function configurePlatformRendering() {
+  if (process.platform !== 'win32' || process.arch !== 'arm64') {
+    return;
+  }
+
   app.disableHardwareAcceleration();
-  app.commandLine.appendSwitch('disable-gpu');
-  app.commandLine.appendSwitch('disable-gpu-compositing');
+
+  const switches = [
+    ['disable-gpu'],
+    ['disable-gpu-compositing'],
+    ['disable-gpu-sandbox'],
+    ['disable-gpu-watchdog'],
+    ['disable-accelerated-2d-canvas'],
+    ['disable-accelerated-video-decode'],
+    ['enable-unsafe-swiftshader'],
+    ['disable-features', 'UseSkiaRenderer,VizDisplayCompositor,CanvasOopRasterization,VaapiVideoDecoder'],
+    ['in-process-gpu'],
+    ['use-angle', 'warp'],
+  ];
+  for (const [name, value] of switches) {
+    if (value === undefined) {
+      app.commandLine.appendSwitch(name);
+    } else {
+      app.commandLine.appendSwitch(name, value);
+    }
+  }
 }
+
+configurePlatformRendering();
 
 function findFreePort(host) {
   return new Promise((resolve, reject) => {
