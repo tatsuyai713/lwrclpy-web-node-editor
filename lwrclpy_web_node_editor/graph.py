@@ -3909,8 +3909,6 @@ add_subdirectory({package_name})
             *self._bundled_lwrcl_prefixes(),
             str(Path("/opt/fast-dds-libs")),
             str(Path("/opt/fast-dds")),
-            str(Path("/opt/cyclonedds-libs")),
-            str(Path("/opt/vsomeip-libs")),
         ]
         existing_prefix = env.get("CMAKE_PREFIX_PATH", "")
         env["CMAKE_PREFIX_PATH"] = os.pathsep.join([*prefixes, *([existing_prefix] if existing_prefix else [])])

@@ -7,6 +7,8 @@ cd "$ROOT_DIR"
 APP_NAME="lwrclpy-web-node-editor"
 APP_TITLE="lwrclpy Web Node Editor"
 BACKEND_NAME="$APP_NAME-server"
+LWRCL_PREFIX="${LWRCL_PREFIX:-}"
+CPP_DEP_PREFIXES="${CPP_DEP_PREFIXES:-}"
 APPIMAGE_TOOL_URL_X86_64="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
 APPIMAGE_TOOL_URL_AARCH64="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage"
 
@@ -105,6 +107,73 @@ detect_output_arch() {
   normalize_arch "$(uname -m)"
 }
 
+copy_cpp_dependency_prefixes() {
+  local target="$1"
+  "$PYTHON_BIN" - "$target" <<'PY'
+from pathlib import Path
+import shutil
+import sys
+
+target = Path(sys.argv[1])
+if target.exists():
+    shutil.rmtree(target)
+target.mkdir(parents=True, exist_ok=True)
+PY
+
+  local candidates=()
+  if [[ -n "$LWRCL_PREFIX" ]]; then
+    candidates+=("$LWRCL_PREFIX")
+  fi
+  if [[ -n "$CPP_DEP_PREFIXES" ]]; then
+    local extra_prefixes=()
+    IFS=: read -r -a extra_prefixes <<< "$CPP_DEP_PREFIXES"
+    candidates+=("${extra_prefixes[@]}")
+  fi
+  candidates+=(
+    "/opt/fast-dds-libs"
+    "/opt/fast-dds"
+  )
+
+  local copied=0
+  local seen=":"
+  for prefix in "${candidates[@]}"; do
+    [[ -n "$prefix" && -d "$prefix" ]] || continue
+    local resolved
+    resolved="$(cd "$prefix" && pwd)"
+    case "$seen" in
+      *":$resolved:"*) continue ;;
+    esac
+    seen="${seen}${resolved}:"
+
+    echo "Bundling C++ dependency prefix: $resolved"
+    for subdir in include lib share bin tools; do
+      if [[ -e "$resolved/$subdir" ]]; then
+        mkdir -p "$target/$subdir"
+        cp -a "$resolved/$subdir/." "$target/$subdir/"
+        copied=1
+      fi
+    done
+  done
+
+  if [[ "$copied" -eq 0 ]]; then
+    echo "WARNING: no C++ dependency prefixes found. C++ custom nodes will require external lwrcl/FastDDS setup." >&2
+    "$PYTHON_BIN" - "$target" <<'PY'
+from pathlib import Path
+import shutil
+import sys
+
+target = Path(sys.argv[1])
+if target.exists():
+    shutil.rmtree(target)
+PY
+    return 0
+  fi
+  if [[ ! -f "$target/include/lwrcl.hpp" ]] || ! compgen -G "$target/lib/liblwrcl*" >/dev/null; then
+    echo "WARNING: bundled C++ prefix does not contain lwrcl.hpp and liblwrcl*." >&2
+    echo "Set LWRCL_PREFIX=/path/to/lwrcl/install or CPP_DEP_PREFIXES=/path/one:/path/two and rebuild." >&2
+  fi
+}
+
 if [[ -z "${PYTHON_BIN:-}" ]]; then
   for _candidate in \
     "${VIRTUAL_ENV:-}/bin/python" \
@@ -155,9 +224,16 @@ fi
 
 rm -rf build dist dist-electron
 
+CPP_BUNDLE_PREFIX="$ROOT_DIR/.build_cpp_deps/lwrcl_cpp"
+copy_cpp_dependency_prefixes "$CPP_BUNDLE_PREFIX"
+
 UV_EXTRA_ARGS=()
 if [[ -n "$UV_BIN" && -x "$UV_BIN" ]]; then
   UV_EXTRA_ARGS+=("--add-binary" "${UV_BIN}:.")
+fi
+CPP_EXTRA_ARGS=()
+if [[ -d "$CPP_BUNDLE_PREFIX" ]]; then
+  CPP_EXTRA_ARGS+=("--add-data" "${CPP_BUNDLE_PREFIX}:lwrcl_cpp")
 fi
 
 "$PYTHON_BIN" -m PyInstaller \
@@ -168,6 +244,7 @@ fi
   --collect-all lwrclpy \
   --collect-all rclpy \
   --collect-all fastdds \
+  --collect-all cmake \
   --collect-all mcap \
   --collect-all mcap_ros2 \
   --hidden-import cv2 \
@@ -201,6 +278,7 @@ fi
   --exclude-module PySide2 \
   --exclude-module PySide6 \
   "${UV_EXTRA_ARGS[@]}" \
+  "${CPP_EXTRA_ARGS[@]}" \
   --add-data "lwrclpy_web_node_editor/static:lwrclpy_web_node_editor/static" \
   --add-data "lwrclpy_web_node_editor/node_worker.py:lwrclpy_web_node_editor" \
   --add-data "lwrclpy_web_node_editor/video_dds_worker.py:lwrclpy_web_node_editor" \

@@ -144,13 +144,38 @@ jobs:
         run: |
           & $env:PYTHON_BIN scripts\install_lwrclpy.py
 
+      - name: Build lwrcl C++ dependency prefix
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        run: |
+          lwrcl_prefix="$PWD/.build_cpp_prefix/lwrcl"
+          dds_prefix="$PWD/.build_cpp_prefix/fastdds"
+          echo "LWRCL_PREFIX=$lwrcl_prefix" >> "$GITHUB_ENV"
+          echo "DDS_PREFIX=$dds_prefix" >> "$GITHUB_ENV"
+          scripts/setup_lwrcl_cpp_env.sh \
+            --prefix "$lwrcl_prefix" \
+            --dds-prefix "$dds_prefix"
+
       - name: Build Linux standalone app
         if: runner.os == 'Linux'
         run: scripts/build_linux_standalone.sh
 
+      - name: Verify Linux standalone bundle
+        if: runner.os == 'Linux'
+        run: |
+          "$PYTHON_BIN" scripts/verify_standalone_bundle.py \
+            dist/lwrclpy-web-node-editor \
+            --require-cpp-prefix
+
       - name: Build macOS standalone app
         if: runner.os == 'macOS'
         run: scripts/build_macos_standalone.sh
+
+      - name: Verify macOS standalone backend bundle
+        if: runner.os == 'macOS'
+        run: |
+          "$PYTHON_BIN" scripts/verify_standalone_bundle.py \
+            dist/lwrclpy-web-node-editor-server \
+            --require-cpp-prefix
 
       - name: Notarize macOS app
         if: runner.os == 'macOS'
@@ -186,6 +211,10 @@ jobs:
       - name: Build Windows standalone app
         if: runner.os == 'Windows'
         run: powershell -ExecutionPolicy Bypass -File scripts\build_windows_standalone.ps1
+
+      - name: Verify Windows standalone bundle
+        if: runner.os == 'Windows'
+        run: '& $env:PYTHON_BIN scripts\verify_standalone_bundle.py dist\lwrclpy-web-node-editor'
 
       - name: Smoke test Windows backend imports
         if: runner.os == 'Windows'

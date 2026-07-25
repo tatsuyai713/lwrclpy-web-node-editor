@@ -80,6 +80,56 @@ if (Test-Path dist) { Remove-Item dist -Recurse -Force }
 if (Test-Path dist-electron) { Remove-Item dist-electron -Recurse -Force }
 
 $BackendName = "$AppName-server"
+$CppBundlePrefix = Join-Path $RootDir ".build_cpp_deps\lwrcl_cpp"
+
+function Copy-CppDependencyPrefixes {
+  param([Parameter(Mandatory = $true)][string]$Target)
+
+  if (Test-Path $Target) { Remove-Item $Target -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path $Target | Out-Null
+
+  $candidates = @()
+  if ($env:LWRCL_PREFIX) { $candidates += $env:LWRCL_PREFIX }
+  if ($env:CPP_DEP_PREFIXES) {
+    $candidates += ($env:CPP_DEP_PREFIXES -split [IO.Path]::PathSeparator)
+  }
+  $candidates += @(
+    "C:\opt\fast-dds-libs",
+    "C:\opt\fast-dds",
+    "C:\lwrcl\fast-dds-libs",
+    "C:\lwrcl\fast-dds"
+  )
+
+  $seen = @{}
+  $copied = $false
+  foreach ($prefix in $candidates) {
+    if (-not $prefix -or -not (Test-Path $prefix)) { continue }
+    $resolved = (Resolve-Path $prefix).Path
+    if ($seen.ContainsKey($resolved)) { continue }
+    $seen[$resolved] = $true
+    Write-Host "Bundling C++ dependency prefix: $resolved"
+    foreach ($subdir in @("include", "lib", "share", "bin", "tools")) {
+      $source = Join-Path $resolved $subdir
+      if (Test-Path $source) {
+        $dest = Join-Path $Target $subdir
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        Copy-Item -Path (Join-Path $source "*") -Destination $dest -Recurse -Force
+        $copied = $true
+      }
+    }
+  }
+
+  $header = Join-Path $Target "include\lwrcl.hpp"
+  $libs = Get-ChildItem -Path (Join-Path $Target "lib") -Filter "*lwrcl*" -ErrorAction SilentlyContinue
+  if (-not $copied) {
+    Write-Warning "No C++ dependency prefixes found. C++ custom nodes will require external lwrcl/FastDDS setup."
+    if (Test-Path $Target) { Remove-Item $Target -Recurse -Force }
+  } elseif (-not (Test-Path $header) -or -not $libs) {
+    Write-Warning "Bundled C++ prefix does not contain lwrcl.hpp and lwrcl libraries. Set LWRCL_PREFIX or CPP_DEP_PREFIXES and rebuild."
+  }
+}
+
+Copy-CppDependencyPrefixes -Target $CppBundlePrefix
 
 $Args = @(
   "--noconfirm",
@@ -89,6 +139,7 @@ $Args = @(
   "--collect-all", "lwrclpy",
   "--collect-all", "rclpy",
   "--collect-all", "fastdds",
+  "--collect-all", "cmake",
   "--collect-all", "mcap",
   "--collect-all", "mcap_ros2",
   "--hidden-import", "yaml",
@@ -120,6 +171,9 @@ if (-not $IsArm64) {
 
 if ($UvBin) {
   $Args = @("--add-binary", "$UvBin;.") + $Args
+}
+if (Test-Path $CppBundlePrefix) {
+  $Args = @("--add-data", "$CppBundlePrefix;lwrcl_cpp") + $Args
 }
 
 Invoke-Checked -FilePath $PythonBin -Arguments (@("-m", "PyInstaller") + $Args)
