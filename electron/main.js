@@ -19,6 +19,11 @@ let extractedBackendDir = null;
 let backendExitError = null;
 let backendLog = '';
 
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('no-sandbox');
+  app.commandLine.appendSwitch('disable-setuid-sandbox');
+}
+
 if (USE_BACKEND_PROXY) {
   protocol.registerSchemesAsPrivileged([
     {
