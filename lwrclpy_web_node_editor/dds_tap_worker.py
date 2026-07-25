@@ -42,8 +42,9 @@ def _configure_fastdds_transport(config: dict[str, Any]) -> None:
         )
 
 
-def _disable_lwrclpy_side_channels() -> None:
-    if os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS") == "1":
+def _disable_lwrclpy_side_channels(config: dict[str, Any]) -> None:
+    setting = os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS", "").strip().lower()
+    if setting not in {"0", "false", "no", "off"}:
         return
     try:
         import lwrclpy.node as lwrclpy_node
@@ -250,6 +251,11 @@ def _bytes_field(msg: Any, key: str) -> Any:
         except Exception:
             pass
     return _field(msg, key)
+
+
+def _is_shared_memory_field(msg: Any, key: str) -> bool:
+    value = _field(msg, key)
+    return bool(getattr(value, "is_shared_memory", False))
 
 
 class DdsTap:
@@ -671,6 +677,7 @@ class DdsTap:
                 "ddsFormat": dds_format,
                 "width": source_width,
                 "height": source_height,
+                "sharedMemory": bool(status.get("sharedMemory")),
                 "previewWidth": preview_width,
                 "previewHeight": preview_height,
                 "frameSeq": seq,
@@ -752,6 +759,7 @@ class DdsTap:
             if data is None:
                 return None
             format_text = str(_field(msg, "format") or "")
+            shared_memory = _is_shared_memory_field(msg, "data")
             return _bytes_payload(data), {
                 "mode": self.mode,
                 "topic": self.topic,
@@ -759,6 +767,7 @@ class DdsTap:
                 "encoding": "png" if "png" in format_text.lower() else "jpeg",
                 "width": _format_int(format_text, "width") or 0,
                 "height": _format_int(format_text, "height") or 0,
+                "sharedMemory": shared_memory,
             }
         width = int(_field(msg, "width") or 0)
         height = int(_field(msg, "height") or 0)
@@ -766,6 +775,7 @@ class DdsTap:
         data = _bytes_field(msg, "data")
         if width <= 0 or height <= 0 or data is None:
             return None
+        shared_memory = _is_shared_memory_field(msg, "data")
         return _bytes_payload(data), {
             "mode": self.mode,
             "topic": self.topic,
@@ -773,6 +783,7 @@ class DdsTap:
             "encoding": encoding,
             "width": width,
             "height": height,
+            "sharedMemory": shared_memory,
         }
 
 
@@ -1084,7 +1095,7 @@ def main() -> int:
     _write_json(tap.status_path, {"running": True, "mode": tap.mode, "topic": tap.topic, "dataType": tap.data_type, "hz": 0.0, "count": 0})
 
     import rclpy
-    _disable_lwrclpy_side_channels()
+    _disable_lwrclpy_side_channels(config)
 
     if not rclpy.ok():
         rclpy.init(args=None)

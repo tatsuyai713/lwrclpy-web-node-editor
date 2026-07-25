@@ -40,8 +40,9 @@ def _configure_fastdds_transport(config: dict[str, Any]) -> None:
         )
 
 
-def _disable_lwrclpy_side_channels() -> None:
-    if os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS") == "1":
+def _disable_lwrclpy_side_channels(config: dict[str, Any]) -> None:
+    setting = os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS", "").strip().lower()
+    if setting not in {"0", "false", "no", "off"}:
         return
     try:
         import lwrclpy.node as lwrclpy_node
@@ -638,7 +639,7 @@ def main() -> int:
         _ensure_mcap_dependencies()
         from mcap_ros2.writer import Writer as McapWriter
         import rclpy
-        _disable_lwrclpy_side_channels()
+        _disable_lwrclpy_side_channels(config)
         from rclpy.executors import MultiThreadedExecutor
         try:
             from lwrclpy.message_utils import expose_callable_fields

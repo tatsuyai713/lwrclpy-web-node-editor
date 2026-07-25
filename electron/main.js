@@ -411,6 +411,15 @@ async function createWindow() {
   window.on('closed', () => {
     stopBackend();
   });
+  try {
+    await window.webContents.session.clearCache();
+    await window.webContents.session.clearStorageData({
+      storages: ['cachestorage', 'serviceworkers'],
+    });
+    appendStartupLog('Renderer HTTP cache cleared');
+  } catch (error) {
+    appendStartupLog(`Renderer cache clear failed: ${error.message}`);
+  }
   const url = rendererUrl();
   appendStartupLog(`Loading renderer URL: ${url}`);
   await loadUrlWithRetry(window, url, 30000);

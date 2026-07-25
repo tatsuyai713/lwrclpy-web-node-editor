@@ -33,8 +33,9 @@ def _configure_fastdds_transport(config: dict[str, Any]) -> None:
         )
 
 
-def _disable_lwrclpy_side_channels() -> None:
-    if os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS") == "1":
+def _disable_lwrclpy_side_channels(config: dict[str, Any]) -> None:
+    setting = os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS", "").strip().lower()
+    if setting not in {"0", "false", "no", "off"}:
         return
     try:
         import lwrclpy.node as lwrclpy_node
@@ -52,6 +53,14 @@ def _disable_lwrclpy_side_channels() -> None:
                 setattr(node_cls, name, lambda self, *args, **kwargs: None)
     except Exception:
         pass
+
+
+def _create_publisher(node: Any, data_type: str, topic: str, config: dict[str, Any], output_id: str = "out1") -> Any:
+    return node.create_publisher(
+        _import_type_class(data_type),
+        topic,
+        _topic_qos(data_type, bool(config.get("externalDdsCompatible")), topic),
+    )
 
 
 def _dependency_site_dir() -> Path:
@@ -728,15 +737,11 @@ def _run_image_input(config: dict[str, Any], publisher: Any) -> None:
         count += 1
         _write_status(status_path, running=True, published=count, status=f"{image.get('width', '?')} x {image.get('height', '?')} / {mode}")
         if mode != "rate":
-            for _ in range(9):
-                if not RUNNING:
-                    break
-                time.sleep(0.1)
+            while RUNNING:
+                time.sleep(1.0)
                 publisher.publish(_coerce_message(data_type, image))
                 count += 1
                 _write_status(status_path, running=True, published=count, status=f"{image.get('width', '?')} x {image.get('height', '?')} / {mode}")
-            while RUNNING:
-                time.sleep(0.1)
             break
         time.sleep(1.0 / publish_hz)
 
@@ -919,7 +924,7 @@ def main() -> int:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     _configure_fastdds_transport(config)
     import rclpy
-    _disable_lwrclpy_side_channels()
+    _disable_lwrclpy_side_channels(config)
 
     if not rclpy.ok():
         rclpy.init(args=None)
@@ -938,24 +943,21 @@ def main() -> int:
                 data_type = str(output.get("dataType") or "")
                 if not data_type:
                     continue
-                publishers[str(output.get("id"))] = node.create_publisher(
-                    _import_type_class(data_type),
-                    str(topics[0]),
-                    _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(topics[0])),
-                )
+                output_id = str(output.get("id"))
+                publishers[output_id] = _create_publisher(node, data_type, str(topics[0]), config, output_id)
             _wait_for_expected_subscriptions(config, publishers, Path(config["statusPath"]))
             _run_mcap_input(config, publishers)
         else:
             data_type = str(config["dataType"])
             if config.get("toolType") == "function_generator":
                 _write_status(Path(config["statusPath"]), running=True, status="creating publisher")
-                publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                publisher = _create_publisher(node, data_type, str(config["topic"]), config)
                 _write_status(Path(config["statusPath"]), running=True, status="publisher ready")
                 _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_function_generator(config, publisher)
             elif config.get("toolType") == "interactive_text_input":
                 _write_status(Path(config["statusPath"]), running=True, status="creating publisher")
-                publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                publisher = _create_publisher(node, data_type, str(config["topic"]), config)
                 _write_status(Path(config["statusPath"]), running=True, status="publisher ready")
                 _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_interactive_text_input(config_path, config, publisher)
@@ -964,13 +966,13 @@ def main() -> int:
                 _run_urdf_static_tf(config, node)
             elif config.get("toolType") == "image_file_input":
                 _write_status(Path(config["statusPath"]), running=True, status="creating publisher")
-                publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                publisher = _create_publisher(node, data_type, str(config["topic"]), config)
                 _write_status(Path(config["statusPath"]), running=True, status="publisher ready")
                 _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_image_input(config, publisher)
             elif config.get("toolType") == "video_file_input":
                 _write_status(Path(config["statusPath"]), running=True, status="creating publisher")
-                publisher = node.create_publisher(_import_type_class(data_type), str(config["topic"]), _topic_qos(data_type, bool(config.get("externalDdsCompatible")), str(config["topic"])))
+                publisher = _create_publisher(node, data_type, str(config["topic"]), config)
                 _write_status(Path(config["statusPath"]), running=True, status="publisher ready")
                 _wait_for_expected_subscriptions(config, {"out1": publisher}, Path(config["statusPath"]))
                 _run_video_input(config, publisher)

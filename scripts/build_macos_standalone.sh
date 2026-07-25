@@ -339,6 +339,40 @@ ditto -c -k --sequesterRsrc --keepParent "$BACKEND_DIR" "$BACKEND_ZIP"
 ELECTRON_VERSION_PINNED="${ELECTRON_VERSION:-36.9.5}"
 ELECTRON_PACKAGER_VERSION_PINNED="${ELECTRON_PACKAGER_VERSION:-20.0.3}"
 npm install --prefix electron --no-save "electron@${ELECTRON_VERSION_PINNED}" "@electron/packager@${ELECTRON_PACKAGER_VERSION_PINNED}" extract-zip@latest
+if ! node -e "require('./electron/node_modules/electron')" >/dev/null 2>&1; then
+  echo "Electron binary is missing; running Electron installer explicitly."
+  env -u ELECTRON_RUN_AS_NODE node electron/node_modules/electron/install.js
+fi
+if ! node -e "require('./electron/node_modules/electron')" >/dev/null 2>&1; then
+  echo "Electron installer did not produce a runnable binary; downloading Electron directly."
+  env -u ELECTRON_RUN_AS_NODE node --input-type=module <<'JS'
+import { createRequire } from 'module';
+import childProcess from 'child_process';
+import fs from 'fs';
+import path from 'path';
+const require = createRequire(import.meta.url);
+const { downloadArtifact } = require('./electron/node_modules/electron/node_modules/@electron/get');
+const electronDir = path.resolve('electron/node_modules/electron');
+const version = require('./electron/node_modules/electron/package.json').version;
+try {
+  fs.rmSync(path.join(electronDir, 'dist'), { recursive: true, force: true });
+  fs.rmSync(path.join(electronDir, 'path.txt'), { force: true });
+  fs.mkdirSync(path.join(electronDir, 'dist'), { recursive: true });
+  const zipPath = await downloadArtifact({
+    version,
+    artifactName: 'electron',
+    platform: 'darwin',
+    arch: 'arm64',
+  });
+  childProcess.execFileSync('ditto', ['-x', '-k', zipPath, path.join(electronDir, 'dist')], { stdio: 'inherit' });
+  fs.writeFileSync(path.join(electronDir, 'path.txt'), 'Electron.app/Contents/MacOS/Electron');
+} catch (error) {
+  console.error(error && error.stack ? error.stack : String(error));
+  process.exit(1);
+}
+JS
+fi
+node -e "require('./electron/node_modules/electron')" >/dev/null
 ELECTRON_VERSION="$(node -p "require('./electron/node_modules/electron/package.json').version")"
 electron/node_modules/.bin/electron-packager \
   electron \

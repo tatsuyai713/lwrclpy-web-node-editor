@@ -36,8 +36,9 @@ def _configure_fastdds_transport(config: dict[str, Any]) -> None:
         )
 
 
-def _disable_lwrclpy_side_channels() -> None:
-    if os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS") == "1":
+def _disable_lwrclpy_side_channels(config: dict[str, Any]) -> None:
+    setting = os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS", "").strip().lower()
+    if setting not in {"0", "false", "no", "off"}:
         return
     try:
         import lwrclpy.node as lwrclpy_node
@@ -606,7 +607,7 @@ def main() -> int:
         import rclpy as _rclpy
 
         rclpy = _rclpy
-        _disable_lwrclpy_side_channels()
+        _disable_lwrclpy_side_channels(config)
         if not rclpy.ok():
             rclpy.init(args=None)
         _write_status(status_path, running=True, phase="create_node", error="", videoPath=str(video_path))

@@ -12,7 +12,7 @@ import urllib.request
 from pathlib import Path
 
 from .runtime_exec import configure_local_lwrclpy_wheel, local_lwrclpy_wheel
-from .server import _server_lock_path, cleanup_framework_processes
+from .server import _server_lock_path, cleanup_framework_processes, cleanup_server_processes
 
 
 def _find_free_port(host: str) -> int:
@@ -158,6 +158,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     port = args.port if int(args.port) > 0 else _find_free_port(args.host)
+    server_cleanup = cleanup_server_processes(force=True)
+    server_killed_count = len(server_cleanup.get("killed", []))
+    if server_killed_count:
+        print(f"Cleaned up {server_killed_count} stale lwrclpy Web Node Editor server process(es).")
+
     startup_cleanup = cleanup_framework_processes(force=True)
     killed_count = len(startup_cleanup.get("killed", []))
     if killed_count:

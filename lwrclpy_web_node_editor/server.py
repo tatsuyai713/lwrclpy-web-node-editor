@@ -1695,6 +1695,40 @@ def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
     return {"killed": killed, "failed": failed}
 
 
+def cleanup_server_processes(force: bool = True) -> dict[str, list[int]]:
+    targets = _framework_server_pids()
+    killed: list[int] = []
+    failed: list[int] = []
+    for pid in sorted(targets):
+        if pid == os.getpid():
+            continue
+        try:
+            _signal_process_tree(pid, force=force)
+            killed.append(pid)
+        except ProcessLookupError:
+            continue
+        except Exception:
+            failed.append(pid)
+    deadline = time.time() + 2.0
+    while time.time() < deadline and any(_pid_alive(pid) for pid in killed):
+        time.sleep(0.05)
+    for pid in list(killed):
+        if pid == os.getpid() or not _pid_alive(pid):
+            continue
+        try:
+            _signal_process_tree(pid, force=True)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            if pid not in failed:
+                failed.append(pid)
+    try:
+        _server_lock_path().unlink(missing_ok=True)
+    except Exception:
+        pass
+    return {"killed": killed, "failed": failed}
+
+
 def _signal_process_tree(pid: int, force: bool) -> None:
     if os.name == "nt":
         if force:
@@ -1711,7 +1745,7 @@ def _signal_process_tree(pid: int, force: bool) -> None:
     try:
         os.killpg(pid, sig)
     except ProcessLookupError:
-        raise
+        os.kill(pid, sig)
     except Exception:
         os.kill(pid, sig)
 
@@ -1720,6 +1754,19 @@ def _framework_worker_pids() -> set[int]:
     pids: set[int] = set()
     pids.update(_pid_file_pids())
     pids.update(_command_line_worker_pids())
+    return pids
+
+
+def _framework_server_pids() -> set[int]:
+    pids: set[int] = set()
+    try:
+        payload = json.loads(_server_lock_path().read_text(encoding="utf-8"))
+        pid = int(payload.get("pid") or 0)
+        if pid > 0:
+            pids.add(pid)
+    except Exception:
+        pass
+    pids.update(_command_line_server_pids())
     return pids
 
 
@@ -1771,9 +1818,85 @@ def _command_line_worker_pids() -> set[int]:
     return pids
 
 
+def _command_line_server_pids() -> set[int]:
+    if os.name == "nt":
+        return _windows_command_line_server_pids()
+    try:
+        result = subprocess.run(["ps", "-eo", "pid=,command="], check=True, capture_output=True, text=True)
+    except Exception:
+        return set()
+    pids: set[int] = set()
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid_text, _, command = line.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue
+        if _is_framework_server_command(command):
+            pids.add(pid)
+    return pids
+
+
+def _windows_command_line_server_pids() -> set[int]:
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                (
+                    "Get-CimInstance Win32_Process | "
+                    "Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.Contains('--server') -and "
+                    "($_.CommandLine.Contains('lwrclpy-web-node-editor') -or "
+                    "$_.CommandLine.Contains('lwrclpy_web_node_editor') -or $_.CommandLine.Contains('main.py')) } | "
+                    "ForEach-Object { $_.ProcessId }"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return set()
+    pids: set[int] = set()
+    for line in result.stdout.splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid != os.getpid():
+            pids.add(pid)
+    return pids
+
+
 def _is_framework_worker_command(command: str) -> bool:
-    worker_dir = str(WORKER_DIR)
-    return any(token in command for token in framework_worker_tokens()) and worker_dir in command
+    worker_names = (
+        "node_worker.py",
+        "video_dds_worker.py",
+        "dds_tap_worker.py",
+        "builtin_source_worker.py",
+        "mcap_record_worker.py",
+    )
+    return (
+        ".node_workers" in command
+        and (any(token in command for token in framework_worker_tokens()) or any(name in command for name in worker_names))
+    )
+
+
+def _is_framework_server_command(command: str) -> bool:
+    if "--server" not in command:
+        return False
+    markers = (
+        "lwrclpy-web-node-editor",
+        "lwrclpy_web_node_editor",
+        str(Path(__file__).resolve().parents[1] / "main.py"),
+    )
+    return any(marker in command for marker in markers)
 
 
 def _cleanup_pid_files() -> None:
@@ -1939,7 +2062,11 @@ class ContinuousGraphRunner:
         self._pending_param_updates = []
         if thread is not None and thread.is_alive():
             self._stop_event.set()
-            thread.join(timeout=1.0)
+            self._lock.release()
+            try:
+                thread.join(timeout=1.0)
+            finally:
+                self._lock.acquire()
             if thread.is_alive():
                 self._error = "runner stop timed out"
             else:
@@ -2515,6 +2642,9 @@ class Handler(BaseHTTPRequestHandler):
         data = target.read_bytes()
         self.send_response(200)
         self.send_header("content-type", mimetypes.guess_type(str(target))[0] or "application/octet-stream")
+        self.send_header("cache-control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("pragma", "no-cache")
+        self.send_header("expires", "0")
         self.send_header("content-length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -2534,6 +2664,9 @@ class Handler(BaseHTTPRequestHandler):
         data = target.read_bytes()
         self.send_response(200)
         self.send_header("content-type", mimetypes.guess_type(str(target))[0] or "application/octet-stream")
+        self.send_header("cache-control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("pragma", "no-cache")
+        self.send_header("expires", "0")
         self.send_header("content-length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -2567,6 +2700,10 @@ def main(argv: list[str] | None = None):
     killed_count = len(startup_cleanup.get("killed", []))
     if killed_count:
         print(f"Cleaned up {killed_count} stale lwrclpy Web Node Editor worker process(es).")
+    server_cleanup = cleanup_server_processes(force=True)
+    server_killed_count = len(server_cleanup.get("killed", []))
+    if server_killed_count:
+        print(f"Cleaned up {server_killed_count} stale lwrclpy Web Node Editor server process(es).")
     lock_path, lock_acquired = _acquire_server_lock(args.host, args.port)
     if not lock_acquired:
         print(

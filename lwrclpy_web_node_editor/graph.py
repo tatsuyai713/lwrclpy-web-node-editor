@@ -92,6 +92,7 @@ def _discover_message_names(kind_dir: Path) -> set[str]:
 
 LWRCLPY_TYPE_TREE = discover_lwrclpy_types()
 DEFAULT_RUN_HZ = 60.0
+DEFAULT_LWRCLPY_AUTO_SHM_THRESHOLD = 4096
 LWRCLPY_INSTALL_MARKER = "github-latest-wheel"
 
 IMAGE_CROP_RESIZE_IMPORT_CODE = r'''
@@ -1376,6 +1377,7 @@ class CustomLwrclNodeInstance:
     def _worker_env(self) -> dict[str, str]:
         env = dict(os.environ)
         env.pop("__PYVENV_LAUNCHER__", None)
+        env.setdefault("LWRCLPY_AUTO_SHM_THRESHOLD", str(DEFAULT_LWRCLPY_AUTO_SHM_THRESHOLD))
         if self.env_site_packages:
             env["LWRCLPY_EXTRA_SITE_PACKAGES"] = str(self.env_site_packages)
             existing = env.get("PYTHONPATH", "")
@@ -1427,6 +1429,7 @@ class CustomLwrclNodeInstance:
         if output is None:
             raise RuntimeError("Video Input has no DDS output topic")
         publish_hz = self._video_publish_hz()
+        stream_key = hashlib.sha1(repr(self._video_worker_signature()).encode("utf-8")).hexdigest()[:8]
         return {
             "nodeId": self.config.id,
             "videoPath": str(self.config.params.get("videoPath")),
@@ -1439,7 +1442,7 @@ class CustomLwrclNodeInstance:
             "frameSkip": self._video_frame_skip(),
             "statusPath": str(status_path),
             "framePath": str(frame_path),
-            "streamName": f"ipn_{self.config.id}_video_{os.getpid()}_{hashlib.sha1(repr(self._video_worker_signature()).encode('utf-8')).hexdigest()[:12]}",
+            "streamName": f"ipn{os.getpid() % 10000:04x}{stream_key}",
             "streamSize": (640 * 2048 * 4) + 4096,
             "enableDdsPublish": True,
             "externalDdsCompatible": bool(self.config.params.get("_externalDdsCompatible")),
@@ -1755,6 +1758,12 @@ class CustomLwrclNodeInstance:
             "kind": "image",
             "frameRef": frame_ref,
             "status": f"{width} x {height} {dds_format}" if width and height else dds_format,
+            "sharedMemory": bool(status.get("sharedMemory")),
+            "ddsEncoding": dds_encoding,
+            "frameEncoding": frame_encoding,
+            "matchedPublishers": int(status.get("matchedPublishers") or 0),
+            "count": int(status.get("count") or 0),
+            "hz": float(status.get("hz") or 0.0),
         }
 
     def _string_view_params(self) -> tuple[str, int]:
@@ -3216,7 +3225,10 @@ class GraphRuntime:
             and any(port.topics for port in config.outputs)
         ]
         for config in source_configs:
-            status_path = Path.cwd() / ".node_workers" / f"{config.id}.source.status.json"
+            if config.tool_type == "video_file_input":
+                status_path = Path.cwd() / ".node_workers" / f"{config.id}.video.status.json"
+            else:
+                status_path = Path.cwd() / ".node_workers" / f"{config.id}.source.status.json"
             if not status_path.exists():
                 return False
             try:

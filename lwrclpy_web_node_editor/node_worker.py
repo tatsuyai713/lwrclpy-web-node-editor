@@ -46,8 +46,9 @@ def configure_fastdds_transport(config: dict[str, Any]) -> None:
         )
 
 
-def disable_lwrclpy_side_channels() -> None:
-    if os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS") == "1":
+def disable_lwrclpy_side_channels(config: dict[str, Any]) -> None:
+    setting = os.environ.get("LWRCLPY_WEB_ENABLE_LWRCLPY_SIDE_CHANNELS", "").strip().lower()
+    if setting not in {"0", "false", "no", "off"}:
         return
     try:
         import lwrclpy.node as lwrclpy_node
@@ -163,13 +164,11 @@ class LwrclpyWorkerNode:
             type_cls = import_type_class(output["dataType"])
             for topic in self.port_topics.get("outputs", {}).get(output["id"], []):
                 if split_kind(output["dataType"]) == "msg":
-                    self.publishers.setdefault(output["id"], []).append(
-                        self.node.create_publisher(
-                            type_cls,
-                            topic,
-                            publisher_qos(output["dataType"], bool(self.config.get("externalDdsCompatible")), topic),
-                        )
-                    )
+                    self.publishers.setdefault(output["id"], []).append(self.node.create_publisher(
+                        type_cls,
+                        topic,
+                        publisher_qos(output["dataType"], bool(self.config.get("externalDdsCompatible")), topic),
+                    ))
                 else:
                     self.clients.setdefault(output["id"], []).append(self.node.create_client(type_cls, topic))
         for input_port in self.node_config.get("inputs", []):
@@ -471,6 +470,8 @@ class LwrclpyWorkerNode:
             else:
                 item = self._message_field_value(value, key)
             result[key] = item
+        if all(key in result for key in ("height", "width", "encoding", "data")):
+            result["__lwrclpy_msg_ref"] = value
         return result
 
     def _message_field_value(self, message: Any, key: str) -> Any:
@@ -575,7 +576,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     config = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
     configure_fastdds_transport(config)
-    disable_lwrclpy_side_channels()
+    disable_lwrclpy_side_channels(config)
     worker = LwrclpyWorkerNode(config)
     try:
         while worker.rclpy.ok():
