@@ -422,8 +422,17 @@ async function createWindow() {
   }
   const url = rendererUrl();
   appendStartupLog(`Loading renderer URL: ${url}`);
-  await loadUrlWithRetry(window, url, 30000);
-  appendStartupLog(`Renderer loaded: ${url}`);
+  try {
+    await loadUrlWithRetry(window, url, 30000);
+    appendStartupLog(`Renderer loaded: ${url}`);
+  } catch (error) {
+    if (!USE_BACKEND_PROXY || !appUrl) {
+      throw error;
+    }
+    appendStartupLog(`Renderer proxy load failed, falling back to backend HTTP URL: ${error.message}`);
+    await loadUrlWithRetry(window, appUrl, 30000);
+    appendStartupLog(`Renderer loaded via backend HTTP URL: ${appUrl}`);
+  }
 }
 
 app.whenReady().then(() => {
