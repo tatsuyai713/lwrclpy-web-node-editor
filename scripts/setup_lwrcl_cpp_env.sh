@@ -7,8 +7,10 @@ LWRCL_REF="${LWRCL_REF:-latest}"
 LWRCL_BACKEND="${LWRCL_BACKEND:-fastdds}"
 LWRCL_PREFIX="${LWRCL_PREFIX:-}"
 DDS_PREFIX="${DDS_PREFIX:-}"
+FASTDDS_GEN_PREFIX="${FASTDDS_GEN_PREFIX:-}"
 
 INSTALL_FASTDDS=1
+INSTALL_FASTDDS_GEN=1
 BUILD_LIBRARIES=1
 BUILD_DATA_TYPES=1
 BUILD_LWRCL=1
@@ -28,15 +30,19 @@ Options:
   --backend NAME         DDS backend. Default: fastdds
   --prefix PATH          lwrcl install prefix. Default depends on backend.
   --dds-prefix PATH      DDS install prefix. Default depends on backend.
+  --fastdds-gen-prefix PATH
+                         Fast-DDS-Gen install prefix. Default: <dds-prefix>-gen
   --no-install           Build only, do not run install targets.
   --skip-fastdds         Do not run scripts/install_fast_dds.sh.
+  --skip-fastdds-gen     Do not run scripts/install_fast_dds_gen.sh.
   --skip-libraries       Do not run build_libraries.sh.
   --skip-data-types      Do not run build_data_types.sh.
   --skip-lwrcl           Do not run build_lwrcl.sh.
   -h, --help             Show this help.
 
 Environment variables with the same names are also supported:
-  LWRCL_REPO_URL, LWRCL_SOURCE_DIR, LWRCL_REF, LWRCL_BACKEND, LWRCL_PREFIX, DDS_PREFIX
+  LWRCL_REPO_URL, LWRCL_SOURCE_DIR, LWRCL_REF, LWRCL_BACKEND, LWRCL_PREFIX, DDS_PREFIX,
+  FASTDDS_GEN_PREFIX
 EOF
 }
 
@@ -66,12 +72,20 @@ while [[ $# -gt 0 ]]; do
       DDS_PREFIX="${2:?missing value for --dds-prefix}"
       shift 2
       ;;
+    --fastdds-gen-prefix)
+      FASTDDS_GEN_PREFIX="${2:?missing value for --fastdds-gen-prefix}"
+      shift 2
+      ;;
     --no-install)
       INSTALL_ACTION=""
       shift
       ;;
     --skip-fastdds)
       INSTALL_FASTDDS=0
+      shift
+      ;;
+    --skip-fastdds-gen)
+      INSTALL_FASTDDS_GEN=0
       shift
       ;;
     --skip-libraries)
@@ -208,6 +222,9 @@ fi
 if [[ -z "$DDS_PREFIX" ]]; then
   DDS_PREFIX="$(default_dds_prefix)"
 fi
+if [[ -z "$FASTDDS_GEN_PREFIX" ]]; then
+  FASTDDS_GEN_PREFIX="${DDS_PREFIX}-gen"
+fi
 
 mkdir -p "$(dirname "$LWRCL_SOURCE_DIR")"
 
@@ -237,6 +254,9 @@ echo "lwrcl source: $LWRCL_SOURCE_DIR"
 echo "backend: $LWRCL_BACKEND"
 echo "LWRCL_PREFIX: $LWRCL_PREFIX"
 echo "DDS_PREFIX: $DDS_PREFIX"
+if [[ "$LWRCL_BACKEND" == "fastdds" ]]; then
+  echo "FASTDDS_GEN_PREFIX: $FASTDDS_GEN_PREFIX"
+fi
 
 cd "$LWRCL_SOURCE_DIR"
 
@@ -244,18 +264,22 @@ if [[ "$LWRCL_BACKEND" == "fastdds" && "$INSTALL_FASTDDS" -eq 1 ]]; then
   DDS_PREFIX="$DDS_PREFIX" run_lwrcl_script "./scripts/install_fast_dds.sh" --prefix "$DDS_PREFIX"
 fi
 
+if [[ "$LWRCL_BACKEND" == "fastdds" && "$INSTALL_FASTDDS_GEN" -eq 1 ]]; then
+  FASTDDS_GEN_PREFIX="$FASTDDS_GEN_PREFIX" run_lwrcl_script "./scripts/install_fast_dds_gen.sh" --prefix "$FASTDDS_GEN_PREFIX"
+fi
+
 if [[ "$BUILD_LIBRARIES" -eq 1 ]]; then
-  LWRCL_PREFIX="$LWRCL_PREFIX" DDS_PREFIX="$DDS_PREFIX" run_lwrcl_script "./build_libraries.sh" "$LWRCL_BACKEND" ${INSTALL_ACTION:+"$INSTALL_ACTION"}
+  LWRCL_PREFIX="$LWRCL_PREFIX" DDS_PREFIX="$DDS_PREFIX" FASTDDS_GEN_PREFIX="$FASTDDS_GEN_PREFIX" run_lwrcl_script "./build_libraries.sh" "$LWRCL_BACKEND" ${INSTALL_ACTION:+"$INSTALL_ACTION"}
 fi
 
 if [[ "$BUILD_DATA_TYPES" -eq 1 ]]; then
-  LWRCL_PREFIX="$LWRCL_PREFIX" DDS_PREFIX="$DDS_PREFIX" run_lwrcl_script "./build_data_types.sh" "$LWRCL_BACKEND" ${INSTALL_ACTION:+"$INSTALL_ACTION"}
+  LWRCL_PREFIX="$LWRCL_PREFIX" DDS_PREFIX="$DDS_PREFIX" FASTDDS_GEN_PREFIX="$FASTDDS_GEN_PREFIX" run_lwrcl_script "./build_data_types.sh" "$LWRCL_BACKEND" ${INSTALL_ACTION:+"$INSTALL_ACTION"}
 fi
 
 if [[ "$BUILD_LWRCL" -eq 1 ]]; then
-  LWRCL_PREFIX="$LWRCL_PREFIX" DDS_PREFIX="$DDS_PREFIX" run_lwrcl_script "./build_lwrcl.sh" "$LWRCL_BACKEND" ${INSTALL_ACTION:+"$INSTALL_ACTION"}
+  LWRCL_PREFIX="$LWRCL_PREFIX" DDS_PREFIX="$DDS_PREFIX" FASTDDS_GEN_PREFIX="$FASTDDS_GEN_PREFIX" run_lwrcl_script "./build_lwrcl.sh" "$LWRCL_BACKEND" ${INSTALL_ACTION:+"$INSTALL_ACTION"}
 fi
 
 echo "lwrcl C++ environment is ready."
 echo "Use this prefix for App builds when needed:"
-echo "  LWRCL_PREFIX=$LWRCL_PREFIX DDS_PREFIX=$DDS_PREFIX scripts/build_macos_standalone.sh"
+echo "  LWRCL_PREFIX=$LWRCL_PREFIX DDS_PREFIX=$DDS_PREFIX FASTDDS_GEN_PREFIX=$FASTDDS_GEN_PREFIX scripts/build_macos_standalone.sh"

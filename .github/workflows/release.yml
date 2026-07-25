@@ -149,11 +149,15 @@ jobs:
         run: |
           lwrcl_prefix="$PWD/.build_cpp_prefix/lwrcl"
           dds_prefix="$PWD/.build_cpp_prefix/fastdds"
+          fastdds_gen_prefix="$PWD/.build_cpp_prefix/fastdds-gen"
           echo "LWRCL_PREFIX=$lwrcl_prefix" >> "$GITHUB_ENV"
           echo "DDS_PREFIX=$dds_prefix" >> "$GITHUB_ENV"
+          echo "FASTDDS_GEN_PREFIX=$fastdds_gen_prefix" >> "$GITHUB_ENV"
+          echo "CPP_DEP_PREFIXES=$dds_prefix" >> "$GITHUB_ENV"
           scripts/setup_lwrcl_cpp_env.sh \
             --prefix "$lwrcl_prefix" \
-            --dds-prefix "$dds_prefix"
+            --dds-prefix "$dds_prefix" \
+            --fastdds-gen-prefix "$fastdds_gen_prefix"
 
       - name: Build Linux standalone app
         if: runner.os == 'Linux'
