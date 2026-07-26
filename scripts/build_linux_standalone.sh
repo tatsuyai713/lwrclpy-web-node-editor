@@ -323,6 +323,14 @@ electron/node_modules/.bin/electron-packager \
 rm -rf "$ROOT_DIR/dist/$APP_NAME"
 mv "$ROOT_DIR/dist-electron/$APP_NAME-linux-$ELECTRON_ARCH" "$ROOT_DIR/dist/$APP_NAME"
 rm -rf "$ROOT_DIR/dist-electron"
+mv "$ROOT_DIR/dist/$APP_NAME/$APP_NAME" "$ROOT_DIR/dist/$APP_NAME/$APP_NAME.bin"
+cat > "$ROOT_DIR/dist/$APP_NAME/$APP_NAME" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+exec "\$HERE/$APP_NAME.bin" --no-sandbox --disable-setuid-sandbox "\$@"
+EOF
+chmod +x "$ROOT_DIR/dist/$APP_NAME/$APP_NAME"
 
 APP_DIR="$ROOT_DIR/dist/$APP_NAME.AppDir"
 rm -rf "$APP_DIR"
@@ -469,7 +477,7 @@ fi
 export UV_LINK_MODE="\${UV_LINK_MODE:-copy}"
 exec "\$APP_RUN" "\$@"
 exit 127
-\$MARKER
+__LWRCLPY_WEB_NODE_EDITOR_PAYLOAD_BELOW__
 EOF
 cat "$PAYLOAD_PATH" >> "$SELF_EXTRACTING_PATH"
 chmod +x "$SELF_EXTRACTING_PATH"
