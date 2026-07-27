@@ -35,6 +35,13 @@ def _prepend_to_sys_path(directory: "Path | None") -> None:
         sys.path.insert(0, s)
 
 
+def _remove_from_sys_path(directory: "Path | None") -> None:
+    if directory is None:
+        return
+    s = str(directory)
+    sys.path[:] = [entry for entry in sys.path if entry != s]
+
+
 def _prepend_extra_site_paths_from_env() -> None:
     raw = os.environ.get("LWRCLPY_EXTRA_SITE_PACKAGES", "").strip()
     if not raw:
@@ -46,10 +53,13 @@ def _prepend_extra_site_paths_from_env() -> None:
         _prepend_to_sys_path(Path(entry))
 
 
-# Prepend the user-local lwrclpy_site to sys.path before *any* package imports.
-# This runs for both the main process and every worker sub-process launched by
-# the frozen binary so that rclpy (and fastdds_python) resolve correctly.
-_prepend_to_sys_path(_frozen_site_dir())
+# Do not automatically prepend the writable lwrclpy_site in frozen mode.
+# Standalone builds already bundle lwrclpy/FastDDS, and a stale auto-updated
+# wheel can require a newer system libstdc++ than the target Linux provides.
+# lwrclpy_site is enabled later only when explicitly requested or when the
+# bundled runtime is not importable.
+if os.environ.get("LWRCLPY_USE_USER_SITE", "").strip().lower() in {"1", "true", "yes", "on"}:
+    _prepend_to_sys_path(_frozen_site_dir())
 _prepend_extra_site_paths_from_env()
 
 
@@ -185,16 +195,20 @@ def _prepare_standalone_runtime() -> None:
     # module load time when _frozen_site_dir() first ran).
     site_dir = home / "lwrclpy_site"
     site_dir.mkdir(parents=True, exist_ok=True)
-    _prepend_to_sys_path(site_dir)
     from lwrclpy_web_node_editor.runtime_exec import local_lwrclpy_wheel
 
     if local_lwrclpy_wheel() is not None:
         _auto_update_lwrclpy(site_dir)
+        _prepend_to_sys_path(site_dir)
         _prefer_lwrclpy_site_packages(site_dir)
+    elif _bundled_lwrclpy_is_available():
+        _remove_from_sys_path(site_dir)
     elif _has_lwrclpy_site_packages(site_dir):
+        _prepend_to_sys_path(site_dir)
         _prefer_lwrclpy_site_packages(site_dir)
-    elif not _bundled_lwrclpy_is_available():
+    else:
         _auto_update_lwrclpy(site_dir)
+        _prepend_to_sys_path(site_dir)
         _prefer_lwrclpy_site_packages(site_dir)
 
 
@@ -380,10 +394,8 @@ if __name__ == "__main__":
 
                     exit_code = int(desktop_app.desktop_import_check())
                 else:
-                    # Import server lazily, AFTER auto-update has installed lwrclpy into
-                    # lwrclpy_site and it has been prepended to sys.path. This ensures
-                    # that fastdds_python and other native extensions bundled inside the
-                    # latest lwrclpy wheel are importable when graph.py is first loaded.
+                    # Import server lazily, AFTER standalone runtime selection has chosen
+                    # bundled lwrclpy or an explicit/fallback lwrclpy_site install.
                     from lwrclpy_web_node_editor import server  # noqa: E402
                     if argv and argv[0] == "--desktop":
                         from lwrclpy_web_node_editor import desktop_app
