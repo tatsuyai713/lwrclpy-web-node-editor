@@ -53,12 +53,15 @@ def _prepend_extra_site_paths_from_env() -> None:
         _prepend_to_sys_path(Path(entry))
 
 
+def _use_user_lwrclpy_site() -> bool:
+    return os.environ.get("LWRCLPY_USE_USER_SITE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 # Do not automatically prepend the writable lwrclpy_site in frozen mode.
 # Standalone builds already bundle lwrclpy/FastDDS, and a stale auto-updated
 # wheel can require a newer system libstdc++ than the target Linux provides.
-# lwrclpy_site is enabled later only when explicitly requested or when the
-# bundled runtime is not importable.
-if os.environ.get("LWRCLPY_USE_USER_SITE", "").strip().lower() in {"1", "true", "yes", "on"}:
+# lwrclpy_site is enabled later only when explicitly requested.
+if _use_user_lwrclpy_site():
     _prepend_to_sys_path(_frozen_site_dir())
 _prepend_extra_site_paths_from_env()
 
@@ -201,15 +204,15 @@ def _prepare_standalone_runtime() -> None:
         _auto_update_lwrclpy(site_dir)
         _prepend_to_sys_path(site_dir)
         _prefer_lwrclpy_site_packages(site_dir)
-    elif _bundled_lwrclpy_is_available():
-        _remove_from_sys_path(site_dir)
-    elif _has_lwrclpy_site_packages(site_dir):
+    elif _use_user_lwrclpy_site():
         _prepend_to_sys_path(site_dir)
-        _prefer_lwrclpy_site_packages(site_dir)
+        if _has_lwrclpy_site_packages(site_dir):
+            _prefer_lwrclpy_site_packages(site_dir)
+        else:
+            _auto_update_lwrclpy(site_dir)
+            _prefer_lwrclpy_site_packages(site_dir)
     else:
-        _auto_update_lwrclpy(site_dir)
-        _prepend_to_sys_path(site_dir)
-        _prefer_lwrclpy_site_packages(site_dir)
+        _remove_from_sys_path(site_dir)
 
 
 def _configure_standalone_fastdds_profile() -> None:
