@@ -26,6 +26,8 @@ normalize_arch() {
   esac
 }
 
+BUILD_ARCH="$(normalize_arch "${APP_ARCH:-$(uname -m)}")"
+
 append_unique() {
   local value="$1"
   shift
@@ -199,7 +201,7 @@ if [[ -z "${PYTHON_BIN:-}" || ! -x "$PYTHON_BIN" ]]; then
 fi
 
 "$PYTHON_BIN" -m pip install --upgrade pip
-"$PYTHON_BIN" -m pip install --prefer-binary --progress-bar off -r requirements.txt pyinstaller
+"$PYTHON_BIN" -m pip install --prefer-binary --progress-bar off -r requirements.txt pyinstaller zstandard
 
 # Locate the uv binary to bundle with the frozen app so auto-update works
 # even when uv is not on the user's PATH at runtime.
@@ -289,6 +291,10 @@ fi
   --add-data ".app_settings/custom_nodes:custom_nodes" \
   --add-data "samples:samples" \
   main.py
+
+"$PYTHON_BIN" scripts/bundle_linux_cpp_runtime.py \
+  "$ROOT_DIR/dist/$BACKEND_NAME/_internal" \
+  --arch "$BUILD_ARCH"
 
 "$ROOT_DIR/dist/$BACKEND_NAME/$BACKEND_NAME" --server-import-check
 

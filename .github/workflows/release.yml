@@ -161,6 +161,8 @@ jobs:
 
       - name: Build Linux standalone app
         if: runner.os == 'Linux'
+        env:
+          APP_ARCH: ${{ matrix.package_arch }}
         run: scripts/build_linux_standalone.sh
 
       - name: Verify Linux standalone bundle
