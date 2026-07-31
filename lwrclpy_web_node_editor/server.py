@@ -1196,6 +1196,10 @@ def _build_cli_export_zip(payload: dict) -> tuple[str, bytes]:
                 archive.writestr(f"{node_dir}/src/{cpp_node['executable_name']}.cpp", _render_cpp_node_source(cpp_node))
         for source in _cli_package_runtime_files():
             archive.write(source, f"{root}/lwrclpy_web_node_editor/{source.name}")
+        installer = PROJECT_DIR / "scripts" / "install_lwrclpy.py"
+        if not installer.is_file():
+            raise FileNotFoundError(f"lwrclpy installer not found: {installer}")
+        archive.write(installer, f"{root}/scripts/install_lwrclpy.py")
         if wheel is not None and wheel.is_file():
             archive.write(wheel, f"{root}/wheels/{wheel.name}")
         archive.writestr(f"{root}/.gitignore", "venv/\n.venv/\n.node_envs/\n.node_workers/\n__pycache__/\n*.pyc\n")
