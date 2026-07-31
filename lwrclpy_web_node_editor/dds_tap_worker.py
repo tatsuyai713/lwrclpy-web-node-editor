@@ -302,6 +302,7 @@ class DdsTap:
         self._latest_seq = 0
         self._written_seq = 0
         self._last_saved_seq = 0
+        self._last_saved_path = ""
         self._latest_frame_status: dict[str, Any] = {}
         self._frame_condition = threading.Condition()
         self._frame_item: tuple[int, Any] | None = None
@@ -440,6 +441,11 @@ class DdsTap:
         }
         if self._last_error:
             payload["lastError"] = self._last_error
+        if self.mode == "save" and self._last_saved_path:
+            # The periodic status write runs far more often than a save, so it
+            # has to carry savedPath forward or the UI reports "No image to
+            # save" for images that were in fact written.
+            payload["savedPath"] = self._last_saved_path
         with self._lock:
             frame_status = dict(self._latest_frame_status)
         if frame_status:
@@ -739,6 +745,7 @@ class DdsTap:
                 return
             path.write_bytes(_bmp_bytes(width, height, _rgb_preview_bytes(data, encoding)))
         self._last_saved_seq = seq
+        self._last_saved_path = str(path)
         _write_json(
             self.status_path,
             {

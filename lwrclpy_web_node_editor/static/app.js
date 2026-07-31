@@ -73,21 +73,20 @@ const DEFAULT_CALLBACK_CODE = `# This callback runs when this input receives a R
 #   publish("out1", {"data": float(msg.data)})
 `;
 
-const DEFAULT_LOOP_CODE = `# Main Loop runs repeatedly while the graph is running.
-# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
-# without creating a busy loop.
-# Available:
-#   rclpy, node, rate, run_hz, loop_period, state, now
+const DEFAULT_LOOP_CODE = `# Main Loop is this node's own loop, like a hand-written rclpy node.
+# rclpy.spin(node) dispatches input callbacks and Timer Callbacks until
+# shutdown, so periodic work belongs in a Timer Callback.
+# Scope (see the reference under the editor for types):
+#   rclpy, node, rate, run_hz, loop_period, state, params, now
 #   latest(input_id), take(input_id), has_input(input_id)
 #   publish(output_id, value), log(...)
 #
-# Add periodic work between spin_once(...) and rate.sleep().
-rclpy.spin_once(node, timeout_sec=0.0)
-# Example:
-# if has_input("in1"):
-#     msg = latest("in1")
-#     publish("out1", msg)
-rate.sleep()
+# Write the loop yourself instead when you prefer an explicit tick:
+#   while rclpy.ok():
+#       rclpy.spin_once(node, timeout_sec=0.0)
+#       # periodic work
+#       rate.sleep()
+rclpy.spin(node)
 `;
 
 const DEFAULT_TIMER_CODE = `# This timer callback runs every periodSec seconds.
@@ -136,21 +135,24 @@ const DEFAULT_CPP_CALLBACK_CODE = `// This callback runs when this input receive
 //   out.data = msg.data;
 //   publish_out1(out);
 `;
-const DEFAULT_CPP_LOOP_CODE = `// Loop Code runs repeatedly while rclcpp::ok() is true.
-// Keep rclcpp::spin_some(node) and loop_rate.sleep() here to process
-// callbacks without creating a busy loop.
-// Available:
+const DEFAULT_CPP_LOOP_CODE = `// Loop Code is this node's own loop, like a hand-written rclcpp node.
+// rclcpp::spin_some(node) dispatches ready input callbacks and timers, and
+// loop_rate.sleep() holds Run Hz.
+// Scope (see the reference under the editor for types):
 //   node, loop_rate, now
 //   has_<input_id>(), latest_<input_id>()
 //   publish_<output_id>(message)
 //
-// Add periodic work between spin_some(...) and loop_rate.sleep().
-rclcpp::spin_some(node);
-// Example:
-//   if (has_in1()) {
-//     auto value = latest_in1()->data;
-//   }
-loop_rate.sleep();
+// For a callback-only node, replace the loop below with rclcpp::spin(node);
+while (rclcpp::ok()) {
+  rclcpp::spin_some(node);
+  // Periodic work goes here.
+  // Example:
+  //   if (has_in1()) {
+  //     auto value = latest_in1()->data;
+  //   }
+  loop_rate.sleep();
+}
 `;
 const DEFAULT_CPP_TIMER_CODE = `// This timer callback runs every periodSec seconds.
 // Write fixed-rate C++ processing here.
@@ -193,6 +195,126 @@ const DEFAULT_CPP_LINK_LIBRARIES_CODE = `# C++ libraries/options linked into thi
 # -lmy_library
 # /absolute/path/to/libfoo.a
 `;
+// Reference shown under each code editor: every name the runtime puts in scope,
+// its type, and what it holds. Keep this in step with node_worker.py (Python)
+// and cpp_codegen.py (C++).
+const PY_COMMON_SCOPE = [
+  ['node', 'lwrclpy.Node', 'This node. Use it for node APIs such as node.get_clock().'],
+  ['state', 'dict', 'Empty at startup and kept for the lifetime of the node. Use it for anything that must survive between calls.'],
+  ['params', 'dict', 'The Parameters JSON of this node. Every key is also available as a plain variable of the same name.'],
+  ['publish(output_id, value)', 'function', 'Sends value on the named output port. value can be a dict of message fields, e.g. {"data": 1.0}.'],
+  ['log(*values)', 'function', "Writes a line to this node's log panel. print(...) does the same."],
+];
+const PY_INPUT_ACCESS_SCOPE = [
+  ['has_input(input_id)', 'function -> bool', 'True while unread values are queued on that input.'],
+  ['latest(input_id, default=None)', 'function -> dict | None', 'Most recently received value. Does not consume it.'],
+  ['take(input_id, default=None)', 'function -> dict | None', 'Removes and returns the oldest queued value.'],
+  ['inputs', 'dict', 'Last received value per input id, as a snapshot taken before this call.'],
+];
+const MSG_ROW = [
+  'msg',
+  'dict',
+  'The received message as a dict of its fields, not a ROS object. std_msgs/Float64 arrives as {"data": 1.0}; sensor_msgs/Image as {"height", "width", "encoding", "step", "is_bigendian", "data"} where data is bytes-like, so np.frombuffer(msg["data"], dtype=np.uint8) works.',
+];
+const CODE_SCOPE_DOCS = {
+  python: {
+    callback: {
+      summary: 'Runs once per received message, on the runtime\'s dispatch. Publish results from here rather than waiting for the Main Loop.',
+      rows: [
+        MSG_ROW,
+        ['input_id', 'str', 'Id of the input port that received this message.'],
+        ['request', 'dict', 'Same object as msg. Use this name for a service input.'],
+        ['response', 'srv Response | None', 'For a service input, fill its fields and they are returned to the caller. None for topic inputs.'],
+        ...PY_COMMON_SCOPE,
+      ],
+    },
+    loop: {
+      summary: 'This node\'s own loop, like a hand-written rclpy node: rclpy.spin(node) dispatches input callbacks and Timer Callbacks until shutdown, or write while rclpy.ok(): with rclpy.spin_once(node, ...) and rate.sleep() for an explicit tick. Main Loop with no loop and no spin() is treated as one tick body and called repeatedly at Run Hz.',
+      rows: [
+        ['rate', 'Rate', 'rate.sleep() waits out whatever is left of the current period, so your work is not added on top of it.'],
+        ['run_hz', 'float', 'Configured Run Hz of this node.'],
+        ['loop_period', 'float', '1.0 / run_hz, in seconds.'],
+        ['now', 'float', 'time.time() sampled when this call started.'],
+        ['rclpy', 'module', 'The lwrclpy module: rclpy.ok(), rclpy.spin(node), rclpy.spin_once(node, timeout_sec=...). spin_once dispatches one callback per call, as in ROS 2, so prefer spin(node) for high-rate topics.'],
+        ...PY_INPUT_ACCESS_SCOPE,
+        ...PY_COMMON_SCOPE,
+      ],
+    },
+    timer: {
+      summary: 'Runs every periodSec seconds, independently of input traffic. The first call happens one period after start, matching ROS 2 timers.',
+      rows: [
+        ['period', 'float', 'This timer\'s periodSec.'],
+        ['now', 'float', 'time.time() sampled when this call started.'],
+        ['timer_id', 'str', 'Id of the timer that fired.'],
+        ['timer_name', 'str', 'Display name of the timer that fired.'],
+        ...PY_INPUT_ACCESS_SCOPE,
+        ...PY_COMMON_SCOPE,
+      ],
+    },
+    import: {
+      summary: "Runs once after this node's venv is ready, before any callback. Names defined here are visible from Callback, Main Loop, and Timer code.",
+      rows: [
+        ['params', 'dict', 'Available here too, along with each parameter key as a plain variable.'],
+        ['print(*values)', 'function', "Routed to this node's log panel."],
+      ],
+    },
+  },
+  cpp: {
+    callback: {
+      summary: 'Runs once per received message, dispatched by the generated main loop.',
+      rows: [
+        ['msg', 'const pkg::msg::Type&', 'The received message. Access fields directly, e.g. msg.data.'],
+        ['now', 'std::chrono::steady_clock::time_point', 'Sampled when this call started.'],
+        ['has_<input_id>()', 'bool', 'True once that input has received at least one message.'],
+        ['latest_<input_id>()', 'const pkg::msg::Type*', 'Pointer to the last message on that input, or nullptr if none arrived yet.'],
+        ['publish_<output_id>(msg)', 'void', 'Publishes on the named output port.'],
+      ],
+    },
+    loop: {
+      summary: 'This node\'s own loop, like a hand-written rclcpp node: you write while (rclcpp::ok()) with rclcpp::spin_some(node) and loop_rate.sleep(), or rclcpp::spin(node) for a callback-only node. main() then calls it once. Loop Code with no loop and no spin() is treated as one cycle body and wrapped in while (rclcpp::ok()) for you.',
+      rows: [
+        ['node', 'const std::shared_ptr<NodeClass>&', 'This node.'],
+        ['loop_rate', 'rclcpp::Rate&', 'loop_rate.sleep() waits until the next period boundary.'],
+        ['now', 'std::chrono::steady_clock::time_point', 'Sampled when this call started.'],
+        ['has_<input_id>()', 'bool', 'True once that input has received at least one message.'],
+        ['latest_<input_id>()', 'const pkg::msg::Type*', 'Pointer to the last message on that input, or nullptr if none arrived yet.'],
+        ['publish_<output_id>(msg)', 'void', 'Publishes on the named output port.'],
+      ],
+    },
+    timer: {
+      summary: 'Runs every periodSec seconds, independently of input traffic.',
+      rows: [
+        ['now', 'std::chrono::steady_clock::time_point', 'Sampled when this call started.'],
+        ['has_<input_id>()', 'bool', 'True once that input has received at least one message.'],
+        ['latest_<input_id>()', 'const pkg::msg::Type*', 'Pointer to the last message on that input, or nullptr if none arrived yet.'],
+        ['publish_<output_id>(msg)', 'void', 'Publishes on the named output port.'],
+      ],
+    },
+    header: {
+      summary: 'Inserted after the generated includes. Put #include lines, helper functions, constants, classes, structs, or static objects here; they are visible from Initialize, Callback, Loop, and Timer code.',
+      rows: [],
+    },
+    init: {
+      summary: 'Runs once in the generated constructor, after publishers and subscriptions are created and before timers start. Configure objects declared in Header here.',
+      rows: [],
+    },
+  },
+};
+
+function renderScopeHelp(doc, extraNote) {
+  if (!doc) return '';
+  const parts = [];
+  if (extraNote) parts.push(`<p class="scope-summary">${escapeHtml(extraNote)}</p>`);
+  if (doc.summary) parts.push(`<p class="scope-summary">${escapeHtml(doc.summary)}</p>`);
+  if (doc.rows && doc.rows.length) {
+    const body = doc.rows
+      .map(([name, type, description]) => `<tr><th><code>${escapeHtml(name)}</code></th><td><code>${escapeHtml(type)}</code></td><td>${escapeHtml(description)}</td></tr>`)
+      .join('');
+    parts.push(`<div class="scope-table-wrap"><table class="scope-table"><thead><tr><th>Name</th><th>Type</th><th>Contents</th></tr></thead><tbody>${body}</tbody></table></div>`);
+  }
+  return parts.join('');
+}
+
 const DEFAULT_NODE_WIDTH = 320;
 const DEFAULT_NODE_MIN_HEIGHT = 88;
 
@@ -1355,47 +1477,50 @@ function openCodeDialog(node, kind) {
   const isParams = kind === 'params';
   const isCpp = kind === 'cppCode';
   const nodeIsCpp = node.language === 'cpp';
+  const lang = nodeIsCpp ? 'cpp' : 'python';
+  const docs = CODE_SCOPE_DOCS[lang] || {};
   let title = `${node.name}: ${nodeIsCpp ? 'Loop Code' : 'Main Loop Code'}`;
   let value = node.loopCode || '';
-  let hint = nodeIsCpp
-    ? 'C++ loop scope: node, loop_rate, now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg). Use spin_some + loop_rate.sleep() for periodic work, or replace it with rclcpp::spin(node) for callback-only blocking execution.'
-    : 'Optional lwrclpy-compatible spin tick scope: node, state, now, publish(output_id, value), log(...). Prefer input callbacks for data-dependent processing.';
+  let doc = docs.loop;
+  let note = '';
   if (callbackPort) {
     title = `${node.name}.${callbackPort.name}: Callback Code`;
     value = callbackPort.callbackCode || '';
-    hint = nodeIsCpp
-      ? 'C++ callback scope: msg, now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg). This runs when the input subscription receives a message.'
-      : 'lwrclpy callback scope: node, input_id, msg/request, response, state, publish(output_id, value), log(...). Use publish(...) instead of direct graph outputs.';
+    doc = docs.callback;
+    note = `Input "${callbackPort.name}" carries ${callbackPort.dataType || 'a message'}.`;
   } else if (isCpp) {
     title = `${node.name}: Initialize Code`;
     value = node.cppCode || DEFAULT_CPP_CODE;
-    hint = 'C++ initialize scope: runs once in the generated node constructor after publishers/subscriptions are created and before timers start. Use classes or objects declared in Header.';
+    doc = docs.init;
   } else if (isTimer) {
     title = `${node.name}.${timer?.name || 'timer'}: Timer Callback Code`;
     value = timer?.callbackCode || node.timerCode || DEFAULT_TIMER_CODE;
-    hint = nodeIsCpp
-      ? 'C++ timer scope: now, has_<input_id>(), latest_<input_id>(), publish_<output_id>(msg).'
-      : 'lwrclpy timer scope: node, timer_id, timer_name, state, now, period, publish(output_id, value), log(...).';
+    doc = docs.timer;
+    if (timer?.periodSec) note = `This timer fires every ${timer.periodSec} s.`;
   } else if (isImport) {
     title = `${node.name}: ${nodeIsCpp ? 'Header' : 'Import Code'}`;
     value = node.importCode || defaultImportCodeForLanguage(nodeIsCpp ? 'cpp' : 'python');
-    hint = nodeIsCpp
-      ? 'C++ header section inserted after generated includes. Put #include lines, helper functions, constants, class definitions, structs, or static objects here.'
-      : 'Import code runs once after this node venv is ready. Put imports such as import cv2 and import numpy as np here.';
+    doc = nodeIsCpp ? docs.header : docs.import;
   } else if (isRequirements) {
     title = `${node.name}: ${nodeIsCpp ? 'Link Libraries' : 'requirements.txt'}`;
     value = node.requirements || (nodeIsCpp ? DEFAULT_CPP_LINK_LIBRARIES_CODE : DEFAULT_REQUIREMENTS_CODE);
-    hint = nodeIsCpp
-      ? 'C++ link libraries/options, one or more per line, for example -lm, -lmy_library, /path/to/libfoo.a.'
-      : 'One requirement per line. uv creates this node venv and installs these packages before execution.';
+    doc = {
+      summary: nodeIsCpp
+        ? 'C++ link libraries and linker options, one per line, for example -lm, -lmy_library, or /path/to/libfoo.a.'
+        : 'One requirement per line, requirements.txt syntax. uv creates this node\'s venv and installs these before the graph runs.',
+      rows: [],
+    };
   } else if (isParams) {
     title = `${node.name}: Parameters`;
     value = JSON.stringify(node.params || {}, null, 2);
-    hint = 'JSON parameters passed to this node as params. For AI nodes, use devicePreference: auto, cuda, mps, or cpu.';
+    doc = {
+      summary: 'JSON object handed to the node as params. Every key is also available as a plain variable in Callback, Main Loop, and Timer code. AI nodes accept devicePreference: auto, cuda, mps, or cpu.',
+      rows: [],
+    };
   }
   $('code-dialog-title').textContent = title;
   $('code-editor').value = value;
-  $('code-hint').textContent = hint;
+  $('code-hint').innerHTML = renderScopeHelp(doc, note);
   $('code-dialog').showModal();
 }
 
@@ -6343,21 +6468,20 @@ def sanitize_node_name(name):
   return text
 
 
-DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
-# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
-# without creating a busy loop.
-# Available:
-#   rclpy, node, rate, run_hz, loop_period, state, now
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop is this node's own loop, like a hand-written rclpy node.
+# rclpy.spin(node) dispatches input callbacks and Timer Callbacks until
+# shutdown, so periodic work belongs in a Timer Callback.
+# Scope (see the reference under the editor for types):
+#   rclpy, node, rate, run_hz, loop_period, state, params, now
 #   latest(input_id), take(input_id), has_input(input_id)
 #   publish(output_id, value), log(...)
 #
-# Add periodic work between spin_once(...) and rate.sleep().
-rclpy.spin_once(node, timeout_sec=0.0)
-# Example:
-# if has_input("in1"):
-#     msg = latest("in1")
-#     publish("out1", msg)
-rate.sleep()
+# Write the loop yourself instead when you prefer an explicit tick:
+#   while rclpy.ok():
+#       rclpy.spin_once(node, timeout_sec=0.0)
+#       # periodic work
+#       rate.sleep()
+rclpy.spin(node)
 """
 
 
@@ -6810,21 +6934,20 @@ def sanitize_node_name(name):
     return text
 
 
-DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
-# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
-# without creating a busy loop.
-# Available:
-#   rclpy, node, rate, run_hz, loop_period, state, now
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop is this node's own loop, like a hand-written rclpy node.
+# rclpy.spin(node) dispatches input callbacks and Timer Callbacks until
+# shutdown, so periodic work belongs in a Timer Callback.
+# Scope (see the reference under the editor for types):
+#   rclpy, node, rate, run_hz, loop_period, state, params, now
 #   latest(input_id), take(input_id), has_input(input_id)
 #   publish(output_id, value), log(...)
 #
-# Add periodic work between spin_once(...) and rate.sleep().
-rclpy.spin_once(node, timeout_sec=0.0)
-# Example:
-# if has_input("in1"):
-#     msg = latest("in1")
-#     publish("out1", msg)
-rate.sleep()
+# Write the loop yourself instead when you prefer an explicit tick:
+#   while rclpy.ok():
+#       rclpy.spin_once(node, timeout_sec=0.0)
+#       # periodic work
+#       rate.sleep()
+rclpy.spin(node)
 """
 
 
@@ -7204,21 +7327,20 @@ def sanitize_node_name(name):
     return text
 
 
-DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
-# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
-# without creating a busy loop.
-# Available:
-#   rclpy, node, rate, run_hz, loop_period, state, now
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop is this node's own loop, like a hand-written rclpy node.
+# rclpy.spin(node) dispatches input callbacks and Timer Callbacks until
+# shutdown, so periodic work belongs in a Timer Callback.
+# Scope (see the reference under the editor for types):
+#   rclpy, node, rate, run_hz, loop_period, state, params, now
 #   latest(input_id), take(input_id), has_input(input_id)
 #   publish(output_id, value), log(...)
 #
-# Add periodic work between spin_once(...) and rate.sleep().
-rclpy.spin_once(node, timeout_sec=0.0)
-# Example:
-# if has_input("in1"):
-#     msg = latest("in1")
-#     publish("out1", msg)
-rate.sleep()
+# Write the loop yourself instead when you prefer an explicit tick:
+#   while rclpy.ok():
+#       rclpy.spin_once(node, timeout_sec=0.0)
+#       # periodic work
+#       rate.sleep()
+rclpy.spin(node)
 """
 
 

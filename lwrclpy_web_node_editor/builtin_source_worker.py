@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any
 
 RUNNING = True
+# Set when the last status write reported an error or a stopped state, so the
+# shutdown path does not replace an explanatory message with a bare "stopped".
+_LAST_STATUS_WAS_TERMINAL = False
 EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
     "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
     "UDPv4?max_msg_size=64KB&sockets_size=16MB&non_blocking=true",
@@ -344,9 +347,11 @@ def _tf_message(transforms: list[dict[str, Any]]) -> Any:
 
 
 def _write_status(path: Path, **values: Any) -> None:
+    global _LAST_STATUS_WAS_TERMINAL
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     tmp_path.write_text(json.dumps({"time": time.time(), **values}, ensure_ascii=False, default=str), encoding="utf-8")
     tmp_path.replace(path)
+    _LAST_STATUS_WAS_TERMINAL = bool(values.get("error")) or not values.get("running", True)
 
 
 def _matched_subscriptions(publisher: Any) -> int:
@@ -982,7 +987,7 @@ def main() -> int:
         _write_status(Path(config["statusPath"]), running=False, error=str(exc), status=f"error: {exc}")
         return 1
     finally:
-        if not had_error:
+        if not had_error and not _LAST_STATUS_WAS_TERMINAL:
             _write_status(Path(config["statusPath"]), running=False, status="stopped")
         try:
             node.destroy_node()

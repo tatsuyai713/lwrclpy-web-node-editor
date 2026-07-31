@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -57,6 +58,30 @@ def main(argv: list[str] | None = None) -> int:
         require(cpp_lib, "missing C++ prefix lwrcl library under lwrcl_cpp/lib", errors)
     elif cpp_prefix.exists() and (not cpp_header.is_file() or not cpp_lib):
         errors.append("incomplete lwrcl_cpp prefix")
+
+    if cpp_prefix.is_dir():
+        # A prefix that still points at the build machine passes find_package()
+        # and then fails to link, so catch it here instead of in a user's build.
+        dangling = [
+            str(path.relative_to(cpp_prefix))
+            for path in cpp_prefix.rglob("*")
+            if path.is_symlink() and not path.exists()
+        ]
+        if dangling:
+            errors.append(f"lwrcl_cpp has {len(dangling)} dangling symlink(s), e.g. {dangling[0]}")
+        stale = []
+        for pattern in ("**/*.cmake", "**/*.pc"):
+            for path in cpp_prefix.glob(pattern):
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                for token in re.findall(r"(?<![\w}$.\-/\\])/[^\s\"';:()$]{3,}", text):
+                    if not Path(token).exists() and token.startswith(("/home/", "/Users/", "/build")):
+                        stale.append(f"{path.relative_to(cpp_prefix)}: {token}")
+                        break
+        if stale:
+            errors.append(f"lwrcl_cpp references {len(stale)} unusable build path(s), e.g. {stale[0]}")
 
     print(f"Checked app: {app_root}")
     print(f"Backend: {backend}")

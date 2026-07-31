@@ -127,6 +127,11 @@ function Copy-CppDependencyPrefixes {
   } elseif (-not (Test-Path $header) -or -not $libs) {
     Write-Warning "Bundled C++ prefix does not contain lwrcl.hpp and lwrcl libraries. Set LWRCL_PREFIX or CPP_DEP_PREFIXES and rebuild."
   }
+  if ($copied) {
+    # The copied prefix still points at the machine it was built on, which
+    # breaks C++ node linking once the app is installed elsewhere.
+    Invoke-Checked -FilePath $PythonBin -Arguments @((Join-Path $RootDir "scripts\relocate_cpp_prefix.py"), $Target)
+  }
 }
 
 Copy-CppDependencyPrefixes -Target $CppBundlePrefix

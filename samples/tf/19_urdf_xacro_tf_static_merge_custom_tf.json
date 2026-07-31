@@ -69,7 +69,7 @@
           "dataType": "tf2_msgs/msg/TFMessage"
         }
       ],
-      "loopCode": "rclpy.spin_once(node, timeout_sec=0.0)\nbroadcaster = ensure_tf_broadcaster(state, node)\nstate[\"angle\"] = state.get(\"angle\", 0.0) + 0.02\nx = 0.25 * math.cos(state[\"angle\"])\ny = 0.25 * math.sin(state[\"angle\"])\ntransform = make_transform(\"base_link\", \"custom_probe_frame\", (x, y, 0.45), (0.0, 0.0, 0.0, 1.0))\nbroadcaster.sendTransform(transform)\nrate.sleep()\n",
+      "loopCode": "broadcaster = ensure_tf_broadcaster(state, node)\nstate[\"angle\"] = state.get(\"angle\", 0.0) + 0.02\nx = 0.25 * math.cos(state[\"angle\"])\ny = 0.25 * math.sin(state[\"angle\"])\ntransform = make_transform(\"base_link\", \"custom_probe_frame\", (x, y, 0.45), (0.0, 0.0, 0.0, 1.0))\nbroadcaster.sendTransform(transform)\nrate.sleep()\n",
       "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
@@ -125,7 +125,7 @@
           "dataType": "std_msgs/msg/Float32"
         }
       ],
-      "loopCode": "rclpy.spin_once(node, timeout_sec=0.0)\nparent = str(params.get(\"sourceFrame\") or \"base_link\")\nchild = str(params.get(\"targetFrame\") or \"camera_link\")\ntranslation = lookup_with_tf2_ros(state, node, parent, child)\nif translation is not None:\n    publish(\"camera_x\", {\"data\": float(translation[0])})\nrate.sleep()\n",
+      "loopCode": "parent = str(params.get(\"sourceFrame\") or \"base_link\")\nchild = str(params.get(\"targetFrame\") or \"camera_link\")\ntranslation = lookup_with_tf2_ros(state, node, parent, child)\nif translation is not None:\n    publish(\"camera_x\", {\"data\": float(translation[0])})\nrate.sleep()\n",
       "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,

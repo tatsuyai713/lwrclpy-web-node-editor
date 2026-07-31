@@ -28,21 +28,20 @@ from .cpp_codegen import cpp_message_packages_for_node, render_cpp_node_cmake, r
 from .runtime_exec import find_lwrclpy_installer, local_lwrclpy_wheel, resolve_worker_command
 
 LWRCLPY_RELEASES_API_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
-DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
-# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
-# without creating a busy loop.
-# Available:
-#   rclpy, node, rate, run_hz, loop_period, state, now
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop is this node's own loop, like a hand-written rclpy node.
+# rclpy.spin(node) dispatches input callbacks and Timer Callbacks until
+# shutdown, so periodic work belongs in a Timer Callback.
+# Scope (see the reference under the editor for types):
+#   rclpy, node, rate, run_hz, loop_period, state, params, now
 #   latest(input_id), take(input_id), has_input(input_id)
 #   publish(output_id, value), log(...)
 #
-# Add periodic work between spin_once(...) and rate.sleep().
-rclpy.spin_once(node, timeout_sec=0.0)
-# Example:
-# if has_input("in1"):
-#     msg = latest("in1")
-#     publish("out1", msg)
-rate.sleep()
+# Write the loop yourself instead when you prefer an explicit tick:
+#   while rclpy.ok():
+#       rclpy.spin_once(node, timeout_sec=0.0)
+#       # periodic work
+#       rate.sleep()
+rclpy.spin(node)
 """
 
 
@@ -493,15 +492,39 @@ class PreviewNode:
 
 
 class PythonLoopRate:
+    """Rate helper with ROS 2 ``Rate`` semantics.
+
+    ``sleep()`` waits until the end of the current period rather than always
+    sleeping a whole period, so time already spent in Main Loop code is not
+    added on top of the requested period.
+    """
+
     def __init__(self, hz: float) -> None:
         self.hz = max(1.0, float(hz or DEFAULT_RUN_HZ))
+        self._next_at = 0.0
 
     @property
     def period(self) -> float:
         return 1.0 / self.hz
 
+    def set_hz(self, hz: float) -> None:
+        hz = max(1.0, float(hz or DEFAULT_RUN_HZ))
+        if hz != self.hz:
+            self.hz = hz
+            self._next_at = 0.0
+
     def sleep(self) -> None:
-        time.sleep(self.period)
+        now = time.monotonic()
+        if self._next_at <= 0.0:
+            self._next_at = now
+        self._next_at += self.period
+        if self._next_at <= now:
+            # Behind schedule: do not sleep, and re-anchor to now so the next
+            # call measures its remainder from here instead of being handed a
+            # free extra period.
+            self._next_at = now
+            return
+        time.sleep(self._next_at - now)
 
 
 class CustomLwrclNodeInstance:
@@ -522,6 +545,7 @@ class CustomLwrclNodeInstance:
         self._last_saved_signature = ""
         self._next_timer_at = 0.0
         self._next_timer_by_id: dict[str, float] = {}
+        self._loop_rate = PythonLoopRate(DEFAULT_RUN_HZ)
         self._exec_globals: dict[str, Any] | None = None
         self._import_signature = ""
         self.env_path: Path | None = None
@@ -2288,16 +2312,23 @@ class CustomLwrclNodeInstance:
                         return max(0.01, source_fps / divisor)
                 except Exception:
                     pass
-        base_hz = float(
-            (
+        if use_source_fps:
+            # The source FPS is unknown until the worker has probed the file, so
+            # fall back to the configured rate rather than to None.
+            candidate = (
                 self.config.params.get("detectedFps")
                 or self.config.params.get("nativeFps")
                 or self.config.params.get("sourceFps")
                 or self.config.params.get("embeddedFps")
+                or self.config.params.get("publishHz")
+                or 30.0
             )
-            if use_source_fps
-            else (self.config.params.get("publishHz") or 30.0)
-        )
+        else:
+            candidate = self.config.params.get("publishHz") or 30.0
+        try:
+            base_hz = float(candidate)
+        except (TypeError, ValueError):
+            base_hz = 30.0
         return max(0.01, base_hz / divisor)
 
     def _video_frame_skip(self) -> int:
@@ -2798,6 +2829,8 @@ class CustomLwrclNodeInstance:
         if not code:
             code = DEFAULT_PYTHON_LOOP_CODE
         run_hz = self._run_hz()
+        # Reuse one rate object so its period schedule survives across ticks.
+        self._loop_rate.set_hz(run_hz)
         local = self._locals({
             "inputs": inputs,
             "outputs": outputs,
@@ -2808,7 +2841,7 @@ class CustomLwrclNodeInstance:
             "rclpy": self.runtime,
             "run_hz": run_hz,
             "loop_period": 1.0 / run_hz,
-            "rate": PythonLoopRate(run_hz),
+            "rate": self._loop_rate,
         })
         try:
             exec(code, self._globals(), local)
@@ -3225,10 +3258,7 @@ class GraphRuntime:
             and any(port.topics for port in config.outputs)
         ]
         for config in source_configs:
-            if config.tool_type == "video_file_input":
-                status_path = Path.cwd() / ".node_workers" / f"{config.id}.video.status.json"
-            else:
-                status_path = Path.cwd() / ".node_workers" / f"{config.id}.source.status.json"
+            status_path = self._source_status_path(config)
             if not status_path.exists():
                 return False
             try:
@@ -3248,6 +3278,26 @@ class GraphRuntime:
                 continue
             return False
         return True
+
+    def _source_status_path(self, config: CustomLwrclNodeConfig) -> Path:
+        """Status file written by whichever worker actually drives this source.
+
+        A ``video_file_input`` node only uses the video DDS worker when the
+        server decodes the file itself; an embedded-video node runs as a
+        built-in source worker and writes a differently named status file.
+        Looking only at the video worker's file leaves downstream nodes stuck
+        on "waiting for source publishers" forever.
+        """
+        worker_dir = Path.cwd() / ".node_workers"
+        source_path = worker_dir / f"{config.id}.source.status.json"
+        if config.tool_type != "video_file_input":
+            return source_path
+        video_path = worker_dir / f"{config.id}.video.status.json"
+        uses_video_worker = bool(config.params.get("serverDecode")) and bool(config.params.get("videoPath"))
+        preferred, other = (video_path, source_path) if uses_video_worker else (source_path, video_path)
+        if preferred.exists() or not other.exists():
+            return preferred
+        return other
 
     def _config_needs_node_environment(self, config: CustomLwrclNodeConfig) -> bool:
         if config.language in {"cpp", "c++"}:
@@ -3757,6 +3807,10 @@ class GraphRuntime:
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 with log_path.open("a", encoding="utf-8") as log_file:
                     log_file.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Building C++ node {config.name}\n")
+                    # cmake writes to this file descriptor directly, so the
+                    # header has to leave Python's buffer first or it lands
+                    # after the build output and hides the real error.
+                    log_file.flush()
                     cmake_command = self._cpp_cmake_command()
                     subprocess.run(
                         [cmake_command, "-S", str(cpp_root), "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Release"],
@@ -3805,13 +3859,9 @@ class GraphRuntime:
             instance.env_status = "C++ worker running"
             return True
         except subprocess.CalledProcessError as exc:
-            detail = str(exc)
-            try:
-                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-                detail = next((line for line in reversed(lines) if line.strip()), detail)
-            except Exception:
-                pass
-            instance.env_status = f"C++ build failed: {detail}"
+            detail = self._cpp_build_error_detail(log_path) or str(exc)
+            guidance = self._cpp_prefix_guidance()
+            instance.env_status = f"C++ build failed: {detail}" + (f" -- {guidance}" if guidance else "")
             instance.worker_log_path = log_path
             instance.log(instance.env_status)
             return False
@@ -3903,13 +3953,67 @@ add_subdirectory({package_name})
         except Exception:
             return DEFAULT_RUN_HZ
 
-    def _cpp_worker_env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        prefixes = [
+    def _cpp_search_prefixes(self) -> list[str]:
+        """Every place a C++ lwrcl/FastDDS installation may live, in priority order."""
+        # The location the README's setup command installs into by default. Look
+        # under the installation root as well as the working directory, because
+        # --cwd moves the latter away from the checkout.
+        local_roots = [Path.cwd(), Path(__file__).resolve().parent.parent]
+        local_prefixes = [
+            str(root / ".local" / name)
+            for root in local_roots
+            for name in ("fast-dds-libs", "fast-dds")
+        ]
+        candidates = [
             *self._bundled_lwrcl_prefixes(),
+            *self._configured_lwrcl_prefixes(),
+            *local_prefixes,
             str(Path("/opt/fast-dds-libs")),
             str(Path("/opt/fast-dds")),
         ]
+        result: list[str] = []
+        for prefix in candidates:
+            if prefix and prefix not in result:
+                result.append(prefix)
+        return result
+
+    def _usable_lwrcl_prefixes(self) -> list[str]:
+        """Search prefixes that really contain a C++ lwrcl installation."""
+        result: list[str] = []
+        for prefix in self._cpp_search_prefixes():
+            path = Path(prefix)
+            if (path / "include" / "lwrcl.hpp").is_file() and any(path.glob("lib/liblwrcl*")):
+                result.append(prefix)
+        return result
+
+    def _cpp_prefix_guidance(self) -> str:
+        """Advice to attach to a build failure when no C++ prefix is installed."""
+        if self._usable_lwrcl_prefixes():
+            return ""
+        return (
+            "no C++ lwrcl/FastDDS prefix was found, which C++ nodes require. "
+            "Install one with scripts/setup_lwrcl_cpp_env.sh --prefix \"$PWD/.local/fast-dds-libs\", "
+            "or start the app with LWRCL_PREFIX=/path/to/prefix"
+        )
+
+    def _cpp_build_error_detail(self, log_path: Path) -> str:
+        """First real error line from a build log, skipping our own header lines."""
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            return ""
+        markers = ("error", "not find", "no such", "no rule to make")
+        for line in lines:
+            text = line.strip()
+            if not text or text.startswith("["):
+                continue
+            if any(marker in text.lower() for marker in markers):
+                return text
+        return next((line.strip() for line in reversed(lines) if line.strip() and not line.strip().startswith("[")), "")
+
+    def _cpp_worker_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        prefixes = self._cpp_search_prefixes()
         existing_prefix = env.get("CMAKE_PREFIX_PATH", "")
         env["CMAKE_PREFIX_PATH"] = os.pathsep.join([*prefixes, *([existing_prefix] if existing_prefix else [])])
         lib_paths = [str(Path(prefix) / "lib") for prefix in prefixes]
@@ -3943,6 +4047,29 @@ add_subdirectory({package_name})
                 base / "cmake" / "data" / "bin" / exe_name,
             ])
         return candidates
+
+    def _configured_lwrcl_prefixes(self) -> list[str]:
+        """C++ dependency prefixes the user pointed us at through the environment.
+
+        The generated CMakeLists already searches these for lwrcl itself, and
+        the README documents them, but find_package(fastrtps) only looks at
+        CMAKE_PREFIX_PATH.  Without them a source checkout cannot build C++
+        nodes against a prefix installed by scripts/setup_lwrcl_cpp_env.sh.
+        """
+        candidates: list[str] = []
+        for key in ("LWRCL_PREFIX", "LWRCL_FASTDDS_PREFIX", "FAST_DDS_PREFIX", "DDS_PREFIX"):
+            value = os.environ.get(key, "").strip()
+            if value:
+                candidates.append(value)
+        for value in os.environ.get("CPP_DEP_PREFIXES", "").split(os.pathsep):
+            value = value.strip()
+            if value:
+                candidates.append(value)
+        result: list[str] = []
+        for value in candidates:
+            if value not in result and Path(value).is_dir():
+                result.append(value)
+        return result
 
     def _bundled_lwrcl_prefixes(self) -> list[str]:
         candidates: list[Path] = []

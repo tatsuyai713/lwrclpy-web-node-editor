@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import keyword
@@ -12,22 +13,26 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
-# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
-# without creating a busy loop.
-# Available:
-#   rclpy, node, rate, run_hz, loop_period, state, now
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop is this node's own loop, like a hand-written rclpy node.
+# rclpy.spin(node) dispatches input callbacks and Timer Callbacks until
+# shutdown, so periodic work belongs in a Timer Callback.
+# Scope (see the reference under the editor for types):
+#   rclpy, node, rate, run_hz, loop_period, state, params, now
 #   latest(input_id), take(input_id), has_input(input_id)
 #   publish(output_id, value), log(...)
 #
-# Add periodic work between spin_once(...) and rate.sleep().
-rclpy.spin_once(node, timeout_sec=0.0)
-# Example:
-# if has_input("in1"):
-#     msg = latest("in1")
-#     publish("out1", msg)
-rate.sleep()
+# Write the loop yourself instead when you prefer an explicit tick:
+#   while rclpy.ok():
+#       rclpy.spin_once(node, timeout_sec=0.0)
+#       # periodic work
+#       rate.sleep()
+rclpy.spin(node)
 """
+
+
+# Upper bound on callbacks dispatched in one spin_tick(), so a publisher that
+# outruns this node cannot starve the timer and Main Loop code entirely.
+MAX_CALLBACKS_PER_TICK = 256
 
 
 EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
@@ -66,6 +71,29 @@ def disable_lwrclpy_side_channels(config: dict[str, Any]) -> None:
                 setattr(node_cls, name, lambda self, *args, **kwargs: None)
     except Exception:
         pass
+
+def loop_code_is_self_driving(code: str) -> bool:
+    """True when *code* drives its own loop rather than acting as one tick.
+
+    Parsed rather than pattern matched so a commented-out example, or a spin
+    call inside a helper string, does not change how the loop is executed.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+    for statement in tree.body:
+        if isinstance(statement, (ast.While, ast.AsyncFor)):
+            return True
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+        if name in {"spin", "spin_until_future_complete"}:
+            return True
+    return False
+
 
 def sanitize_node_name(name: str) -> str:
     """Make *name* a valid ROS 2 node name ([A-Za-z0-9_], not starting with a digit)."""
@@ -123,15 +151,41 @@ def subscriber_qos(data_type: str, topic: str = "") -> Any:
 
 
 class LoopRate:
+    """Rate helper with ROS 2 ``Rate`` semantics.
+
+    ``sleep()`` waits until the end of the current period instead of always
+    sleeping a whole period.  Sleeping a full period on every call would add
+    the time already spent in callbacks and Main Loop code on top of the
+    requested period, so a node configured for 60 Hz whose work takes 30 ms
+    would only tick at 21 Hz.
+    """
+
     def __init__(self, hz: float) -> None:
         self.hz = max(1.0, float(hz or 60.0))
+        self._next_at = 0.0
 
     @property
     def period(self) -> float:
         return 1.0 / self.hz
 
+    def set_hz(self, hz: float) -> None:
+        hz = max(1.0, float(hz or 60.0))
+        if hz != self.hz:
+            self.hz = hz
+            self._next_at = 0.0
+
     def sleep(self) -> None:
-        time.sleep(self.period)
+        now = time.monotonic()
+        if self._next_at <= 0.0:
+            self._next_at = now
+        self._next_at += self.period
+        if self._next_at <= now:
+            # Behind schedule: do not sleep, and re-anchor to now so the next
+            # call measures its remainder from here instead of being handed a
+            # free extra period.
+            self._next_at = now
+            return
+        time.sleep(self._next_at - now)
 
 
 class LwrclpyWorkerNode:
@@ -153,11 +207,18 @@ class LwrclpyWorkerNode:
         self.clients: dict[str, list[Any]] = {}
         self.subscriptions: list[Any] = []
         self.services: list[Any] = []
+        self.timers: list[Any] = []
         self._globals_cache: dict[str, Any] | None = None
+        self._loop_rate = LoopRate(self._run_hz())
         if not self.rclpy.ok():
             self.rclpy.init(args=None)
         self.node = self.rclpy.create_node(sanitize_node_name(self.node_config["name"]))
+        # One long-lived executor: the module-level rclpy.spin_once() helper
+        # builds and tears down a throwaway executor on every call.
+        self.executor = self.rclpy.SingleThreadedExecutor()
+        self.executor.add_node(self.node)
         self._setup_transport()
+        self._setup_timers()
 
     def _setup_transport(self) -> None:
         for output in self.node_config.get("outputs", []):
@@ -208,13 +269,70 @@ class LwrclpyWorkerNode:
     def log(self, *values: Any) -> None:
         print(f"[{self.node_config['name']}]", *values, flush=True)
 
+    def loop_is_self_driving(self) -> bool:
+        """True when Main Loop code runs its own loop instead of being ticked.
+
+        Code written the way a hand-written rclpy node is written — an explicit
+        ``while rclpy.ok():``, or a blocking ``rclpy.spin(node)`` — has to be
+        executed once and left to own execution.  Anything else is a single tick
+        body and is called repeatedly at Run Hz, which is what projects saved
+        before this convention contain.
+        """
+        code = self.node_config.get("loopCode", "").strip() or DEFAULT_PYTHON_LOOP_CODE
+        return loop_code_is_self_driving(code)
+
+    def run_self_driving_loop(self) -> None:
+        # Hand the node over so the executor the user's code spins owns its wake
+        # event; otherwise that executor only notices new work on its poll
+        # timeout and every message picks up avoidable latency.
+        try:
+            self.executor.remove_node(self.node)
+        except Exception:
+            pass
+        outputs: dict[str, Any] = {}
+        self._execute_loop(dict(self.last_inputs), outputs)
+        self._flush_outputs(outputs)
+
     def spin_tick(self) -> None:
+        self.pump_callbacks(self.next_event_delay())
         outputs: dict[str, Any] = {}
         inputs = dict(self.last_inputs)
-        self._execute_timer_if_due(inputs, outputs)
         if self._loop_due():
             self._execute_loop(inputs, outputs)
         self._flush_outputs(outputs)
+
+    def pump_callbacks(self, timeout_sec: float = 0.0) -> int:
+        """Dispatch every callback that is already queued, and return the spin count.
+
+        A single spin_once() only dispatches one callback, while a
+        shared-memory backed image topic queues several callbacks per frame
+        (the payload plus the side-channel metadata).  Relying on the Main
+        Loop to call spin_once() once per Run Hz tick therefore caps the node
+        at a fraction of the publish rate and the surplus frames are dropped
+        by DDS before they ever reach the callback.
+
+        The first spin blocks for up to *timeout_sec* so an idle node waits on
+        the executor instead of busy-looping; queued work wakes it immediately.
+        """
+        spins = 0
+        wait = max(0.0, float(timeout_sec or 0.0))
+        for _ in range(MAX_CALLBACKS_PER_TICK):
+            self.executor.spin_once(timeout_sec=wait)
+            spins += 1
+            wait = 0.0
+            if not self._has_queued_callbacks():
+                break
+        return spins
+
+    def _has_queued_callbacks(self) -> bool:
+        queue = getattr(self.node, "_callback_queue", None)
+        if queue is None:
+            # Unknown runtime: fall back to a single dispatch per tick.
+            return False
+        try:
+            return bool(len(queue))
+        except Exception:
+            return False
 
     def _run_hz(self) -> float:
         try:
@@ -236,25 +354,17 @@ class LwrclpyWorkerNode:
         return True
 
     def next_event_delay(self, max_delay: float = 0.02) -> float:
-        """Spin timeout until the next timer/loop deadline.
+        """Spin timeout until the next Main Loop deadline.
 
-        Subscription callbacks wake the executor immediately, so a longer idle
-        timeout only reduces busy-loop CPU without delaying message handling.
+        Subscription and timer callbacks wake the executor immediately, so a
+        longer idle timeout only reduces busy-loop CPU without delaying message
+        handling.
         """
-        now = time.time()
-        candidates: list[float] = []
-        if str(self.node_config.get("loopCode", "")).strip():
-            candidates.append(self.next_loop_at)
-        for timer in self._timers():
-            if str(timer.get("callbackCode") or "").strip():
-                timer_id = str(timer.get("id") or "timer1")
-                candidates.append(self.next_timer_by_id.get(timer_id, 0.0))
-        if not candidates:
+        if not str(self.node_config.get("loopCode", "")).strip():
             return max_delay
-        next_at = min(candidates)
-        if next_at <= now:
+        if self.next_loop_at <= time.time():
             return 0.001
-        return max(0.001, min(max_delay, next_at - now))
+        return max(0.001, min(max_delay, self.next_loop_at - time.time()))
 
     def _make_subscription_callback(self, input_port: dict[str, Any]):
         def callback(msg):
@@ -295,6 +405,8 @@ class LwrclpyWorkerNode:
         if not code:
             code = DEFAULT_PYTHON_LOOP_CODE
         run_hz = self._run_hz()
+        # Reuse one rate object so its period schedule survives across ticks.
+        self._loop_rate.set_hz(run_hz)
         local = self._locals({
             "inputs": inputs,
             "outputs": outputs,
@@ -305,40 +417,42 @@ class LwrclpyWorkerNode:
             "rclpy": self.rclpy,
             "run_hz": run_hz,
             "loop_period": 1.0 / run_hz,
-            "rate": LoopRate(run_hz),
+            "rate": self._loop_rate,
         })
         try:
             exec(code, self._globals(), local)
         except Exception as exc:
             self.log(f"loop error: {exc}")
 
-    def _execute_timer_if_due(self, inputs: dict[str, Any], outputs: dict[str, Any]) -> None:
-        now = time.time()
+    def _setup_timers(self) -> None:
+        """Register configured timers as real node timers.
+
+        Using node.create_timer() rather than scheduling them by hand means they
+        fire from the executor, so they keep working when Main Loop code owns the
+        loop and blocks in rclpy.spin(node).  It also matches ROS 2 semantics,
+        including the first callback firing one full period after start.
+        """
         for timer in self._timers():
             code = str(timer.get("callbackCode") or "").strip()
             if not code:
                 continue
             timer_id = str(timer.get("id") or "timer1")
+            timer_name = str(timer.get("name") or timer_id)
             period = max(0.001, float(timer.get("periodSec", 1.0) or 1.0))
-            next_at = self.next_timer_by_id.get(timer_id, 0.0)
-            if next_at <= 0:
-                # Match ROS 2 timer semantics: first callback fires one period
-                # after the timer starts, not immediately.
-                self.next_timer_by_id[timer_id] = now + period
-                continue
-            if now < next_at:
-                self.next_timer_by_id[timer_id] = next_at
-                continue
-            next_due = (next_at if next_at > 0 else now) + period
-            while next_due <= now:
-                next_due += period
-            self.next_timer_by_id[timer_id] = next_due
+            self.timers.append(self.node.create_timer(
+                period,
+                self._make_timer_callback(timer_id, timer_name, period, code),
+            ))
+
+    def _make_timer_callback(self, timer_id: str, timer_name: str, period: float, code: str):
+        def callback() -> None:
+            outputs: dict[str, Any] = {}
             local = self._locals({
                 "timer_id": timer_id,
-                "timer_name": str(timer.get("name") or timer_id),
-                "inputs": inputs,
+                "timer_name": timer_name,
+                "inputs": dict(self.last_inputs),
                 "outputs": outputs,
-                "now": now,
+                "now": time.time(),
                 "period": period,
                 "latest": self.latest,
                 "take": self.take,
@@ -348,6 +462,9 @@ class LwrclpyWorkerNode:
                 exec(code, self._globals(), local)
             except Exception as exc:
                 self.log(f"{timer_id} timer callback error: {exc}")
+            self._flush_outputs(outputs)
+
+        return callback
 
     def _timers(self) -> list[dict[str, Any]]:
         timers = self.node_config.get("timers")
@@ -487,7 +604,61 @@ class LwrclpyWorkerNode:
                 return bytes_getter()
             except Exception:
                 pass
-        return self._plain_value(getattr(message, key, None))
+        raw = getattr(message, key, None)
+        if key == "data" and self._is_image_payload(message):
+            payload = self._as_bytes_like(raw)
+            if payload is not None:
+                return payload
+        return self._plain_value(raw)
+
+    @staticmethod
+    def _is_image_payload(message: Any) -> bool:
+        """True when ``message.data`` is a uint8 image payload."""
+        if all(hasattr(message, name) for name in ("height", "width", "encoding")):
+            return True
+        return hasattr(message, "format")
+
+    @staticmethod
+    def _as_bytes_like(value: Any) -> Any:
+        """Return *value* as bytes without going through a Python list.
+
+        Image payloads arrive as a plain uint8 sequence whenever the
+        shared-memory side channel is not attached — the first frames of a run,
+        or every frame when side channels are disabled.  Converting those with
+        tolist() builds a list with one Python int per byte and, worse, makes
+        np.frombuffer() in node code fail with "a bytes-like object is
+        required, not 'list'".  Returns None if no safe conversion applies, so
+        the caller can fall back to the generic handling.
+        """
+        if value is None:
+            return None
+        if callable(value):
+            try:
+                value = value()
+            except TypeError:
+                pass
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return value
+        try:
+            expected = len(value)
+        except Exception:
+            expected = None
+        attempts = []
+        tobytes = getattr(value, "tobytes", None)
+        if callable(tobytes):
+            attempts.append(tobytes)
+        attempts.append(lambda: bytes(value))
+        for attempt in attempts:
+            try:
+                result = attempt()
+            except Exception:
+                continue
+            if not isinstance(result, (bytes, bytearray, memoryview)):
+                continue
+            if expected is not None and len(result) != expected:
+                continue
+            return result
+        return None
 
     def _plain_value(self, value: Any) -> Any:
         if callable(value):
@@ -565,6 +736,11 @@ class LwrclpyWorkerNode:
         return request
 
     def close(self) -> None:
+        try:
+            self.executor.remove_node(self.node)
+            self.executor.shutdown()
+        except Exception:
+            pass
         self.node.destroy_node()
         self.rclpy.shutdown()
 
@@ -579,8 +755,15 @@ def main(argv: list[str] | None = None) -> int:
     disable_lwrclpy_side_channels(config)
     worker = LwrclpyWorkerNode(config)
     try:
-        while worker.rclpy.ok():
-            worker.spin_tick()
+        if worker.loop_is_self_driving():
+            # Main Loop code owns the loop, the way a hand-written rclpy node
+            # does. Run it once and let it spin until shutdown.
+            worker.run_self_driving_loop()
+        else:
+            # Main Loop code is a single tick body: drive it at Run Hz and
+            # dispatch callbacks around it.
+            while worker.rclpy.ok():
+                worker.spin_tick()
     finally:
         worker.close()
     return 0

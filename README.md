@@ -309,30 +309,63 @@ Important settings:
 - C++ `C++ Link Libraries`: extra link items such as `-lm`, `-lmy_library`, or `/path/to/libfoo.a`.
 - C++ `Initialize Code`: generated constructor code executed once after publisher/subscriber setup and before loop/timer execution.
 
-C++ custom nodes can use generated helpers such as `has_in1()`, `latest_in1()`, and `publish_out1(msg)`. Keep persistent state in classes or objects defined in the Header. The generated `main()` runs `while (rclcpp::ok())` and calls Loop Code every cycle. The default Loop Code contains:
+C++ custom nodes can use generated helpers such as `has_in1()`, `latest_in1()`, and `publish_out1(msg)`. Keep persistent state in classes or objects defined in the Header.
+
+Loop Code is this node's own loop, exactly as in a hand-written `rclcpp` node. You write the loop, and `main()` calls Loop Code once:
 
 ```cpp
-rclcpp::spin_some(node);
-loop_rate.sleep();
+while (rclcpp::ok()) {
+  rclcpp::spin_some(node);   // dispatch ready input callbacks and timers
+  loop_rate.sleep();         // hold Run Hz
+}
 ```
 
-Replace Loop Code with `rclcpp::spin(node);` when you want a callback-only blocking node. Keep the default `spin_some` + `loop_rate.sleep()` when you also need periodic work.
+For a callback-only node, replace that with:
+
+```cpp
+rclcpp::spin(node);
+```
+
+Loop Code counts as self-driving when it contains its own `while` / `for`, or calls `rclcpp::spin(...)`; commented-out examples are ignored. Loop Code that has none of those is treated as a single cycle body and `main()` wraps it in `while (rclcpp::ok())`, which is what C++ projects saved before this convention contain, so they keep working unchanged.
+
+## Code Scope Reference
+
+Every code slot is opened from the node inspector, and the editor shows this same reference — name, type, and contents — under the text area.
+
+Python `Callback Code` runs once per received message. `msg` is the message **as a dict of its fields**, not a ROS message object:
+
+| Name | Type | Contents |
+| --- | --- | --- |
+| `msg` | `dict` | Received message fields. `std_msgs/Float64` arrives as `{"data": 1.0}`; `sensor_msgs/Image` as `{"height", "width", "encoding", "step", "is_bigendian", "data"}` where `data` is bytes-like, so `np.frombuffer(msg["data"], dtype=np.uint8)` works. |
+| `input_id` | `str` | Id of the input port that received the message. |
+| `request` | `dict` | Same object as `msg`; use this name for a service input. |
+| `response` | `srv Response` / `None` | For a service input, fill its fields to answer the caller. `None` for topic inputs. |
+| `node` | `lwrclpy.Node` | This node, for APIs such as `node.get_clock()`. |
+| `state` | `dict` | Empty at startup, kept for the node's lifetime. Use it for anything that must survive between calls. |
+| `params` | `dict` | The Parameters JSON. Every key is also a plain variable of the same name. |
+| `publish(output_id, value)` | function | Sends `value` on an output port. `value` may be a dict of message fields. |
+| `log(*values)` | function | Writes to the node's log panel; `print(...)` is equivalent. |
+
+Python `Main Loop` is this node's own loop, written the way a hand-written `rclpy` node is written. The default is `rclpy.spin(node)`, which dispatches input callbacks and Timer Callbacks until shutdown; write `while rclpy.ok(): ...` yourself when you want an explicit tick:
+
+| Name | Type | Contents |
+| --- | --- | --- |
+| `rclpy` | module | The `lwrclpy` module: `rclpy.ok()`, `rclpy.spin(node)`, `rclpy.spin_once(node, timeout_sec=...)`. |
+| `rate` | `Rate` | `rate.sleep()` waits out the remainder of the current period, so your work is not added on top of it. |
+| `run_hz` / `loop_period` | `float` | Configured Run Hz, and `1.0 / run_hz` in seconds. |
+| `now` | `float` | `time.time()` sampled when the call started. |
+| `has_input(input_id)` | function → `bool` | True while unread values are queued on that input. |
+| `latest(input_id, default=None)` | function → `dict` / `None` | Most recent value, without consuming it. |
+| `take(input_id, default=None)` | function → `dict` / `None` | Removes and returns the oldest queued value. |
+| `inputs` | `dict` | Snapshot of the last value per input id. |
+
+Python `Timer Callback` runs every `periodSec` seconds regardless of input traffic, and — like ROS 2 `create_timer` — first fires one full period after start. It sees `timer_id` (`str`), `timer_name` (`str`), `period` (`float`), `now` (`float`), the `has_input` / `latest` / `take` / `inputs` group, and the shared `node` / `state` / `params` / `publish` / `log` group.
+
+Python `Import Code` runs once after the node's venv is ready and before any callback. Names defined there are visible from Callback, Main Loop, and Timer code.
+
+C++ `Callback Code`, `Loop Code`, and `Timer Callback` see `msg` as `const pkg::msg::Type&`, `now` as `std::chrono::steady_clock::time_point`, `has_<input_id>()` returning `bool`, `latest_<input_id>()` returning `const pkg::msg::Type*` (`nullptr` until the first message), and `publish_<output_id>(msg)`. Loop Code additionally sees `node` and `loop_rate`.
 
 ## Python Callback Code
-
-When `Use Callback` is enabled, Callback Code runs whenever an input receives a value. When disabled, use Main Loop or Timer Callback with `latest()` / `take()`.
-
-Available values include:
-
-- `node`
-- `input_id`
-- `msg`
-- `request`
-- `response`
-- `state`
-- `params`
-- `publish(output_id, value)`
-- `log(...)`
 
 Example:
 
@@ -356,19 +389,32 @@ For multiple outputs, call `publish(...)` once per output port.
 
 ## Timers And Main Loop
 
-Timer callbacks run at their configured periods. Like ROS 2 `create_timer`, the first callback runs after one full period rather than immediately at Run start.
+Timer callbacks are registered with `node.create_timer()`, so they fire from the executor whenever the node is spinning. Like ROS 2 `create_timer`, the first callback runs after one full period rather than immediately at Run start.
 
 ```python
 state["count"] = state.get("count", 0) + 1
 publish("out1", str(state["count"]))
 ```
 
-Main Loop runs every tick. Prefer Callback Code for data-dependent processing when possible.
+Main Loop is the node's own loop. The default is the `rclpy` idiom:
 
 ```python
-if state.get("enabled", True):
-    node.get_logger().info("tick")
+rclpy.spin(node)
 ```
+
+That dispatches input callbacks and Timer Callbacks until shutdown, so periodic work belongs in a Timer Callback. Write the loop yourself when you want an explicit tick, and it is used as-is:
+
+```python
+while rclpy.ok():
+    rclpy.spin_once(node, timeout_sec=0.0)
+    if state.get("enabled", True):
+        node.get_logger().info("tick")
+    rate.sleep()
+```
+
+Main Loop counts as self-driving when it contains a top-level `while`, or calls `spin(...)` / `spin_until_future_complete(...)`; it is then executed once. The code is parsed to decide this, so a commented-out example or a spin call inside a string does not count. Anything else is treated as a single tick body and is called repeatedly at Run Hz — which is what projects saved before this convention contain, so they keep working unchanged.
+
+Prefer Callback Code for data-dependent processing: it runs as soon as a message arrives instead of waiting for the next tick. Note that `spin_once(node, timeout_sec=0.0)` dispatches **one** callback per call, exactly as in ROS 2, so a hand-written tick loop processes one callback per period. Use `rclpy.spin(node)` when a node must keep up with a high-rate topic.
 
 ## Built-In Nodes
 

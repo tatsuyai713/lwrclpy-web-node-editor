@@ -109,7 +109,7 @@
           "dataType": "std_msgs/msg/Float32"
         }
       ],
-      "loopCode": "rclcpp::spin_some(node);\nif (has_a() && has_b()) {\n  const double a = static_cast<double>(latest_a()->data);\n  const double b = static_cast<double>(latest_b()->data);\n  std_msgs::msg::Float32 sum;\n  sum.data = static_cast<float>(a + b);\n  publish_sum(sum);\n  std_msgs::msg::Float32 diff;\n  diff.data = static_cast<float>(a - b);\n  publish_difference(diff);\n}\nloop_rate.sleep();\n",
+      "loopCode": "while (rclcpp::ok()) {\n  rclcpp::spin_some(node);\n  if (has_a() && has_b()) {\n    const double a = static_cast<double>(latest_a()->data);\n    const double b = static_cast<double>(latest_b()->data);\n    std_msgs::msg::Float32 sum;\n    sum.data = static_cast<float>(a + b);\n    publish_sum(sum);\n    std_msgs::msg::Float32 diff;\n    diff.data = static_cast<float>(a - b);\n    publish_difference(diff);\n  }\n  loop_rate.sleep();\n}\n",
       "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,

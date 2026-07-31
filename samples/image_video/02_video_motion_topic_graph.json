@@ -9291,7 +9291,7 @@
           "dataType": "std_msgs/msg/Float32"
         }
       ],
-      "loopCode": "# Main Loop runs repeatedly while the graph is running.\n# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks\n# without creating a busy loop.\n# Available:\n#   rclpy, node, rate, run_hz, loop_period, state, now\n#   latest(input_id), take(input_id), has_input(input_id)\n#   publish(output_id, value), log(...)\n#\n# Add periodic work between spin_once(...) and rate.sleep().\nrclpy.spin_once(node, timeout_sec=0.0)\n# Example:\n# if has_input(\"in1\"):\n#     msg = latest(\"in1\")\n#     publish(\"out1\", msg)\nrate.sleep()\n",
+      "loopCode": "# Main Loop is this node's own loop, like a hand-written rclpy node.\n# rclpy.spin(node) dispatches input callbacks and Timer Callbacks until\n# shutdown, so periodic work belongs in a Timer Callback.\n# Scope (see the reference under the editor for types):\n#   rclpy, node, rate, run_hz, loop_period, state, params, now\n#   latest(input_id), take(input_id), has_input(input_id)\n#   publish(output_id, value), log(...)\n#\n# Write the loop yourself instead when you prefer an explicit tick:\n#   while rclpy.ok():\n#       rclpy.spin_once(node, timeout_sec=0.0)\n#       # periodic work\n#       rate.sleep()\nrclpy.spin(node)\n",
       "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,
@@ -9330,7 +9330,7 @@
           "dataType": "sensor_msgs/msg/Image"
         }
       ],
-      "loopCode": "# Main Loop runs repeatedly while the graph is running.\n# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks\n# without creating a busy loop.\n# Available:\n#   rclpy, node, rate, run_hz, loop_period, state, now\n#   latest(input_id), take(input_id), has_input(input_id)\n#   publish(output_id, value), log(...)\n#\n# Add periodic work between spin_once(...) and rate.sleep().\nrclpy.spin_once(node, timeout_sec=0.0)\n# Example:\n# if has_input(\"in1\"):\n#     msg = latest(\"in1\")\n#     publish(\"out1\", msg)\nrate.sleep()\n",
+      "loopCode": "# Main Loop is this node's own loop, like a hand-written rclpy node.\n# rclpy.spin(node) dispatches input callbacks and Timer Callbacks until\n# shutdown, so periodic work belongs in a Timer Callback.\n# Scope (see the reference under the editor for types):\n#   rclpy, node, rate, run_hz, loop_period, state, params, now\n#   latest(input_id), take(input_id), has_input(input_id)\n#   publish(output_id, value), log(...)\n#\n# Write the loop yourself instead when you prefer an explicit tick:\n#   while rclpy.ok():\n#       rclpy.spin_once(node, timeout_sec=0.0)\n#       # periodic work\n#       rate.sleep()\nrclpy.spin(node)\n",
       "timers": [],
       "timerEnabled": false,
       "timerPeriodSec": 1.0,

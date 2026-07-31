@@ -371,6 +371,36 @@ def apply_link_topics(project: dict[str, Any]) -> list[dict[str, Any]]:
     return nodes
 
 
+class LoopRate:
+    """Rate helper with ROS 2 ``Rate`` semantics for exported Main Loop code.
+
+    ``sleep()`` waits only until the end of the current period.  This runner
+    ticks every node from one thread, so sleeping a whole period per call would
+    serialise the whole graph behind the slowest node.
+    """
+
+    def __init__(self, hz: float) -> None:
+        self.hz = max(1.0, float(hz or 60.0))
+        self._next_at = 0.0
+
+    @property
+    def period(self) -> float:
+        return 1.0 / self.hz
+
+    def sleep(self) -> None:
+        now = time.monotonic()
+        if self._next_at <= 0.0:
+            self._next_at = now
+        self._next_at += self.period
+        if self._next_at <= now:
+            # Behind schedule: do not sleep, and re-anchor to now so the next
+            # call measures its remainder from here instead of being handed a
+            # free extra period.
+            self._next_at = now
+            return
+        time.sleep(self._next_at - now)
+
+
 class RuntimeNode:
     def __init__(self, rclpy: Any, config: dict[str, Any]) -> None:
         self.rclpy = rclpy
@@ -390,7 +420,14 @@ class RuntimeNode:
         self.mcap_record_process: subprocess.Popen | None = None
         self.video_period = 1.0 / max(0.1, float(self.params.get("publishHz") or 30.0))
         self._globals_cache: dict[str, Any] | None = None
+        self._loop_rate = LoopRate(self._run_hz())
         self._setup_transport()
+
+    def _run_hz(self) -> float:
+        try:
+            return max(1.0, min(float(self.params.get("_runHz") or 60.0), 120.0))
+        except Exception:
+            return 60.0
 
     def _setup_transport(self) -> None:
         if self.tool in {"video_file_input", "image_file_input", "function_generator"}:
@@ -935,6 +972,10 @@ class RuntimeNode:
         return globals_dict
 
     def _locals(self, extra: dict[str, Any]) -> dict[str, Any]:
+        # Main Loop code written in the editor also sees rclpy, rate, run_hz and
+        # loop_period; without them the default loop template raises NameError on
+        # every tick of an exported package.
+        run_hz = self._run_hz()
         return {
             "node": self.node,
             "params": self.params,
@@ -944,6 +985,10 @@ class RuntimeNode:
             "latest": lambda input_id, default=None: self.last_inputs.get(input_id, default),
             "take": self.take,
             "has_input": lambda input_id: bool(self.input_queues.get(input_id)),
+            "rclpy": self.rclpy,
+            "rate": self._loop_rate,
+            "run_hz": run_hz,
+            "loop_period": 1.0 / run_hz,
             **extra,
         }
 

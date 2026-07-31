@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m py_compile main.py run_project.py lwrclpy_web_node_editor/*.py lwrclpy_web_node_editor/nodes/__init__.py scripts/install_lwrclpy.py samples/generate_sample_projects.py)",
+      "Bash(node --check lwrclpy_web_node_editor/static/app.js)",
+      "Bash(python3 -m py_compile lwrclpy_web_node_editor/node_worker.py lwrclpy_web_node_editor/graph.py)",
+      "Bash(python3 -m py_compile lwrclpy_web_node_editor/server.py)",
+      "Bash(python3 -m py_compile lwrclpy_web_node_editor/video_dds_worker.py lwrclpy_web_node_editor/dds_tap_worker.py)",
+      "Bash(python3 -)",
+      "Bash(python3 -m py_compile lwrclpy_web_node_editor/node_worker.py lwrclpy_web_node_editor/graph.py lwrclpy_web_node_editor/builtin_source_worker.py)",
+      "Bash(python3 -m py_compile lwrclpy_web_node_editor/mcap_record_worker.py lwrclpy_web_node_editor/builtin_source_worker.py lwrclpy_web_node_editor/dds_tap_worker.py lwrclpy_web_node_editor/video_dds_worker.py)",
+      "Bash(python3 -m py_compile lwrclpy_web_node_editor/cli_export_runner.py)",
+      "Bash(python3 -m py_compile main.py run_project.py lwrclpy_web_node_editor/*.py scripts/install_lwrclpy.py samples/generate_sample_projects.py)"
+    ]
+  }
+}

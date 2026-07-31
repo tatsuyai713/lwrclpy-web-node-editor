@@ -11,37 +11,39 @@ from pathlib import Path
 OUT_DIR = Path(__file__).resolve().parent
 DEFAULT_PYTHON_VERSION = "3.13"
 DEFAULT_LWRCLPY_VERSION = "0.5.1"
-DEFAULT_CPP_NOOP_LOOP = """// Loop Code runs repeatedly while rclcpp::ok() is true.
-// Keep rclcpp::spin_some(node) and loop_rate.sleep() here to process
-// callbacks without creating a busy loop.
-// Available:
+DEFAULT_CPP_NOOP_LOOP = """// Loop Code is this node's own loop, like a hand-written rclcpp node.
+// rclcpp::spin_some(node) dispatches ready input callbacks and timers, and
+// loop_rate.sleep() holds Run Hz.
+// Scope (see the reference under the editor for types):
 //   node, loop_rate, now
 //   has_<input_id>(), latest_<input_id>()
 //   publish_<output_id>(message)
 //
-// Add periodic work between spin_some(...) and loop_rate.sleep().
-rclcpp::spin_some(node);
-// Example:
-//   if (has_in1()) {
-//     auto value = latest_in1()->data;
-//   }
-loop_rate.sleep();
+// For a callback-only node, replace the loop below with rclcpp::spin(node);
+while (rclcpp::ok()) {
+  rclcpp::spin_some(node);
+  // Periodic work goes here.
+  // Example:
+  //   if (has_in1()) {
+  //     auto value = latest_in1()->data;
+  //   }
+  loop_rate.sleep();
+}
 """
-DEFAULT_PYTHON_LOOP_CODE = """# Main Loop runs repeatedly while the graph is running.
-# Keep rclpy.spin_once(...) and rate.sleep() here to process callbacks
-# without creating a busy loop.
-# Available:
-#   rclpy, node, rate, run_hz, loop_period, state, now
+DEFAULT_PYTHON_LOOP_CODE = """# Main Loop is this node's own loop, like a hand-written rclpy node.
+# rclpy.spin(node) dispatches input callbacks and Timer Callbacks until
+# shutdown, so periodic work belongs in a Timer Callback.
+# Scope (see the reference under the editor for types):
+#   rclpy, node, rate, run_hz, loop_period, state, params, now
 #   latest(input_id), take(input_id), has_input(input_id)
 #   publish(output_id, value), log(...)
 #
-# Add periodic work between spin_once(...) and rate.sleep().
-rclpy.spin_once(node, timeout_sec=0.0)
-# Example:
-# if has_input("in1"):
-#     msg = latest("in1")
-#     publish("out1", msg)
-rate.sleep()
+# Write the loop yourself instead when you prefer an explicit tick:
+#   while rclpy.ok():
+#       rclpy.spin_once(node, timeout_sec=0.0)
+#       # periodic work
+#       rate.sleep()
+rclpy.spin(node)
 """
 
 

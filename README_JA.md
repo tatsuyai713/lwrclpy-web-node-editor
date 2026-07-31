@@ -346,24 +346,40 @@ C++ノードとPythonノードを混在させた場合、export時に同じグ�
 
 ポート同士は型が一致すると接続できます。1つの出力ポートから複数のノードへ接続した場合、その出力から出るtopic名は同じ名前に同期されます。
 
-C++ノードでは、Initialize Code、入力ポートのCallback Code、Loop Code、Timer Callback Codeが生成C++クラスに埋め込まれます。入力ポートごとに `has_in1()` / `latest_in1()`、出力ポートごとに `publish_out1(msg)` のようなヘルパーを使えます。継続して保持したい値は、Headerで定義したclass/objectのメンバーとして持たせます。生成された `main()` は `while (rclcpp::ok())` で回り、各周期で Loop Code を呼びます。Loop Codeのデフォルトには `rclcpp::spin_some(node);` と `loop_rate.sleep();` が入り、Loop周波数はWeb実行の `runHz` に合わせて `rclcpp::Rate loop_rate` に渡します。Callbackだけで処理したい場合は、Loop Codeを `rclcpp::spin(node);` に置き換えるとそこでブロッキング実行できます。周期処理も行う場合はデフォルトの `spin_some` + `loop_rate.sleep()` を使います。これはArduinoの `setup()` / `loop()` に近い使い方です。
+C++ノードでは、Initialize Code、入力ポートのCallback Code、Loop Code、Timer Callback Codeが生成C++クラスに埋め込まれます。入力ポートごとに `has_in1()` / `latest_in1()`、出力ポートごとに `publish_out1(msg)` のようなヘルパーを使えます。継続して保持したい値は、Headerで定義したclass/objectのメンバーとして持たせます。Loop Codeは、手書きの `rclcpp` ノードとまったく同じ「ノード自身のループ」です。ループはユーザーが書き、`main()` はLoop Codeを1回だけ呼びます。
+
+```cpp
+while (rclcpp::ok()) {
+  rclcpp::spin_some(node);   // 入力コールバックとタイマーを処理
+  loop_rate.sleep();         // Run Hz を保つ
+}
+```
+
+Callbackだけで処理したい場合は、これを次のように置き換えてください。
+
+```cpp
+rclcpp::spin(node);
+```
+
+Loop周波数はWeb実行の `runHz` が `rclcpp::Rate loop_rate` に渡ります。Loop Codeが「自分でループを回す」と判定されるのは、`while` / `for` を含む場合、または `rclcpp::spin(...)` を呼ぶ場合です（コメントアウトされた例は判定に影響しません）。どちらも無いLoop Codeは「1周期分の本体」として扱われ、`main()` が `while (rclcpp::ok())` で囲みます。この規約より前に保存されたC++プロジェクトは後者に該当するので、そのまま動きます。
 
 ## Callback Codeの書き方
 
 入力ポートの `Use Callback` がONの場合、その入力に値が届いたときにCallback Codeが実行されます。OFFの場合はCallback Codeを使わず、Main LoopやTimer Callbackから `latest()` / `take()` で入力を読みます。
 
-Callback Codeで使える主な変数は次の通りです。
+Callback Codeで使える変数は次の通りです。同じ一覧は、エディタのコード編集ダイアログ内（テキストエリアの下）にも型付きで表示されます。
 
-- `node`: lwrclpy互換のノードオブジェクトです。`node.get_logger().info(...)` が使えます。
-- `input_id`: どの入力ポートに届いたかを表すIDです。
-- `msg`: 届いたメッセージです。
-- `request`: service入力の場合のrequestです。message入力では `msg` と同じ値です。
-- `response`: service入力の場合のresponseです。
-- `state`: ノードごとに保持される辞書です。前フレームや累積値を保存できます。
-- `params`: ノードのパラメータ辞書です。
-- GUIで設定したパラメータ名が有効なPython識別子の場合、同名の変数としても参照できます。たとえば `pointsPerSide` は `params.get("pointsPerSide")` でも `pointsPerSide` でも使えます。`msg` や `publish` など実行スコープの予約名と衝突する名前は直接変数化されません。
-- `publish(output_id, value)`: 出力ポートへ値を出します。
-- `log(...)`: ノードログへ文字列を出します。
+| 変数 | 型 | 中身 |
+| --- | --- | --- |
+| `msg` | `dict` | 届いたメッセージを**フィールドの辞書に変換したもの**です。ROSメッセージオブジェクトではありません。`std_msgs/Float64` なら `{"data": 1.0}`、`sensor_msgs/Image` なら `{"height", "width", "encoding", "step", "is_bigendian", "data"}` で、`data` はbytes相当なので `np.frombuffer(msg["data"], dtype=np.uint8)` がそのまま使えます。 |
+| `input_id` | `str` | どの入力ポートに届いたかを表すIDです。 |
+| `request` | `dict` | service入力用の名前です。`msg` と同じオブジェクトを指します。 |
+| `response` | `srv Response` / `None` | service入力の場合、フィールドを埋めると呼び出し元へ返ります。topic入力では `None` です。 |
+| `node` | `lwrclpy.Node` | このノードです。`node.get_logger().info(...)` や `node.get_clock()` が使えます。 |
+| `state` | `dict` | 起動時は空で、ノードが生きている間ずっと保持されます。前フレームや累積値の保存に使います。 |
+| `params` | `dict` | ノードのパラメータJSONです。各キーは同名の変数としても参照できます（例: `pointsPerSide`）。`msg` や `publish` など予約名と衝突する名前は変数化されません。 |
+| `publish(output_id, value)` | 関数 | 出力ポートへ値を出します。`value` はメッセージフィールドの辞書でもかまいません。 |
+| `log(*values)` | 関数 | ノードログへ出力します。`print(...)` も同じです。 |
 
 例: `std_msgs/msg/String` を受け取って別ポートへ流す場合。
 
@@ -426,18 +442,47 @@ publish("out_alert", is_alert)
 
 ## Timer CallbackとMain Loop
 
-Timer Callbackは、Run中に設定周期へ到達したときに実行されます。1ノードに複数のTimerを設定でき、Timerごとに `timer_id`, `timer_name`, `period` が渡されます。ROS 2の `create_timer` に合わせ、初回callbackはRun開始直後ではなく1周期後に実行されます。
+Timer Callbackは `node.create_timer()` で登録されるので、ノードがspinしている間はexecutorから発火します。1ノードに複数のTimerを設定でき、Timerごとに `timer_id`, `timer_name`, `period` が渡されます。ROS 2の `create_timer` に合わせ、初回callbackはRun開始直後ではなく1周期後に実行されます。
 
 ```python
 state["count"] = state.get("count", 0) + 1
 publish("out1", str(state["count"]))
 ```
 
-Main Loopは各tickで実行される任意処理です。データ入力に反応する処理はCallback Codeを使う方が、lwrclpyへエクスポートしやすくなります。
+Main Loopは、手書きの `rclpy` ノードと同じ「ノード自身のループ」です。デフォルトはrclpyの定型どおり `rclpy.spin(node)` で、入力コールバックとTimer Callbackをshutdownまでディスパッチします。周期処理はTimer Callbackに書いてください。
+
+明示的なtickにしたい場合は、自分で `while` を書けばそのまま使われます。
+
+```python
+while rclpy.ok():
+    rclpy.spin_once(node, timeout_sec=0.0)
+    # 周期処理
+    rate.sleep()
+```
+
+Main Loopが「自分でループを回す」と判定されるのは、トップレベルに `while` がある場合、または `spin(...)` / `spin_until_future_complete(...)` を呼ぶ場合で、そのときは1回だけ実行されます。判定はASTで行うため、コメントアウトされた例や文字列中のspinは影響しません。それ以外は「1tick分の本体」として Run Hz で繰り返し呼ばれます。この規約より前に保存されたプロジェクトは後者に該当するので、そのまま動きます。
+
+Main Loopで使える変数:
+
+| 変数 | 型 | 中身 |
+| --- | --- | --- |
+| `rate` | `Rate` | `rate.sleep()` は周期の**残り時間だけ**待ちます。処理時間が周期に上乗せされません。 |
+| `run_hz` / `loop_period` | `float` | 設定された Run Hz と、その逆数（秒）です。 |
+| `now` | `float` | 呼び出し開始時点の `time.time()` です。 |
+| `rclpy` | module | `lwrclpy` モジュールです。`rclpy.ok()` / `rclpy.spin(node)` / `rclpy.spin_once(node, timeout_sec=...)` が使えます。 |
+| `has_input(input_id)` | 関数 → `bool` | その入力に未読の値が溜まっている間 True です。 |
+| `latest(input_id, default=None)` | 関数 → `dict` / `None` | 最後に届いた値を、消費せずに返します。 |
+| `take(input_id, default=None)` | 関数 → `dict` / `None` | 最も古い値を取り出して削除します。 |
+| `inputs` | `dict` | 入力IDごとの最新値のスナップショットです。 |
+
+加えて `node` / `state` / `params` / `publish` / `log` はCallback Codeと同じものが使えます。Timer Callbackでは `rate` / `rclpy` / `run_hz` / `loop_period` の代わりに `timer_id`（`str`）、`timer_name`（`str`）、`period`（`float`）が渡されます。
+
+データ入力に反応する処理はCallback Codeに書く方が、次のtickを待たずに即座に動くうえ、lwrclpyへエクスポートしやすくなります。なお `spin_once(node, timeout_sec=0.0)` はROS 2と同じく**1回で1コールバックだけ**処理するので、自分で書いたtickループは1周期あたり1コールバックになります。高レートのトピックに追従させたいノードでは `rclpy.spin(node)` を使ってください。
 
 ```python
 if state.get("enabled", True):
     node.get_logger().info("tick")
+rate.sleep()
 ```
 
 ## 画像・動画ノード

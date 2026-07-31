@@ -6,23 +6,45 @@ import shlex
 from typing import Any
 
 
-DEFAULT_CPP_NOOP_LOOP = """// Loop Code runs repeatedly while rclcpp::ok() is true.
-// Keep rclcpp::spin_some(node) and loop_rate.sleep() here to process
-// callbacks without creating a busy loop.
-// Available:
+DEFAULT_CPP_NOOP_LOOP = """// Loop Code is this node's own loop, like a hand-written rclcpp node.
+// rclcpp::spin_some(node) dispatches ready input callbacks and timers, and
+// loop_rate.sleep() holds Run Hz.
+// Scope (see the reference under the editor for types):
 //   node, loop_rate, now
 //   has_<input_id>(), latest_<input_id>()
 //   publish_<output_id>(message)
 //
-// Add periodic work between spin_some(...) and loop_rate.sleep().
-rclcpp::spin_some(node);
-// Example:
-//   if (has_in1()) {
-//     auto value = latest_in1()->data;
-//   }
-loop_rate.sleep();"""
+// For a callback-only node, replace the loop below with rclcpp::spin(node);
+while (rclcpp::ok()) {
+  rclcpp::spin_some(node);
+  // Periodic work goes here.
+  // Example:
+  //   if (has_in1()) {
+  //     auto value = latest_in1()->data;
+  //   }
+  loop_rate.sleep();
+}"""
 
 PYTHON_DEFAULT_IMPORT_MARKER = "Import Code runs once after this node's Python venv is ready"
+
+
+def strip_cpp_comments(code: str) -> str:
+    """Drop // and /* */ comments so code checks ignore commented-out examples."""
+    without_block = re.sub(r"/\*.*?\*/", " ", code, flags=re.S)
+    return re.sub(r"//[^\n]*", "", without_block)
+
+
+def cpp_loop_is_self_driving(code: str) -> bool:
+    """True when Loop Code runs its own cycle instead of relying on main().
+
+    Loop Code that writes ``while (rclcpp::ok())`` itself, or blocks in
+    ``rclcpp::spin(node)``, must be called once rather than wrapped in another
+    loop.
+    """
+    body = strip_cpp_comments(code)
+    if re.search(r"\bwhile\s*\(", body) or re.search(r"\bfor\s*\(", body):
+        return True
+    return bool(re.search(r"\brclcpp\s*::\s*spin\s*\(", body))
 
 
 def safe_cpp_identifier(value: object, fallback: str = "node") -> str:
@@ -222,6 +244,13 @@ def render_cpp_node_source(node: dict[str, Any], run_hz: float = 60.0) -> str:
     loop_code = str(node.get("loopCode") or "").strip()
     if not loop_code:
         loop_code = DEFAULT_CPP_NOOP_LOOP
+    # Loop Code that drives itself — an explicit while (rclcpp::ok()) or a
+    # blocking rclcpp::spin(node) — is called once and owns execution from
+    # there. Otherwise the generated main() supplies the cycle.
+    if cpp_loop_is_self_driving(loop_code):
+        main_loop_body = "  node->loop_once(node, loop_rate);"
+    else:
+        main_loop_body = "  while (rclcpp::ok()) {\n    node->loop_once(node, loop_rate);\n  }"
     return f"""{include_text}{header_block}
 
 class {class_name} : public rclcpp::Node {{
@@ -255,9 +284,7 @@ int main(int argc, char** argv) {{
   rclcpp::init(argc, argv);
   auto node = std::make_shared<{class_name}>();
   rclcpp::Rate loop_rate({loop_hz:.6g});
-  while (rclcpp::ok()) {{
-    node->loop_once(node, loop_rate);
-  }}
+{main_loop_body}
   rclcpp::shutdown();
   return 0;
 }}

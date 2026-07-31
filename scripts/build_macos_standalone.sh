@@ -208,6 +208,9 @@ copy_cpp_dependency_prefixes() {
     echo "WARNING: bundled C++ prefix does not contain lwrcl.hpp and liblwrcl.dylib." >&2
     echo "Set LWRCL_PREFIX=/path/to/lwrcl/install or CPP_DEP_PREFIXES=/path/one:/path/two and rebuild." >&2
   fi
+  # The copied prefix still points at the machine it was built on, which breaks
+  # dylib symlinks and C++ node linking once the app is installed elsewhere.
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/relocate_cpp_prefix.py" "$target"
 }
 
 if [[ -z "$PYTHON_BIN" ]]; then
