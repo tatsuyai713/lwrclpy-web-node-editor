@@ -2,615 +2,596 @@
 
 [English README](README.md)
 
-`lwrclpy Web Node Editor` は、ブラウザ上で画像処理・動画処理・数値処理のノードグラフを作り、各ノードのコードを編集・実行・保存・エクスポートできるWebアプリです。カスタムノードはPython / `lwrclpy` またはC++ / `lwrcl` + FastDDSを選択できます。
+ブラウザ上でノードをつなぎ、画像・動画・数値・ROS 2互換メッセージを処理できるノードエディタです。Python / `lwrclpy` ノードとC++ / `lwrcl` ノードを同じグラフで実行できます。
 
-ROS 2本体のインストールは不要です。`lwrclpy` が提供する `rclpy` 互換APIを使い、ノードコードは `msg` を受け取って `publish(...)` で出力するcallbackスタイルで書けます。
+ROS 2本体のインストールは不要です。
 
-<img width="1407" height="902" alt="Screenshot 2026-07-21 at 13 48 16" src="https://github.com/user-attachments/assets/e570e712-fc23-4d9a-8852-60a61db4d8ca" />
+<img width="1407" height="902" alt="lwrclpy Web Node Editor" src="https://github.com/user-attachments/assets/e570e712-fc23-4d9a-8852-60a61db4d8ca" />
 
+## 動作手順
 
-## できること
+最初はC++環境を用意せず、Pythonノードだけで起動確認します。次の手順を上から順に実行してください。
 
-- ブラウザでノードを作成し、入力・処理・表示・グラフ化・topic出力を接続できます。
-- `Image File Input` で画像を読み込み、`sensor_msgs/msg/Image` として処理できます。
-- `Video File Input` で動画ファイルを選択し、Run中に `sensor_msgs/msg/Image` として流せます。
-- `MCAP File Input` / `MCAP Record` でROS 2 MCAP/rosbagの再生と記録ができます。
-- `Image Viewer` で画像を表示できます。
-- `String Viewer` / `Chat String Viewer` で `std_msgs/msg/String` の最新内容や、LLM応答をチャット形式で表示できます。
-- `Graph Viewer` で `std_msgs/msg/Float32` などの数値や、メッセージ内の数値フィールドをプロットできます。
-- `3D Viewer` でTF、PointCloud2、OccupancyGrid、URDF/Xacro由来のRobot Modelを3D表示できます。
-- `Interactive Text Input` でRun中に文字列promptを入力し、送信ボタンで `std_msgs/msg/String` としてpublishできます。
-- `LLM Text` で `std_msgs/msg/String` のpromptをOllama/OpenAI/OpenAI互換API/LM Studioへ渡し、responseをtopicとして出力できます。
-- `URDF Static TF` と `TF Merge` で、URDF/Xacroからの静的TFと複数ノードのTF入出力をグラフ上で接続できます。
-- `Topic Input` / `Topic Output` で、グラフ外部とのtopic境界を表現できます。
-- カスタムノードごとに `requirements.txt` を持たせ、実行前に `.node_envs/<node-id>` のvenvへ依存をセットアップできます。
-- カスタムノードごとにPython / `lwrclpy` とC++ / `lwrcl` + FastDDSを選択できます。C++ノードはWeb実行時に自動ビルド・worker起動され、CLI export時にもC++コードとCMakeビルドファイルとして出力されます。
-- プロジェクト全体をJSONとしてSave/Loadできます。
-- カスタムノードを個別のPythonファイルとしてExport/Importできます。
-- カスタムノード群をROS 2 Python package形式またはCLI実行パッケージのzipとしてExportできます。C++ノードが含まれる場合は `cpp_nodes/` と `build_cpp_nodes.sh` も含まれます。
+### 1. PythonとGitを入れる
 
-## 実行方法
+必要なものは次の2つです。
 
-このREADMEがある `lwrclpy_web_node_editor` ディレクトリで実行します。
+- 64-bit版 Python 3.13
+- Git
+
+#### Windows
+
+1. [Python 3.13 for Windows](https://www.python.org/downloads/windows/)をインストールします。
+2. Pythonインストーラーで **Python Launcher** を有効にします。
+3. [Git for Windows](https://git-scm.com/download/win)をインストールします。
+4. PowerShellを新しく開き、次を確認します。
+
+```powershell
+py -3.13 --version
+git --version
+```
+
+両方のバージョンが表示されれば準備完了です。
+
+#### macOS
+
+[Homebrew](https://brew.sh/)をインストールした後、ターミナルで実行します。
+
+```bash
+brew install python@3.13 git
+python3.13 --version
+git --version
+```
+
+#### Ubuntu Linux
+
+Gitと基本パッケージをインストールします。
+
+WSLを使用している場合は、ここではGitだけを入れてリポジトリを取得し、次の「WSLの場合」に進んでください。
+
+```bash
+sudo apt update
+sudo apt install -y git curl python3-venv
+```
+
+利用中のUbuntuにPython 3.13パッケージがある場合:
+
+```bash
+sudo apt install -y python3.13 python3.13-venv
+```
+
+`python3.13` パッケージがない場合は、`uv`を使ってPython 3.13をインストールできます。
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+"$HOME/.local/bin/uv" python install 3.13
+"$HOME/.local/bin/uv" python update-shell
+```
+
+ターミナルを開き直し、確認します。
+
+```bash
+python3.13 --version
+git --version
+```
+
+### 2. このリポジトリを取得する
+
+まだ取得していない場合だけ実行します。
+
+```bash
+git clone https://github.com/tatsuyai713/lwrclpy-web-node-editor.git
+cd lwrclpy-web-node-editor
+```
+
+すでにこのREADMEをローカルで開いている場合は、このREADMEがあるディレクトリへ移動するだけで構いません。
+
+### 3. WSLの場合
+
+Ubuntu WSLでは、リポジトリのルートで次を実行します。
+
+```bash
+bash scripts/setup_wsl.sh
+source .venv/bin/activate
+python main.py --host 127.0.0.1 --port 8765
+```
+
+このスクリプトは次を自動で行います。
+
+- WSL環境の確認
+- Git、`venv`、`tkinter`などのUbuntuパッケージ導入
+- Python 3.13の検出または`uv`による導入
+- `.venv`の作成
+- `requirements.txt`と`lwrclpy`のインストール
+- Windowsファイル選択ダイアログ連携の確認
+
+C++ノードも使う場合は、初回セットアップを次のように実行します。FastDDSと`lwrcl`のビルドを含むため時間がかかります。
+
+```bash
+bash scripts/setup_wsl.sh --with-cpp
+source .venv/bin/activate
+export LWRCL_PREFIX="$PWD/.local/fast-dds-libs"
+export DDS_PREFIX="$PWD/.local/fast-dds"
+python main.py --host 127.0.0.1 --port 8765
+```
+
+WSLを使用していない場合は、次へ進みます。
+
+### 4. インストールして起動する
+
+#### Windows
+
+PowerShellで、このREADMEがあるディレクトリから実行します。
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python scripts\install_lwrclpy.py
+python main.py --host 127.0.0.1 --port 8765
+```
+
+`Activate.ps1` の実行が無効というエラーが出た場合は、そのPowerShellだけで一時的に許可してからもう一度activateします。
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+#### macOS / Linux
+
+ターミナルで、このREADMEがあるディレクトリから実行します。
 
 ```bash
 python3.13 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python scripts/install_lwrclpy.py
-.venv/bin/python main.py --host 127.0.0.1 --port 8765
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python scripts/install_lwrclpy.py
+python main.py --host 127.0.0.1 --port 8765
 ```
 
-ローカルでビルドした `lwrclpy` wheel を使う場合は、サーバー起動時に指定できます。指定した wheel はサーバー本体と各ノード専用 `.node_envs/<node-id>` の両方で使用されます。
-
-```bash
-.venv/bin/python main.py --host 127.0.0.1 --port 8765 \
-  --lwrclpy-wheel /Users/tatsuyai/repos/lwrclpy/dist/lwrclpy-0.5.1-cp313-cp313-macosx_26_0_arm64.whl
-```
-
-Windows の App Control / Code Integrity 環境向けに `lwrclpy` wheel を作る場合は、Windows wheel 作成後に次を実行してから配布してください。wheel 内の `lwrclpy/_vendor/lib/libcrypto-3-x64.dll` と `libssl-3-x64.dll` を Python 公式配布の署名済み DLL に差し替え、wheel の `RECORD` も更新します。
-
-```powershell
-python scripts\repair_lwrclpy_windows_wheel.py path\to\lwrclpy-...-win_amd64.whl -o path\to\lwrclpy-...-win_amd64.repaired.whl
-```
-
-この処理は `lwrclpy` / FastDDS 本体の DLL は wheel 同梱のものを使い続け、App Control にブロックされやすい OpenSSL DLL だけを署名済み DLL に置き換えます。
-
-## Linux向けスタンドアロンアプリ化
-
-LinuxではElectronのネイティブウィンドウとPyInstaller製の同梱Pythonサーバーを含むスタンドアロン実行ファイルを作成できます。ビルド時はNode.js/npmも必要です。
-
-1. 通常どおりvenvを準備し、依存を入れます。
-
-```bash
-python3.13 -m venv venv
-venv/bin/python -m pip install -r requirements.txt
-```
-
-1. ビルドスクリプトを実行します。
-
-```bash
-scripts/build_linux_standalone.sh
-```
-
-1. 生成物を起動します（外部ブラウザ不要、Electronのネイティブウィンドウ内にWebUIを表示）。
-
-```bash
-dist/lwrclpy-web-node-editor/lwrclpy-web-node-editor
-```
-
-従来どおりHTTPサーバーとして起動したい場合は次を使います。
-
-```bash
-dist/lwrclpy-web-node-editor/resources/lwrclpy-web-node-editor-server/lwrclpy-web-node-editor-server --server --host 127.0.0.1 --port 8765
-```
-
-デスクトップ起動時は内部サーバーを別プロセスでlocalhost起動し、アプリ内WebViewから接続します。
-
-```text
-lwrclpy Web Node Editor Desktop: http://127.0.0.1:<auto-port>
-```
-
-スタンドアロン実行時の作業ディレクトリは既定で次になります。
-
-```text
-~/.local/share/lwrclpy-web-node-editor
-```
-
-変更したい場合は起動前に次を設定してください。
-
-```bash
-export LWRCLPY_WEB_NODE_EDITOR_HOME=/path/to/workdir
-```
-
-サーバーモードで起動すると次のように表示されます。
+次の表示が出れば起動成功です。
 
 ```text
 lwrclpy Web Node Editor: http://127.0.0.1:8765
 ```
 
-サーバーモードではブラウザで `http://127.0.0.1:8765` を開いてください。
+ブラウザで [http://127.0.0.1:8765](http://127.0.0.1:8765) を開いてください。
 
-同じ作業ディレクトリではサーバー単一起動ロックが有効です。すでに起動中のサーバーがある状態で再起動すると、次のようなエラーで拒否されます。
+### 5. サンプルを実行する
+
+1. 画面上部の `Load` を押します。
+2. `samples/image_video/02_video_motion_topic_graph.json` を選びます。
+3. `Run` を押します。
+4. 動画、処理画像、グラフが動くことを確認します。
+5. 終了するときは `Stop` を押します。
+
+サーバー自体を終了するときは、起動したターミナルで `Ctrl+C` を押します。
+
+### 次回の起動
+
+初回のインストールコマンドを繰り返す必要はありません。
+
+Windows:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python main.py --host 127.0.0.1 --port 8765
+```
+
+macOS / Linux:
+
+```bash
+source .venv/bin/activate
+python main.py --host 127.0.0.1 --port 8765
+```
+
+## C++ノードを使う
+
+Pythonノードだけを使う場合、この章は不要です。
+
+C++ノードにはCMake、C++コンパイラ、FastDDS、`lwrcl`が必要です。`lwrcl`本体の対応環境と最新情報は、必ず[lwrclリポジトリ](https://github.com/tatsuyai713/lwrcl)を確認してください。
+
+### Linux / macOS
+
+先にC++ビルドツールをインストールします。
+
+Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake automake autoconf libtool \
+  bison flex curl wget unzip tar pkg-config libssl-dev libasio-dev
+```
+
+macOS:
+
+```bash
+xcode-select --install
+brew install cmake automake autoconf libtool bison flex openssl@3
+```
+
+次に、このリポジトリのルートでセットアップスクリプトを実行します。
+
+```bash
+scripts/setup_lwrcl_cpp_env.sh \
+  --prefix "$PWD/.local/fast-dds-libs" \
+  --dds-prefix "$PWD/.local/fast-dds"
+```
+
+このスクリプトは[lwrcl](https://github.com/tatsuyai713/lwrcl)を取得し、FastDDS、メッセージ型、`lwrcl`を順にビルドします。完了後、同じターミナルで次を設定してサーバーを起動します。
+
+```bash
+export LWRCL_PREFIX="$PWD/.local/fast-dds-libs"
+export DDS_PREFIX="$PWD/.local/fast-dds"
+source .venv/bin/activate
+python main.py --host 127.0.0.1 --port 8765
+```
+
+C++サンプルは `samples/cpp/` にあります。
+
+### Windows
+
+1. [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)をインストールします。
+2. Visual Studio Installerで **Desktop development with C++** を選びます。
+3. MSVC、Windows SDK、CMake toolsを含めます。
+4. **Developer PowerShell for VS** を開き、`cl` と `cmake --version` を確認します。
+
+さらに、Windows用にビルドされた `lwrcl` + FastDDSのinstall prefixが必要です。現在の[lwrcl公式ビルド手順](https://github.com/tatsuyai713/lwrcl)はLinux、macOS、QNX向けで、このリポジトリのセットアップスクリプトもBash用です。Linux/macOSで作ったライブラリはWindowsでは使用できません。
+
+Windows用prefixを用意済みの場合は、Developer PowerShellで指定します。
+
+```powershell
+$env:LWRCL_PREFIX = "C:\lwrcl\fast-dds-libs"
+$env:DDS_PREFIX = "C:\lwrcl\fast-dds"
+$env:CPP_DEP_PREFIXES = "$env:LWRCL_PREFIX;$env:DDS_PREFIX"
+
+Test-Path "$env:LWRCL_PREFIX\include\lwrcl.hpp"
+Get-ChildItem "$env:LWRCL_PREFIX\lib\*lwrcl*"
+
+.\.venv\Scripts\Activate.ps1
+python main.py --host 127.0.0.1 --port 8765
+```
+
+`Test-Path` が `True` になり、`lwrcl`ライブラリが表示されることを確認してください。
+
+## 主な機能
+
+- 画像・動画・数値処理をノードで接続して実行
+- Python / `lwrclpy` とC++ / `lwrcl` のカスタムノード
+- 画像、グラフ、文字列、TF、PointCloud、Robot Modelの表示
+- MCAP / rosbagの再生と記録
+- 外部DDS topicとの入出力
+- プロジェクトの保存、読込、CLI/ROS 2 packageへのExport
+
+すぐに試せるプロジェクトは `samples/` にあります。全サンプルの説明は [samples/README.md](samples/README.md) を参照してください。
+
+## 基本操作
+
+- `Create Node`: カスタムノードを作成
+- `Load`: 保存済みプロジェクトやサンプルを開く
+- `Save`: 現在のプロジェクトを保存
+- `Run`: グラフを継続実行
+- `Run For`: 指定秒数だけ実行
+- `Stop`: 実行とworkerプロセスを停止
+- `Export CLI Package`: Web画面なしで実行できるZIPを作成
+
+Pythonカスタムノードの `requirements.txt` にパッケージ名を書くと、ノード専用の `.node_envs/<node-id>` へ自動的にインストールされます。
+
+## CLIファイルとしてExportして実行する
+
+CLI Exportを使うと、作成したグラフをWeb画面なしで実行できます。別のPCへ移して実行することもできます。
+
+### 1. CLI PackageをExportする
+
+1. Web Node Editorで実行したいプロジェクトを開きます。
+2. `Export CLI Package`を押します。
+3. `<プロジェクト名>_cli_package.zip`がダウンロードされます。
+4. ZIPをすべて展開します。ZIPの中から直接実行しないでください。
+5. ターミナルで、展開後の`run_project.py`があるディレクトリへ移動します。
+
+展開後の主なファイル:
 
 ```text
-Another lwrclpy Web Node Editor server is already running (lock: .../server.lock). Stop it first before starting a new instance.
+<project>_cli/
+  run_project.py
+  project.json
+  requirements.txt
+  README.md
+  lwrclpy_web_node_editor/
 ```
 
-## macOS向けスタンドアロンアプリ化
+### 2. 初回だけ実行環境を作る
 
-macOSでは、macOS上で次のスクリプトを実行してElectron版 `.app` を作成します。ビルド時はNode.js/npmも必要です。
-
-```bash
-python3.13 -m venv venv
-venv/bin/python -m pip install -r requirements.txt
-scripts/build_macos_standalone.sh
-```
-
-生成時には `samples/`、Python版の `lwrclpy` runtime、C++ worker用の `cmake`、C++ / `lwrcl` + FastDDS依存が同梱されます。C++依存は次の順で探して `lwrcl_cpp` としてbundleへコピーします。
-
-- `LWRCL_PREFIX`
-- `CPP_DEP_PREFIXES`（`:` 区切りで複数指定可）
-- `/opt/fast-dds-libs`
-- `/opt/fast-dds`
-
-C++依存を事前に最新化してからAppへ入れる場合は、先に次を実行してください。
-
-```bash
-scripts/setup_lwrcl_cpp_env.sh
-scripts/build_macos_standalone.sh
-```
-
-ローカルprefixを使う場合は、セットアップとAppビルドで同じprefixを指定します。
-
-```bash
-scripts/setup_lwrcl_cpp_env.sh \
-  --prefix "$PWD/.local/fast-dds-libs" \
-  --dds-prefix "$PWD/.local/fast-dds"
-
-LWRCL_PREFIX="$PWD/.local/fast-dds-libs" \
-DDS_PREFIX="$PWD/.local/fast-dds" \
-scripts/build_macos_standalone.sh
-```
-
-署名付きでビルドする場合は、`MAC_CODESIGN_IDENTITY` を指定して実行します。
-
-```bash
-export MAC_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-scripts/build_macos_standalone.sh
-```
-
-必要な場合は `MAC_CODESIGN_ENTITLEMENTS=/path/to/entitlements.plist` も指定できます。
-
-GitHub Releaseなどで他のMacへ配布し、ダブルクリックで起動できる状態にするには、Apple Developer Programの `Developer ID Application` 証明書で署名し、Appleのnotarizationを通す必要があります。証明書なしのCIビルドはad-hoc署名になるため、Gatekeeperにより「開発元を検証できない」「壊れているため開けない」などとしてブロックされることがあります。
-
-Release CIでmacOSアプリを署名・notarizeする場合は、GitHub Secretsに次を設定します。
-
-- `MACOS_CERTIFICATE_P12_BASE64`: Developer ID Application証明書を書き出した `.p12` をbase64化した文字列。
-- `MACOS_CERTIFICATE_PASSWORD`: `.p12` の書き出しパスワード。
-- `MACOS_KEYCHAIN_PASSWORD`: CI一時keychain用パスワード。未設定ならCI内で自動生成されます。
-- `MACOS_NOTARY_KEY_ID`: App Store Connect API keyのKey ID。
-- `MACOS_NOTARY_ISSUER_ID`: App Store Connect API keyのIssuer ID。
-- `MACOS_NOTARY_KEY`: App Store Connect API keyの `.p8` ファイル本文。
-
-開発中に自分のMacだけで未notarizeのRelease zipを試す場合は、展開後に次でquarantine属性を外せます。ただし一般配布ではnotarizationを使ってください。
-
-```bash
-xattr -dr com.apple.quarantine dist/lwrclpy-web-node-editor.app
-```
-
-生成物の起動例:
-
-```bash
-open dist/lwrclpy-web-node-editor.app
-dist/lwrclpy-web-node-editor.app/Contents/Resources/lwrclpy-web-node-editor-server/lwrclpy-web-node-editor-server --server --host 127.0.0.1 --port 8765
-```
-
-## Windows向けスタンドアロンアプリ化
-
-Windowsでは、Windows上でPowerShellから次を実行します。ビルド時はNode.js/npmも必要です。
+Windows PowerShell:
 
 ```powershell
-py -3.13 -m venv venv
-venv\Scripts\python.exe -m pip install -r requirements.txt
-powershell -ExecutionPolicy Bypass -File scripts\build_windows_standalone.ps1
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
-生成物の起動例:
-
-```powershell
-dist\lwrclpy-web-node-editor\lwrclpy-web-node-editor.exe
-dist\lwrclpy-web-node-editor\resources\lwrclpy-web-node-editor-server\lwrclpy-web-node-editor-server.exe --server --host 127.0.0.1 --port 8765
-```
-
-補足:
-
-- Linux/macOS/WindowsはそれぞれのOS上で個別にビルドしてください。
-- 既定のPythonは `venv` 配下を参照します。別のPythonを使う場合は `PYTHON_BIN` を設定してください。
-
-すでに8765番ポートを使っているサーバーがある場合は、止めるか別ポートで起動します。
+macOS / Linux / WSL:
 
 ```bash
-.venv/bin/python main.py --host 127.0.0.1 --port 8766
+python3.13 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-## 最初に試す手順
+コマンドは必ず`requirements.txt`と`run_project.py`があるディレクトリで実行してください。Export時に`lwrclpy` wheelが同梱されていない場合は、初回実行時に各ノード用の対応wheelをダウンロードするため、インターネット接続が必要です。
 
-1. サーバーを起動します。
-2. ブラウザで `http://127.0.0.1:8765` を開きます。
-3. `Load` を押して `samples/image_video/02_video_motion_topic_graph.json` を選びます。
-4. `Run` を押します。
-5. Video入力、処理後画像、motion scoreのグラフが動くことを確認します。
-6. 止めるときは `Stop` を押します。
+### 3. 実行する
 
-連続実行時のtick周波数は60Hzです。`Run` の連続実行ループはサーバー側で動くため、ブラウザタブがフォーカスを失ってもTopic出力は継続します。`Duration sec` に秒数を入力して `Run For` を使うと、指定秒数だけ実行して自動停止できます。
-
-## ショートカット
-
-- `Ctrl+S` / `Cmd+S`: 上書き保存します。まだ保存先がない場合は保存先を選びます。
-- `Ctrl+Shift+S` / `Cmd+Shift+S`: 名前を付けて保存します。
-- `Ctrl+Z` / `Cmd+Z`: 元に戻します。
-- `Ctrl+Shift+Z` / `Cmd+Shift+Z` または `Ctrl+Y`: やり直します。
-
-ブラウザがFile System Access APIに対応していない場合、保存は従来通りJSONファイルのダウンロードになります。
-
-## サンプルプロジェクト
-
-`samples/` には、そのまま読み込んで実行できるサンプルJSONがあります。サンプルは `image_video/`, `signals/`, `external_topics/`, `custom_runtime/`, `cpp/`, `deep_learning/`, `tf/`, `llm/` にジャンル別で整理しています。画像サンプルは埋め込み画像を持ち、動画サンプルは埋め込みフレームから簡易的な動画入力を生成するので、追加ファイルなしで動作確認できます。
-
-- `image_video/01_image_edge_topic_graph.json`: 画像入力、グレースケール化、エッジ抽出、画像表示、エッジ強度グラフ、topic出力。
-- `image_video/02_video_motion_topic_graph.json`: 動画フレーム入力、フレーム差分によるmotion mask、overlay表示、motion scoreグラフ、topic出力。
-- `image_video/03_image_color_balance_topic_graph.json`: 画像入力、コントラスト補正、赤バランス処理、画像表示、red indexグラフ、topic出力。
-- `image_video/04_video_low_light_colormap_topic_graph.json`: 暗い動画フレーム入力、ガンマ補正、疑似カラーマップ表示、輝度グラフ、topic出力。
-- `image_video/05_image_crop_mosaic_topic_graph.json`: 画像入力、中央クロップ、モザイク処理、画像表示、平均輝度グラフ、topic出力。
-- `signals/06_function_generator_signal_view.json`: Function Generatorからサイン波をGraph Viewerとtopic出力へ接続。
-- `signals/07_function_generator_wave_suite.json`: サイン、ステップ、チャープ、ホワイトノイズのFunction Generatorを並べて表示。
-- `external_topics/08_external_float_topic_graph.json`: 外部 `std_msgs/msg/Float32` topicをGraph Viewerで表示。
-- `external_topics/09_external_image_topic_view_save.json`: 外部 `sensor_msgs/msg/Image` topicをImage ViewerとImage File Saveへ接続。
-- `custom_runtime/10_multi_timer_counter_graph.json`: 1つのカスタムノードに複数Timerを持たせ、別々の周期で値をpublish。
-- `custom_runtime/11_manual_subscriber_timer_sampler.json`: Subscriber callbackをOFFにし、Timer callbackから `latest()` で入力を読む例。
-- `image_video/12_image_view_save_topic_output.json`: 埋め込み画像を表示、保存、topic出力境界へ接続。
-- `cpp/21_cpp_low_pass_filter.json`: C++カスタムノードのSubscribe Callbackでノイズ信号をローパスフィルタ処理してGraph Viewerへ表示。
-- `cpp/22_cpp_signal_mixer.json`: 2つの信号をC++カスタムノードで加算・減算して表示。
-- `cpp/23_cpp_image_threshold.json`: C++カスタムノードで画像をしきい値処理し、mask画像と明部比率を出力。
-- `deep_learning/13_ultralytics_yolo_detection_segmentation.json`: Video File InputをUltralytics YOLOの検出・インスタンスセグメンテーションノードへ分岐して表示。
-- `deep_learning/14_ultralytics_yolo_pose_depth_anything.json`: Ultralytics YOLO PoseとDepth Anything V2の深度推定を表示。
-- `deep_learning/15_cuda_ultralytics_yolo_detection_segmentation.json`: CUDA環境向けのUltralytics YOLO検出・インスタンスセグメンテーション。
-- `deep_learning/16_tensorrt_ultralytics_yolo_engine_detection.json`: TensorRT engine向けのUltralytics YOLO検出。ノードの `weights` に `.engine` ファイルを指定します。
-- `deep_learning/17_sam_midas_segmentation_depth.json`: Segment Anythingの自動マスクとMiDaS深度推定を表示。標準SAM checkpointは未配置の場合に自動取得します。
-- `llm/18_ollama_llm_string_view.json`: promptを一度publishし、OllamaのLLM応答をString Viewerとtopic outputへ表示・出力します。Ollamaと `llama3.2` などのローカルモデルが必要です。
-- `tf/19_urdf_xacro_tf_static_merge_custom_tf.json`: URDFからの静的TF、カスタムノードのTF出力、TF Merge、3D Viewerを組み合わせて表示します。
-- `llm/20_interactive_llm_chat.json`: Run中にInteractive Text Inputからpromptを送信し、`LLM Text` の応答をChat String Viewerに表示します。
-
-詳しい分類は `samples/README.md` を参照してください。カスタムノードを含むサンプルは、実行時にノードごとのvenvとworker processを使います。
-
-サンプルを再生成する場合は次を実行します。
+停止するまで継続実行:
 
 ```bash
-.venv/bin/python samples/generate_sample_projects.py
+python run_project.py
 ```
 
-## Webプレビューの実行モデル
-
-Webプレビューは、リンクごとのtopic名を使ってlwrclpy topic経由でノード間データを流します。
-
-- グラフ内部の接続は、WebUI/サーバー内の直接データ受け渡しではなくlwrclpy topicで実行されます。
-- カスタムノードのコードは `lwrclpy` のcallbackに近いスコープで実行されます。
-- `Topic Input` と `Topic Output` は、グラフ外部との境界マーカーです。実際のPub/Subは接続された処理・表示ノードが行います。
-- 画像入力は小さな埋め込みデータとして扱えます。動画入力はブラウザからアップロードせず、サーバー側のファイル選択ダイアログで選んだローカルファイルを独立workerがデコードしてDDS publishします。
-- 連続実行のtick周波数は60Hzです。Run中のtickループはサーバー側threadで動くため、ブラウザのtimer throttlingには依存しません。実効周波数はノード処理時間やlwrclpy/DDS処理時間に制限されます。
-- C++ / `lwrcl` ノードはWeb実行時に `.node_workers/cpp/<node-id>/` へCMake projectとして生成・ビルドされ、Python workerや組み込みDDS workerと同じtopicへ接続されます。
-
-つまり、Webプレビューでもノード間通信の意味論はlwrclpy topicに寄せています。
-
-## C++ / lwrcl + FastDDS runtime/export
-
-Web実行とCLI exportのどちらでも、先に `lwrcl` をFastDDS backendでビルドしてインストールしてください。Web実行では `cmake` とC++コンパイラも必要です。
-
-標準セットアップは次のスクリプトで行えます。デフォルトでは `tatsuyai713/lwrcl` のGitHub latest release tagを取得し、なければ最新tag、さらに見つからなければdefault branchを使います。
+10秒だけ実行:
 
 ```bash
-scripts/setup_lwrcl_cpp_env.sh
+python run_project.py --duration 10
 ```
 
-`/opt/fast-dds-libs` や `/opt/fast-dds` に書き込むため、途中でsudoパスワードが必要になる場合があります。ローカルprefixへ入れたい場合は次のように指定します。
+実行中はノードの状態がターミナルへ表示されます。停止するときは`Ctrl+C`を押してください。
 
-```bash
-scripts/setup_lwrcl_cpp_env.sh \
-  --prefix "$PWD/.local/fast-dds-libs" \
-  --dds-prefix "$PWD/.local/fast-dds"
-```
+次回は、展開先へ移動して仮想環境をactivateした後、`python run_project.py`だけで実行できます。
 
-Appにそのprefixを同梱する場合は、同じprefixを指定してmacOS Appをビルドします。
+### 別のPCで実行する場合
 
-```bash
-LWRCL_PREFIX="$PWD/.local/fast-dds-libs" \
-DDS_PREFIX="$PWD/.local/fast-dds" \
-scripts/build_macos_standalone.sh
-```
+- 移動先にも64-bit版Python 3.13が必要です。
+- `project.json`に動画、MCAP、URDFなどのパスが保存されている場合、そのファイルも移動してパスを修正してください。
+- 外部DDS通信では、接続先と`ROS_DOMAIN_ID`、ネットワーク、QoSを合わせてください。
+- 実行時のノード環境とログは、展開先の`.node_envs/`と`.node_workers/`に作成されます。
 
-手動で行う場合は次の通りです。
+### C++ノードを含む場合
 
-```bash
-git clone --recursive https://github.com/tatsuyai713/lwrcl.git
-cd lwrcl
-./scripts/install_fast_dds.sh
-./build_libraries.sh fastdds install
-./build_data_types.sh fastdds install
-./build_lwrcl.sh fastdds install
-```
-
-Web実行では、C++ノードごとに `.node_workers/cpp/<node-id>/` 配下へ生成ソースとCMake projectが作られます。C++コード、ポート、接続topicが変わると自動で再ビルドされ、生成実行ファイルがworker processとして起動します。
-
-CLI exportにC++ノードが含まれる場合、zipには通常のPython実行パッケージに加えて次が含まれます。
-
-- `cpp_nodes/`: C++ノードごとのCMake projectと生成ソース。
-- `build_cpp_nodes.sh`: `cpp_nodes/` 全体をCMakeでビルドするスクリプト。
-
-exportしたzipを展開した後、C++ノードは次でビルドします。
-
-```bash
-bash build_cpp_nodes.sh
-```
-
-C++ノードとPythonノードを混在させた場合、export時に同じグラフ接続名がDDS topic名として使われます。Python側runnerとC++ executableを同じDDS domainで起動すると、topic経由で接続されます。
-
-## ノードの作り方
-
-`Create Node` でカスタムノードを作成できます。
-
-主な設定項目は次の通りです。
-
-- `Implementation`: ノード実装をPython / `lwrclpy` またはC++ / `lwrcl` + FastDDSから選びます。
-- `Inputs`: 入力ポートです。型は `sensor_msgs/msg/Image` や `std_msgs/msg/Float32` など、インストール済みlwrclpyメッセージから選びます。`Use Callback` はデフォルトONで、OFFにすると `latest()` / `take()` で読む手動入力になります。
-- `Outputs`: 出力ポートです。
-- `Callback Code`: 入力を受け取ったときに実行するコードです。通常の画像処理・動画処理はここに書きます。
-- `Timer Callback`: 一定周期で実行したいコードです。`Timer Count` で複数のTimerを作成でき、各Timerは常にcallbackとして実行されます。
-- `TF Input` / `TF Output`: カスタムノードでTF機能を使う場合に明示的に有効化します。TFの送受信は `tf2_ros` の `TransformListener` / `TransformBroadcaster` / `StaticTransformBroadcaster` を使います。
-- Pythonノードの `Import Code`: `import cv2` や `import numpy as np` など、ノード専用のimportを書きます。
-- Pythonノードの `requirements.txt`: ノード専用venvに入れる依存パッケージを書きます。
-- C++ノードの `Header`: 生成されたincludeの直後に挿入されます。`#include <cmath>`、helper関数、定数、class/struct定義、`static` オブジェクトなどを書けます。
-- C++ノードの `C++ Link Libraries`: Configure内またはInspectorから、`-lm`、`-lmy_library`、`/path/to/libfoo.a` のようなリンク指定を書けます。
-- C++ノードの `Initialize Code`: 生成C++クラスのコンストラクタ内で、publisher/subscriber作成後、Loop/Timer開始前に1回だけ実行されます。Headerで定義したclass/objectの初期化に使えます。
-
-ポート同士は型が一致すると接続できます。1つの出力ポートから複数のノードへ接続した場合、その出力から出るtopic名は同じ名前に同期されます。
-
-C++ノードでは、Initialize Code、入力ポートのCallback Code、Loop Code、Timer Callback Codeが生成C++クラスに埋め込まれます。入力ポートごとに `has_in1()` / `latest_in1()`、出力ポートごとに `publish_out1(msg)` のようなヘルパーを使えます。継続して保持したい値は、Headerで定義したclass/objectのメンバーとして持たせます。Loop Codeは、手書きの `rclcpp` ノードとまったく同じ「ノード自身のループ」です。ループはユーザーが書き、`main()` はLoop Codeを1回だけ呼びます。
-
-```cpp
-while (rclcpp::ok()) {
-  rclcpp::spin_some(node);   // 入力コールバックとタイマーを処理
-  loop_rate.sleep();         // Run Hz を保つ
-}
-```
-
-Callbackだけで処理したい場合は、これを次のように置き換えてください。
-
-```cpp
-rclcpp::spin(node);
-```
-
-Loop周波数はWeb実行の `runHz` が `rclcpp::Rate loop_rate` に渡ります。Loop Codeが「自分でループを回す」と判定されるのは、`while` / `for` を含む場合、または `rclcpp::spin(...)` を呼ぶ場合です（コメントアウトされた例は判定に影響しません）。どちらも無いLoop Codeは「1周期分の本体」として扱われ、`main()` が `while (rclcpp::ok())` で囲みます。この規約より前に保存されたC++プロジェクトは後者に該当するので、そのまま動きます。
-
-## Callback Codeの書き方
-
-入力ポートの `Use Callback` がONの場合、その入力に値が届いたときにCallback Codeが実行されます。OFFの場合はCallback Codeを使わず、Main LoopやTimer Callbackから `latest()` / `take()` で入力を読みます。
-
-Callback Codeで使える変数は次の通りです。同じ一覧は、エディタのコード編集ダイアログ内（テキストエリアの下）にも型付きで表示されます。
-
-| 変数 | 型 | 中身 |
-| --- | --- | --- |
-| `msg` | `dict` | 届いたメッセージを**フィールドの辞書に変換したもの**です。ROSメッセージオブジェクトではありません。`std_msgs/Float64` なら `{"data": 1.0}`、`sensor_msgs/Image` なら `{"height", "width", "encoding", "step", "is_bigendian", "data"}` で、`data` はbytes相当なので `np.frombuffer(msg["data"], dtype=np.uint8)` がそのまま使えます。 |
-| `input_id` | `str` | どの入力ポートに届いたかを表すIDです。 |
-| `request` | `dict` | service入力用の名前です。`msg` と同じオブジェクトを指します。 |
-| `response` | `srv Response` / `None` | service入力の場合、フィールドを埋めると呼び出し元へ返ります。topic入力では `None` です。 |
-| `node` | `lwrclpy.Node` | このノードです。`node.get_logger().info(...)` や `node.get_clock()` が使えます。 |
-| `state` | `dict` | 起動時は空で、ノードが生きている間ずっと保持されます。前フレームや累積値の保存に使います。 |
-| `params` | `dict` | ノードのパラメータJSONです。各キーは同名の変数としても参照できます（例: `pointsPerSide`）。`msg` や `publish` など予約名と衝突する名前は変数化されません。 |
-| `publish(output_id, value)` | 関数 | 出力ポートへ値を出します。`value` はメッセージフィールドの辞書でもかまいません。 |
-| `log(*values)` | 関数 | ノードログへ出力します。`print(...)` も同じです。 |
-
-例: `std_msgs/msg/String` を受け取って別ポートへ流す場合。
-
-```python
-node.get_logger().info(f"received {input_id}")
-publish("out1", msg)
-```
-
-例: `sensor_msgs/msg/Image` 風の辞書を受け取り、RGBをグレースケール化して出力する場合。
-
-```python
-img = msg
-data = img.get("data") or []
-w = int(img.get("width") or 0)
-h = int(img.get("height") or 0)
-out = []
-
-for i in range(0, len(data), 3):
-    y = int(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114)
-    out.extend([y, y, y])
-
-publish("gray", {
-    "width": w,
-    "height": h,
-    "encoding": "rgb8",
-    "is_bigendian": 0,
-    "step": w * 3,
-    "data": out,
-})
-```
-
-複数入力を扱う場合は `state` に入力ごとの最新値を保存すると書きやすくなります。
-
-```python
-state[input_id] = msg
-frame = state.get("frame")
-mask = state.get("mask")
-
-if frame and mask:
-    publish("out1", frame)
-```
-
-複数の出力ポート（複数Publisher相当）を持つ場合は、同じCallback内で `publish(...)` を出力ポートごとに呼びます。必要に応じて、同じ入力から加工結果を分岐して別topicへ同時に出力できます。
-
-```python
-# out_raw: 元データ, out_norm: 正規化値, out_alert: しきい値判定結果
-value = float(getattr(msg, "data", msg.get("data", 0.0)) if hasattr(msg, "data") or isinstance(msg, dict) else msg)
-max_v = float(params.get("max", 100.0))
-threshold = float(params.get("threshold", 0.8))
-
-norm = 0.0 if max_v <= 0 else max(0.0, min(1.0, value / max_v))
-is_alert = norm >= threshold
-
-publish("out_raw", value)
-publish("out_norm", norm)
-publish("out_alert", is_alert)
-```
-
-各 `output_id` はノード定義のOutputsで追加したIDと一致させてください。未定義の `output_id` へ `publish` しても配線されません。
-
-## Timer CallbackとMain Loop
-
-Timer Callbackは `node.create_timer()` で登録されるので、ノードがspinしている間はexecutorから発火します。1ノードに複数のTimerを設定でき、Timerごとに `timer_id`, `timer_name`, `period` が渡されます。ROS 2の `create_timer` に合わせ、初回callbackはRun開始直後ではなく1周期後に実行されます。
-
-```python
-state["count"] = state.get("count", 0) + 1
-publish("out1", str(state["count"]))
-```
-
-Main Loopは、手書きの `rclpy` ノードと同じ「ノード自身のループ」です。デフォルトはrclpyの定型どおり `rclpy.spin(node)` で、入力コールバックとTimer Callbackをshutdownまでディスパッチします。周期処理はTimer Callbackに書いてください。
-
-明示的なtickにしたい場合は、自分で `while` を書けばそのまま使われます。
-
-```python
-while rclpy.ok():
-    rclpy.spin_once(node, timeout_sec=0.0)
-    # 周期処理
-    rate.sleep()
-```
-
-Main Loopが「自分でループを回す」と判定されるのは、トップレベルに `while` がある場合、または `spin(...)` / `spin_until_future_complete(...)` を呼ぶ場合で、そのときは1回だけ実行されます。判定はASTで行うため、コメントアウトされた例や文字列中のspinは影響しません。それ以外は「1tick分の本体」として Run Hz で繰り返し呼ばれます。この規約より前に保存されたプロジェクトは後者に該当するので、そのまま動きます。
-
-Main Loopで使える変数:
-
-| 変数 | 型 | 中身 |
-| --- | --- | --- |
-| `rate` | `Rate` | `rate.sleep()` は周期の**残り時間だけ**待ちます。処理時間が周期に上乗せされません。 |
-| `run_hz` / `loop_period` | `float` | 設定された Run Hz と、その逆数（秒）です。 |
-| `now` | `float` | 呼び出し開始時点の `time.time()` です。 |
-| `rclpy` | module | `lwrclpy` モジュールです。`rclpy.ok()` / `rclpy.spin(node)` / `rclpy.spin_once(node, timeout_sec=...)` が使えます。 |
-| `has_input(input_id)` | 関数 → `bool` | その入力に未読の値が溜まっている間 True です。 |
-| `latest(input_id, default=None)` | 関数 → `dict` / `None` | 最後に届いた値を、消費せずに返します。 |
-| `take(input_id, default=None)` | 関数 → `dict` / `None` | 最も古い値を取り出して削除します。 |
-| `inputs` | `dict` | 入力IDごとの最新値のスナップショットです。 |
-
-加えて `node` / `state` / `params` / `publish` / `log` はCallback Codeと同じものが使えます。Timer Callbackでは `rate` / `rclpy` / `run_hz` / `loop_period` の代わりに `timer_id`（`str`）、`timer_name`（`str`）、`period`（`float`）が渡されます。
-
-データ入力に反応する処理はCallback Codeに書く方が、次のtickを待たずに即座に動くうえ、lwrclpyへエクスポートしやすくなります。なお `spin_once(node, timeout_sec=0.0)` はROS 2と同じく**1回で1コールバックだけ**処理するので、自分で書いたtickループは1周期あたり1コールバックになります。高レートのトピックに追従させたいノードでは `rclpy.spin(node)` を使ってください。
-
-```python
-if state.get("enabled", True):
-    node.get_logger().info("tick")
-rate.sleep()
-```
-
-## 画像・動画ノード
-
-`Image File Input` はブラウザで選んだ画像を `sensor_msgs/msg/Image` として出力します。
-
-- `One Shot`: 同じ画像を数tickだけ出力します。
-- `Rate`: 指定Hzで画像を繰り返し出力します。
-
-`Video File Input` はノード上の `Select Video` で動画ファイルを選択します。Path欄は選択結果の表示専用で、直接入力はできません。Run中は独立した `video_dds_worker.py` プロセスがOpenCVで動画をデコードし、動画ファイルのsource fpsに合わせて `sensor_msgs/msg/Image` としてTopic出力します。サンプルJSONの動画入力は実動画ファイルを持たないため、埋め込みフレームからサーバー側で簡易的な動画フレームを生成します。
-
-Image/Videoの実データはノード間で勝手に縮小しません。Web上のPreview/Image Viewer表示だけ、表示負荷を抑えるため横幅最大640pxを目安にアスペクト比維持で表示用変換されます。
-
-`Image File Save` は接続された画像を `saved_images/` にBMPとして保存します。
-
-## MCAP / rosbag
-
-`MCAP File Input` は `Select MCAP/Bag` で `.mcap` ファイルまたはROS 2 bagディレクトリを選択し、含まれるROS 2 topicを出力ポートとして展開します。`Rate` で再生倍率を指定でき、`Loop` を有効にすると末尾まで再生した後に繰り返します。
-
-`MCAP Record` は複数入力topicをROS 2 bag形式で記録します。`Topics` で入力ポート数を指定し、`Split MB` に0より大きい値を設定すると指定サイズごとに分割します。
-
-## 信号生成ノード
-
-`Function Generator` は `std_msgs/msg/Float32` の `data` として信号を出力します。ノード上の設定で `Step`, `Sine`, `Square`, `Ramp`, `Chirp`, `White Noise` を選べます。`Phase` はラジアンです。`Bias` はSine/Square/Ramp/Chirp/White Noiseへ加算されます。`Publish Hz` で出力周期を設定し、`Sample Time sec` で信号値のサンプル保持周期を設定できます。`DDS Topic` を設定すると、リンクやTopic Outputとは別に、そのDDS/lwrclpy topicへ直接publishします。`Graph Viewer` に接続し、`Field Path` を `data` にすると波形を確認できます。
-
-`Graph Viewer` の `Graph Settings` では、保持サンプル数、表示する横軸の秒数、縦軸を `Auto` にするか固定範囲にするかを設定できます。保持サンプル数のデフォルトは10000です。
-
-## TF / 3D Viewer
-
-`URDF Static TF` はURDF/Xacroのfixed jointを読み取り、`tf2_ros.StaticTransformBroadcaster` で `/tf_static` へpublishします。グラフ上のTFポートは見た目上は `TF` の1本の線として扱いますが、実際のROS 2 topicは `/tf` と `/tf_static` の固定名を使います。
-
-`TF Merge` は複数のTF出力を1つのTF入力へ接続するためのグラフ上の集約ノードです。実データを加工するノードではなく、複数ノードがTFを出力できることをグラフで表現するために使います。
-
-`3D Viewer` は `Configure` から次を設定できます。
-
-- TF表示の有効/無効、原点フレーム。
-- XY平面グリッドの間隔とサイズ、座標軸サイズ、座標系ラベル表示。
-- PointCloud2入力数、点形状、点サイズ、色、透明度、最大点数。
-- OccupancyGrid入力数、表示カラースキーム、透明度、背面描画。
-- Robot Model表示、URDF/Xacroパス、モデル色、透明度。
-
-3D表示はマウスで回転・移動・ズームできます。3D Viewer上でのホイール操作はNode Editor全体のズームには伝播しません。
-
-## LLM / Chat
-
-`Interactive Text Input` はRun中でも入力欄を編集でき、`Send` で入力文字列を `std_msgs/msg/String` としてpublishします。送信後は入力欄をクリアします。送信履歴はノード内に保持され、左右ボタンで過去promptを呼び出せます。`Clear History` で履歴を消せます。
-
-`LLM Text` はprompt topicを受け取り、Ollama/OpenAI/OpenAI互換API/LM Studioへ問い合わせ、応答を `std_msgs/msg/String` としてpublishします。`Chat String Viewer` は受け取った文字列をチャット形式で蓄積表示します。
-
-## Topic Input / Topic Output
-
-`Topic Input` と `Topic Output` は、Webグラフの外側とlwrclpy topicで接続するための境界ノードです。これら自体は処理を持たず、実際のpublish/subscribeは接続された処理ノード、source worker、tap workerが行います。
-
-- `Topic Input`: 外部topicから入る信号の入口を表します。接続先ノード側がsubscribeします。
-- `Topic Output`: 外部topicへ出る信号の出口を表します。接続元ノード側がpublishします。
-- topic名はエッジ名として表示・編集されます。
-- 同じ出力ポートから出る複数エッジは、同じtopic名に同期されます。
-
-## Export / Import
-
-`Export Python Node` は、選択したカスタムノードを単体のPythonファイルとして保存します。後から `Import Python Node` で読み戻せます。
-
-`Export ROS 2 Package` は、プロジェクトを通常のROS 2 `rclpy` 環境で実行するPython package形式のzipとして出力します。カスタムノードに加えて、Function Generator、Image/Video File Input、LLM Text、MCAP Recordなど対応済みの組み込み実行ノードもrunnerから実行されます。`Image Viewer`, `String Viewer`, `Graph Viewer`, `Topic Hz Monitor`, `Topic Input`, `Topic Output` のようなWeb表示・境界ノードは実行対象から除外され、Topic Input/Outputは接続先/接続元ノードの外部topicとして反映されます。
-
-ROS 2 package zipには次のファイルが含まれます。
-
-- `package.xml`
-- `setup.py`
-- `setup.cfg`
-- `<package>/runner.py`
-- `<package>/project.json`
-- `launch/<project>.launch.py`
-
-`package.xml` の `exec_depend` は、プロジェクト内で使うメッセージ型に合わせて `std_msgs`, `sensor_msgs`, `geometry_msgs`, `tf2_msgs`, `nav_msgs` などを動的に追加します。package名とノード名はROS 2の命名規則に合うようにサニタイズされます。
-
-`Export CLI Package` は、ROS 2 packageではなく、このWeb Node Editorのrunner一式、`project.json`、必要なruntimeファイルをまとめたzipを出力します。展開後に同梱の `run_project.py` を使って、保存済みプロジェクトをCLIから実行できます。
-
-## 依存関係とvenv
-
-アプリ本体は `.venv` で動きます。カスタムノードは、ノードごとに `.node_envs/<node-id>` のvenvを持ちます。
-
-ノードの `requirements.txt` に依存を書くと、実行前に `uv` がそのノード用venvを作成し、必要なパッケージとlwrclpyをインストールします。lwrclpyはGitHub Releasesの `latest` タグから、現在のPython ABIとOS/CPUに合うwheelを自動選択してインストールします。Webプレビューでは、カスタムノードごとに `.node_envs/<node-id>` のPythonで別ワーカープロセスを起動し、ノード間や組み込みツールノードとの接続はlwrclpy topicで橋渡しします。
-
-`Stop` は実行中のrunを停止し、このフレームワークが起動したworkerプロセスをクリーンアップします。サーバー起動時と終了時にも、残存workerプロセスを検出して終了します。
+先に「C++ノードを使う」の手順で[lwrcl](https://github.com/tatsuyai713/lwrcl)とFastDDSを用意します。Export ZIPに含まれる`README.md`の手順に従い、`build_cpp_nodes.sh`でC++ノードをビルドしてください。Python runnerとC++実行ファイルは、同じDDS topic名で通信します。
 
 ## トラブルシュート
 
-### ポートが使用中と表示される
+### Pythonが見つからない
 
-別のサーバーが残っている可能性があります。別ポートで起動するか、古いプロセスを止めてください。
+Windows:
 
-```bash
-.venv/bin/python main.py --host 127.0.0.1 --port 8766
+```powershell
+py -3.13 --version
 ```
 
-### サーバー重複起動エラーが出る
+macOS / Linux:
 
-`Another lwrclpy Web Node Editor server is already running` が表示される場合、同じ作業コンテキストに既存サーバーが起動中です。既存プロセスを停止してから再起動するか、別の作業ディレクトリで起動してください。
+```bash
+python3.13 --version
+```
 
-### 動画が動かない
+バージョンが表示されない場合は「PythonとGitを入れる」へ戻り、インストール後に新しいターミナルを開いてください。
 
-- `Run` を押して連続実行にしてください。1 tickだけでは動画は進みにくいです。
-- 実動画を使う場合は、`Video File Input` ノードの `Select Video` でファイルを選択し、`Ready` 後に `Run` してください。
-- サンプル動画は `samples/image_video/02_video_motion_topic_graph.json` または `samples/image_video/04_video_low_light_colormap_topic_graph.json` を読み込み、`Run` で動作確認できます。
+### `lwrclpy`をインストールできない
 
-### ノードの処理結果が出ない
+Pythonのバージョン、OS、CPUに一致するwheelが必要です。次を確認してください。
 
-- 入力ポートの型と出力ポートの型が一致しているか確認してください。
-- Callback Codeでは `outputs["out1"] = ...` ではなく `publish("out1", value)` を使ってください。
-- 画像処理ノードでは出力辞書に `width`, `height`, `encoding`, `step`, `data` が入っているか確認してください。
+```bash
+python3.13 -c "import platform; print(platform.platform(), platform.machine())"
+```
 
-### 依存パッケージのimportに失敗する
+ローカルwheelを使う場合:
 
-カスタムノードの `requirements.txt` に依存を書き、Runしてください。`.node_envs/<node-id>` が作られ、依存がインストールされます。
+```bash
+python main.py --lwrclpy-wheel /path/to/lwrclpy.whl
+```
+
+先に各OSの方法で `.venv` をactivateしてから実行してください。
+
+### WSLでファイル選択が開かない
+
+WSLでは`tkinter`を使用せず、Windows PowerShellのファイルダイアログを開いて、選択結果をWSLパスへ変換します。次の2つが成功することを確認してください。
+
+```bash
+powershell.exe -NoProfile -Command '$PSVersionTable.PSVersion'
+wslpath -u 'C:\Windows'
+```
+
+`powershell.exe`が見つからない場合は、WSLのWindows実行ファイル連携が無効になっています。`tkinter`はpipパッケージではないため、`requirements.txt`への追加では解決しません。
+
+### ポート8765を使用できない
+
+別のアプリが使用している場合は、別ポートで起動します。
+
+```bash
+python main.py --host 127.0.0.1 --port 8766
+```
+
+### C++ノードがビルドできない
+
+- `cmake not found`: `cmake --version` を確認します。
+- Windowsでコンパイラが見つからない: Developer PowerShell for VSから起動します。
+- `lwrcl.hpp` / `fastrtps` が見つからない: `LWRCL_PREFIX` と `DDS_PREFIX` を確認します。
+- 詳細ログ: `.node_workers/<node-id>.cpp.log`
+
+## 開発者向け
+
+ここから先は、このアプリ自体の開発・配布を行う場合の情報です。通常の利用者は読む必要がありません。
+
+システム全体の構成とプロセス・通信・workerの詳細は [ARCHITECTURE.md](ARCHITECTURE.md) を参照してください。
+
+### 実行構成
+
+- サーバー: `main.py` / `lwrclpy_web_node_editor/server.py`
+- グラフ実行: `lwrclpy_web_node_editor/graph.py`
+- Web UI: `lwrclpy_web_node_editor/static/`
+- Python worker: ノードごとの `.node_envs/<node-id>`
+- C++ worker: `.node_workers/cpp/<node-id>`
+
+グラフ内の接続はDDS topicとして実行されます。サーバー終了時には、このアプリが起動したworkerプロセスも終了します。
+
+### `scripts/`の使い方
+
+すべてリポジトリのルートから実行します。Pythonスクリプトを実行する前は `.venv` をactivateしてください。
+
+| ファイル | いつ使うか |
+| --- | --- |
+| `setup_wsl.sh` | WSLの初回環境構築 |
+| `install_lwrclpy.py` | 対応する`lwrclpy` wheelを現在の環境へ入れる |
+| `setup_lwrcl_cpp_env.sh` | Linux/macOS/WSLでC++ノード環境を構築 |
+| `build_linux_standalone.sh` | Linux配布アプリを作成 |
+| `build_macos_standalone.sh` | macOS配布アプリを作成 |
+| `build_windows_standalone.ps1` | Windows配布アプリを作成 |
+| `repair_lwrclpy_windows_wheel.py` | Windows App Control向けwheelを修復 |
+| `verify_standalone_bundle.py` | 作成済み配布アプリの内容を検査 |
+| `relocate_cpp_prefix.py` | コピーしたC++ prefix内の絶対パスを修正 |
+| `bundle_linux_cpp_runtime.py` | Linuxビルドから呼ばれるGCC runtime同梱helper |
+
+#### WSLをセットアップする
+
+通常のPythonノードだけを使う場合:
+
+```bash
+bash scripts/setup_wsl.sh
+```
+
+C++ノードも使う場合:
+
+```bash
+bash scripts/setup_wsl.sh --with-cpp
+```
+
+#### `lwrclpy`をインストールする
+
+OS、Python、CPUに合う最新wheelをGitHub Releasesから選んでインストールします。
+
+```bash
+source .venv/bin/activate
+python scripts/install_lwrclpy.py
+```
+
+Windows:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python scripts\install_lwrclpy.py
+```
+
+ローカルwheelを入れる場合は環境変数で指定します。
+
+```bash
+LWRCLPY_LOCAL_WHEEL=/path/to/lwrclpy.whl python scripts/install_lwrclpy.py
+```
+
+```powershell
+$env:LWRCLPY_LOCAL_WHEEL = "C:\path\to\lwrclpy.whl"
+python scripts\install_lwrclpy.py
+```
+
+#### C++ノード環境を構築する
+
+Linux/macOS/WSL用です。既定ではFastDDS、Fast-DDS-Gen、メッセージ型、`lwrcl`を `/opt` 以下へ構築します。
+
+```bash
+bash scripts/setup_lwrcl_cpp_env.sh
+```
+
+管理者権限なしでリポジトリ内へ構築する場合:
+
+```bash
+bash scripts/setup_lwrcl_cpp_env.sh \
+  --prefix "$PWD/.local/fast-dds-libs" \
+  --dds-prefix "$PWD/.local/fast-dds"
+```
+
+利用できる全オプション:
+
+```bash
+bash scripts/setup_lwrcl_cpp_env.sh --help
+```
+
+#### スタンドアロンアプリを作成する
+
+先にNode.js/npmをインストールし、`.venv`をactivateします。
+
+```text
+node --version
+npm --version
+```
+
+```bash
+# Linux
+PYTHON_BIN="$(command -v python)" bash scripts/build_linux_standalone.sh
+
+# macOS
+PYTHON_BIN="$(command -v python)" bash scripts/build_macos_standalone.sh
+```
+
+Windows:
+
+```powershell
+$env:PYTHON_BIN = (Get-Command python).Source
+powershell -ExecutionPolicy Bypass -File scripts\build_windows_standalone.ps1
+```
+
+生成物は `dist/` に作られます。別OS向けの成果物はクロスビルドせず、対象OS上で作成します。
+
+#### スタンドアロン成果物を検査する
+
+```bash
+python scripts/verify_standalone_bundle.py dist/lwrclpy-web-node-editor
+```
+
+C++ prefixの同梱も必須として検査する場合:
+
+```bash
+python scripts/verify_standalone_bundle.py \
+  dist/lwrclpy-web-node-editor \
+  --require-cpp-prefix
+```
+
+macOSでは `.app`、Windowsでは生成されたアプリディレクトリを第1引数に指定できます。
+
+#### C++ prefixを再配置可能にする
+
+別の場所へコピーしたprefix内の壊れた絶対symlink、CMakeパス、pkg-configパスを相対参照へ修正します。通常は各スタンドアロンビルドスクリプトから自動実行されます。
+
+```bash
+python scripts/relocate_cpp_prefix.py /path/to/copied/lwrcl_cpp
+```
+
+表示を抑える場合:
+
+```bash
+python scripts/relocate_cpp_prefix.py /path/to/copied/lwrcl_cpp --quiet
+```
+
+#### Linux C++ runtime helper
+
+`bundle_linux_cpp_runtime.py`はLinuxスタンドアロンビルド専用の内部helperです。conda-forgeから `libstdc++` と `libgcc` runtimeを取得してPyInstallerの `_internal` へ入れます。通常は直接実行せず、`build_linux_standalone.sh`に任せてください。
+
+手動で検証するときだけ次を使います。
+
+```bash
+python scripts/bundle_linux_cpp_runtime.py \
+  dist/lwrclpy-web-node-editor/resources/lwrclpy-web-node-editor-server/_internal
+```
+
+### Windows向けlwrclpy wheel
+
+App Control / Code Integrity環境向けwheelを配布する場合:
+
+```powershell
+python scripts\repair_lwrclpy_windows_wheel.py path\to\lwrclpy.whl `
+  -o path\to\lwrclpy.repaired.whl
+```
+
+この処理はOpenSSL DLLをPython公式配布の署名済みDLLへ置き換え、wheelの `RECORD` を更新します。
+
+### Export
+
+`Export CLI Package`の利用手順は、通常利用者向けの「CLIファイルとしてExportして実行する」を参照してください。
+
+`Export ROS 2 Package` は通常のROS 2 `rclpy` package形式を生成します。Web表示専用ノードはExport先の実行対象から除外されます。
 
 ## 関連ファイル
 
-- `main.py`: サーバー/デスクトップ/workerの統合起動入口。
-- `lwrclpy_web_node_editor/server.py`: HTTP APIと静的ファイル配信。
-- `lwrclpy_web_node_editor/graph.py`: グラフ実行、画像変換、lwrclpy topic連携。
-- `lwrclpy_web_node_editor/static/app.js`: ブラウザUI。
-- `samples/generate_sample_projects.py`: サンプルJSON生成スクリプト。
-- `scripts/install_lwrclpy.py`: 現在のOS/Pythonに合うlwrclpy wheelをインストールするスクリプト。
+- [samples/README.md](samples/README.md): サンプル一覧
+- [ARCHITECTURE.md](ARCHITECTURE.md): プロセス、通信、worker、配布構成
+- `scripts/`: 上記「`scripts/`の使い方」を参照

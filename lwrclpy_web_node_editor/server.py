@@ -1013,7 +1013,10 @@ def _safe_archive_name(value: object, fallback: str = "lwrclpy_cli_project") -> 
 def _cli_export_project_name(payload: dict) -> str:
     raw = payload.get("name") or payload.get("projectName") or payload.get("fileName")
     if raw:
-        return _safe_archive_name(raw)
+        text = str(raw).strip()
+        if text.lower().endswith(".json"):
+            text = text[:-5]
+        return _safe_archive_name(text)
     nodes = payload.get("nodes") if isinstance(payload.get("nodes"), list) else []
     for node in nodes:
         if isinstance(node, dict) and node.get("name"):
@@ -1202,9 +1205,12 @@ def _cli_package_runtime_files() -> list[Path]:
     package_dir = PROJECT_DIR / "lwrclpy_web_node_editor"
     names = [
         "__init__.py",
+        "atomic_file.py",
         "cli_run.py",
+        "cpp_codegen.py",
         "runtime_exec.py",
         "graph.py",
+        "windows_job.py",
         "node_worker.py",
         "video_dds_worker.py",
         "dds_tap_worker.py",
@@ -1589,31 +1595,43 @@ It contains `run_project.py`, `project.json`, a small CLI runtime, `requirements
 No system-wide install script is required. Use any Python environment with `venv` or `uv` available.
 Each exported node creates its own environment under `.node_envs/<node_id>` when needed, so node-specific Python versions and requirements stay separate.
 
-Manual install, if desired:
+## First-time setup
+
+Run all commands from this directory, beside `run_project.py` and `requirements.txt`.
+
+Windows PowerShell:
+
+```powershell
+py -3.13 -m venv .venv
+.\\.venv\\Scripts\\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+macOS/Linux/WSL:
 
 ```bash
-python3 -m venv venv
-. venv/bin/activate
-pip install -r requirements.txt
+python3.13 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
 Do not run `pip install -r wheels/name.whl`; `-r` is only for requirements text files.
 
 ## Run
 
-macOS/Linux:
+Run until stopped:
 
 ```bash
-python3 run_project.py --duration 10
+python run_project.py
 ```
 
-Windows:
+Run for ten seconds:
 
-```bat
+```bash
 python run_project.py --duration 10
 ```
 
-Without `--duration`, the project runs until interrupted.
+Press `Ctrl+C` to stop. For later runs, activate `.venv` and run `python run_project.py`.
 
 ## Notes
 
