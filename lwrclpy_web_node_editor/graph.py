@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any
 
 from .cpp_codegen import cpp_message_packages_for_node, render_cpp_node_cmake, render_cpp_node_source, safe_cpp_identifier
-from .runtime_exec import find_lwrclpy_installer, local_lwrclpy_wheel, resolve_worker_command
+from .runtime_exec import find_lwrclpy_installer, framework_worker_tokens, local_lwrclpy_wheel, resolve_worker_command
+from .windows_job import assign_process_to_job
 
 LWRCLPY_RELEASES_API_URL = "https://api.github.com/repos/tatsuyai713/lwrclpy/releases"
 DEFAULT_PYTHON_LOOP_CODE = """# Main Loop is this node's own loop, like a hand-written rclpy node.
@@ -329,6 +330,38 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
+def _windows_pid_command_line(pid: int) -> str:
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"(Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\").CommandLine",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return ""
+    return result.stdout.strip()
+
+
+def _is_project_worker_command(command: str) -> bool:
+    worker_names = (
+        "node_worker.py",
+        "video_dds_worker.py",
+        "dds_tap_worker.py",
+        "builtin_source_worker.py",
+        "mcap_record_worker.py",
+    )
+    return (
+        ".node_workers" in command
+        and (any(token in command for token in framework_worker_tokens()) or any(name in command for name in worker_names))
+    )
+
+
 @dataclass
 class PortConfig:
     id: str
@@ -427,25 +460,27 @@ def subscriber_qos(data_type: str) -> Any:
 
 class LwrclpyRuntime:
     def __init__(self) -> None:
-        self.available = False
+        self.available = True
         self.initialized = False
         self.error = "DDS access is isolated in worker processes"
         self.version = ""
+        self.isolated = True
         self.rclpy = None
         self.executor = None
         self._spin_thread: threading.Thread | None = None
         self._stop_spin = threading.Event()
         try:
             self.version = importlib.metadata.version("lwrclpy")
-            self.available = True
+            self.isolated = False
         except Exception:
             self.version = ""
-            self.error = "lwrclpy is installed per isolated node environment"
+            self.error = ""
 
     def status(self, error: str = "") -> dict[str, Any]:
         return {
             "available": self.available,
             "error": error or self.error,
+            "isolated": self.isolated,
             "version": self.version,
         }
 
@@ -597,6 +632,8 @@ class CustomLwrclNodeInstance:
         except Exception:
             return
         if pid <= 0 or (self.worker_process is not None and pid == self.worker_process.pid):
+            return
+        if os.name == "nt" and not _is_project_worker_command(_windows_pid_command_line(pid)):
             return
         try:
             if os.name == "nt":
@@ -1020,6 +1057,8 @@ class CustomLwrclNodeInstance:
             self.worker_config_path = config_path
             self.worker_log_path = log_path
             self.worker_pid_path = pid_path
+            if os.name == "nt":
+                assign_process_to_job(self.worker_process.pid)
             pid_path.write_text(str(self.worker_process.pid), encoding="utf-8")
             self.env_status = "built-in source worker starting"
             self.view = {"kind": "text", "status": "source worker starting"}
@@ -1142,6 +1181,8 @@ class CustomLwrclNodeInstance:
             self.worker_config_path = config_path
             self.worker_log_path = log_path
             self.worker_pid_path = pid_path
+            if os.name == "nt":
+                assign_process_to_job(self.worker_process.pid)
             pid_path.write_text(str(self.worker_process.pid), encoding="utf-8")
             self.env_status = "DDS tap worker running"
         except Exception as exc:
@@ -1284,6 +1325,8 @@ class CustomLwrclNodeInstance:
             self.worker_config_path = config_path
             self.worker_log_path = log_path
             self.worker_pid_path = pid_path
+            if os.name == "nt":
+                assign_process_to_job(self.worker_process.pid)
             pid_path.write_text(str(self.worker_process.pid), encoding="utf-8")
             self.env_status = "MCAP record worker running"
             self.view = {"kind": "text", "status": "MCAP record worker starting"}
@@ -1374,6 +1417,8 @@ class CustomLwrclNodeInstance:
             self.worker_config_path = config_path
             self.worker_log_path = log_path
             self.worker_pid_path = pid_path
+            if os.name == "nt":
+                assign_process_to_job(self.worker_process.pid)
             pid_path.write_text(str(self.worker_process.pid), encoding="utf-8")
             self.env_status = "video DDS worker running"
             self.state.pop("video_worker_failed_signature", None)
@@ -1408,6 +1453,14 @@ class CustomLwrclNodeInstance:
             env["PYTHONPATH"] = (
                 f"{self.env_site_packages}{os.pathsep}{existing}" if existing else str(self.env_site_packages)
             )
+            if os.name == "nt":
+                vendor_lib = self.env_site_packages / "lwrclpy" / "_vendor" / "lib"
+                vendor_fastdds = self.env_site_packages / "lwrclpy" / "_vendor" / "fastdds"
+                dll_paths = [str(path) for path in (vendor_lib, vendor_fastdds) if path.exists()]
+                if dll_paths:
+                    env["LWRCLPY_VENDOR_LIB"] = str(vendor_lib)
+                    existing_path = env.get("PATH", "")
+                    env["PATH"] = os.pathsep.join([*dll_paths, *([existing_path] if existing_path else [])])
         return env
 
     def _run_hz(self) -> float:
@@ -1513,6 +1566,8 @@ class CustomLwrclNodeInstance:
                     frame_text = self._video_frame_status_suffix(data)
                     status = f"{self.config.params.get('fileName') or 'video'} DDS worker {size}{frame_text}{hz}"
             except Exception:
+                if self.view.get("kind") == "image" and self.view.get("frameRef"):
+                    return
                 status = "video DDS worker running"
         if not status:
             status = "video DDS worker running"
@@ -1724,6 +1779,8 @@ class CustomLwrclNodeInstance:
     def _execute_image_view_worker_once(self) -> None:
         status = self._read_dds_tap_status()
         if not status:
+            if self.view.get("kind") == "image" and self.view.get("frameRef"):
+                return
             self.view = {"kind": "image", "dataUrl": "", "status": "DDS tap worker starting"}
             return
         if status.get("error"):
@@ -3472,16 +3529,41 @@ class GraphRuntime:
         When running as a PyInstaller frozen binary, sys.executable points to
         the app bundle rather than a Python interpreter, which causes
         ``uv venv --python <exe>`` to fail.  In that case we resolve the real
-        interpreter by version tag (e.g. ``python3.13``) from PATH or common
-        system locations.
+        interpreter by version tag from PATH, the Windows Python launcher, or
+        common system locations.
         """
         if not getattr(sys, "frozen", False):
             return sys.executable
         tag = f"python{sys.version_info.major}.{sys.version_info.minor}"
         candidates: list[str] = []
-        found = shutil.which(tag)
-        if found:
-            candidates.append(found)
+        if sys.platform.startswith("win"):
+            launcher = shutil.which("py")
+            if launcher:
+                try:
+                    completed = subprocess.run(
+                        [
+                            launcher,
+                            f"-{sys.version_info.major}.{sys.version_info.minor}",
+                            "-c",
+                            "import sys; print(sys.executable)",
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    executable = completed.stdout.strip()
+                    if executable:
+                        candidates.append(executable)
+                except Exception:
+                    pass
+            for name in (f"python{sys.version_info.major}{sys.version_info.minor}", tag, "python"):
+                found = shutil.which(name)
+                if found:
+                    candidates.append(found)
+        else:
+            found = shutil.which(tag)
+            if found:
+                candidates.append(found)
         for candidate in [
             f"/opt/homebrew/bin/{tag}",
             f"/usr/bin/{tag}",
@@ -3855,6 +3937,8 @@ class GraphRuntime:
             instance.worker_config_path = package_dir / "src" / f"{package_name}.cpp"
             instance.worker_log_path = log_path
             instance.worker_pid_path = pid_path
+            if os.name == "nt":
+                assign_process_to_job(instance.worker_process.pid)
             pid_path.write_text(str(instance.worker_process.pid), encoding="utf-8")
             instance.env_status = "C++ worker running"
             return True
@@ -4114,6 +4198,8 @@ add_subdirectory({package_name})
             instance.worker_config_path = config_path
             instance.worker_log_path = log_path
             instance.worker_pid_path = pid_path
+            if os.name == "nt":
+                assign_process_to_job(instance.worker_process.pid)
             pid_path.write_text(str(instance.worker_process.pid), encoding="utf-8")
             instance.env_status = "worker running"
             return True

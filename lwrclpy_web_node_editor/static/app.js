@@ -3582,6 +3582,9 @@ function updateStatus(data) {
 
 function runtimeStatusText(runtime) {
   const version = runtime?.version ? ` ${runtime.version}` : '';
+  if (runtime?.isolated) {
+    return 'lwrclpy isolated node environments';
+  }
   if (runtime?.available) return `lwrclpy available${version}`;
   return `lwrclpy unavailable${runtime?.error ? ': ' + runtime.error : ''}`;
 }

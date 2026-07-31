@@ -47,6 +47,14 @@ python3.13 -m venv .venv
   --lwrclpy-wheel /Users/tatsuyai/repos/lwrclpy/dist/lwrclpy-0.5.1-cp313-cp313-macosx_26_0_arm64.whl
 ```
 
+Windows の App Control / Code Integrity 環境向けに `lwrclpy` wheel を作る場合は、Windows wheel 作成後に次を実行してから配布してください。wheel 内の `lwrclpy/_vendor/lib/libcrypto-3-x64.dll` と `libssl-3-x64.dll` を Python 公式配布の署名済み DLL に差し替え、wheel の `RECORD` も更新します。
+
+```powershell
+python scripts\repair_lwrclpy_windows_wheel.py path\to\lwrclpy-...-win_amd64.whl -o path\to\lwrclpy-...-win_amd64.repaired.whl
+```
+
+この処理は `lwrclpy` / FastDDS 本体の DLL は wheel 同梱のものを使い続け、App Control にブロックされやすい OpenSSL DLL だけを署名済み DLL に置き換えます。
+
 ## Linux向けスタンドアロンアプリ化
 
 LinuxではElectronのネイティブウィンドウとPyInstaller製の同梱Pythonサーバーを含むスタンドアロン実行ファイルを作成できます。ビルド時はNode.js/npmも必要です。

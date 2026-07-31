@@ -16,6 +16,12 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+if os.name == "nt":
+    try:
+        from .atomic_file import write_json_atomic
+    except ImportError:
+        from atomic_file import write_json_atomic
+
 RUNNING = True
 # Set when the last status write reported an error or a stopped state, so the
 # shutdown path does not replace an explanatory message with a bare "stopped".
@@ -137,7 +143,7 @@ def _topic_qos(data_type: str, external: bool = False, topic: str = "") -> Any:
     topic_name = str(topic or "")
     if normalized == "tf2_msgs/msg/TFMessage" and topic_name.rstrip("/") == "/tf_static":
         try:
-            import rclpy.qos as qos
+            import lwrclpy.qos as qos
 
             return qos.QoSProfile(
                 history=qos.HistoryPolicy.KEEP_LAST,
@@ -150,7 +156,7 @@ def _topic_qos(data_type: str, external: bool = False, topic: str = "") -> Any:
     if str(data_type).replace(".", "/") not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
         return 10
     try:
-        import rclpy.qos as qos
+        import lwrclpy.qos as qos
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
@@ -346,12 +352,18 @@ def _tf_message(transforms: list[dict[str, Any]]) -> Any:
     return tf_msg
 
 
-def _write_status(path: Path, **values: Any) -> None:
-    global _LAST_STATUS_WAS_TERMINAL
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    tmp_path.write_text(json.dumps({"time": time.time(), **values}, ensure_ascii=False, default=str), encoding="utf-8")
-    tmp_path.replace(path)
-    _LAST_STATUS_WAS_TERMINAL = bool(values.get("error")) or not values.get("running", True)
+if os.name == "nt":
+    def _write_status(path: Path, **values: Any) -> None:
+        global _LAST_STATUS_WAS_TERMINAL
+        write_json_atomic(path, {"time": time.time(), **values})
+        _LAST_STATUS_WAS_TERMINAL = bool(values.get("error")) or not values.get("running", True)
+else:
+    def _write_status(path: Path, **values: Any) -> None:
+        global _LAST_STATUS_WAS_TERMINAL
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        tmp_path.write_text(json.dumps({"time": time.time(), **values}, ensure_ascii=False, default=str), encoding="utf-8")
+        tmp_path.replace(path)
+        _LAST_STATUS_WAS_TERMINAL = bool(values.get("error")) or not values.get("running", True)
 
 
 def _matched_subscriptions(publisher: Any) -> int:
@@ -928,7 +940,7 @@ def main() -> int:
     config_path = Path(args.config)
     config = json.loads(config_path.read_text(encoding="utf-8"))
     _configure_fastdds_transport(config)
-    import rclpy
+    import lwrclpy as rclpy
     _disable_lwrclpy_side_channels(config)
 
     if not rclpy.ok():

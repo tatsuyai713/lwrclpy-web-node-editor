@@ -38,6 +38,7 @@ from .runtime_exec import (
     local_lwrclpy_wheel_marker,
     standalone_app_home,
 )
+from .windows_job import install_kill_on_close_job
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -1662,10 +1663,11 @@ They use the same DDS topic names as the Python/lwrclpy runner.
 
 def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
     targets = _framework_worker_pids()
+    protected = _current_process_family_pids()
     killed: list[int] = []
     failed: list[int] = []
     for pid in sorted(targets):
-        if pid == os.getpid():
+        if pid == os.getpid() or pid in protected:
             continue
         try:
             _signal_process_tree(pid, force=force)
@@ -1695,12 +1697,19 @@ def cleanup_framework_processes(force: bool = True) -> dict[str, list[int]]:
     return {"killed": killed, "failed": failed}
 
 
+def cleanup_previous_runtime_processes(force: bool = True) -> dict[str, dict[str, list[int]]]:
+    servers = cleanup_server_processes(force=force)
+    workers = cleanup_framework_processes(force=force)
+    return {"servers": servers, "workers": workers}
+
+
 def cleanup_server_processes(force: bool = True) -> dict[str, list[int]]:
     targets = _framework_server_pids()
+    protected = _current_process_family_pids()
     killed: list[int] = []
     failed: list[int] = []
     for pid in sorted(targets):
-        if pid == os.getpid():
+        if pid == os.getpid() or pid in protected:
             continue
         try:
             _signal_process_tree(pid, force=force)
@@ -1796,7 +1805,7 @@ def _is_framework_worker_pid(pid: int) -> bool:
 
 def _command_line_worker_pids() -> set[int]:
     if os.name == "nt":
-        return set()
+        return _windows_command_line_worker_pids()
     try:
         result = subprocess.run(["ps", "-eo", "pid=,command="], check=True, capture_output=True, text=True)
     except Exception:
@@ -1815,6 +1824,15 @@ def _command_line_worker_pids() -> set[int]:
             continue
         if _is_framework_worker_command(command):
             pids.add(pid)
+    return pids
+
+
+def _windows_command_line_worker_pids() -> set[int]:
+    pids: set[int] = set()
+    for pid, command in _windows_process_commands():
+        if pid != os.getpid():
+            if _is_framework_worker_command(command):
+                pids.add(pid)
     return pids
 
 
@@ -1843,6 +1861,15 @@ def _command_line_server_pids() -> set[int]:
 
 
 def _windows_command_line_server_pids() -> set[int]:
+    pids: set[int] = set()
+    for pid, command in _windows_process_commands():
+        if pid != os.getpid():
+            if _is_framework_server_command(command):
+                pids.add(pid)
+    return pids
+
+
+def _windows_process_commands() -> list[tuple[int, str]]:
     try:
         result = subprocess.run(
             [
@@ -1851,10 +1878,8 @@ def _windows_command_line_server_pids() -> set[int]:
                 "-Command",
                 (
                     "Get-CimInstance Win32_Process | "
-                    "Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.Contains('--server') -and "
-                    "($_.CommandLine.Contains('lwrclpy-web-node-editor') -or "
-                    "$_.CommandLine.Contains('lwrclpy_web_node_editor') -or $_.CommandLine.Contains('main.py')) } | "
-                    "ForEach-Object { $_.ProcessId }"
+                    "Where-Object { $_.CommandLine } | "
+                    "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress -Depth 2"
                 ),
             ],
             check=False,
@@ -1862,16 +1887,87 @@ def _windows_command_line_server_pids() -> set[int]:
             text=True,
         )
     except Exception:
-        return set()
-    pids: set[int] = set()
-    for line in result.stdout.splitlines():
-        try:
-            pid = int(line.strip())
-        except ValueError:
+        return []
+    text = result.stdout.strip()
+    if not text:
+        return []
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        rows = [payload]
+    elif isinstance(payload, list):
+        rows = payload
+    else:
+        return []
+    processes: list[tuple[int, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
             continue
-        if pid != os.getpid():
-            pids.add(pid)
-    return pids
+        try:
+            pid = int(row.get("ProcessId") or 0)
+        except Exception:
+            continue
+        command = str(row.get("CommandLine") or "")
+        if pid > 0 and command:
+            processes.append((pid, command))
+    return processes
+
+
+def _current_process_family_pids() -> set[int]:
+    if os.name != "nt":
+        return {os.getpid()}
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                (
+                    "Get-CimInstance Win32_Process | "
+                    "Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress -Depth 2"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return {os.getpid()}
+    try:
+        payload = json.loads(result.stdout.strip() or "[]")
+    except Exception:
+        return {os.getpid()}
+    rows = [payload] if isinstance(payload, dict) else payload if isinstance(payload, list) else []
+    parents: dict[int, int] = {}
+    children: dict[int, list[int]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            pid = int(row.get("ProcessId") or 0)
+            parent = int(row.get("ParentProcessId") or 0)
+        except Exception:
+            continue
+        if pid <= 0:
+            continue
+        parents[pid] = parent
+        children.setdefault(parent, []).append(pid)
+    current = os.getpid()
+    protected = {current}
+    pid = current
+    while parents.get(pid, 0) > 0:
+        pid = parents[pid]
+        protected.add(pid)
+    stack = list(children.get(current, []))
+    while stack:
+        pid = stack.pop()
+        if pid in protected:
+            continue
+        protected.add(pid)
+        stack.extend(children.get(pid, []))
+    return protected
 
 
 def _is_framework_worker_command(command: str) -> bool:
@@ -1889,14 +1985,25 @@ def _is_framework_worker_command(command: str) -> bool:
 
 
 def _is_framework_server_command(command: str) -> bool:
-    if "--server" not in command:
-        return False
+    command_norm = command.replace("/", "\\")
     markers = (
         "lwrclpy-web-node-editor",
         "lwrclpy_web_node_editor",
         str(Path(__file__).resolve().parents[1] / "main.py"),
+        str((PROJECT_DIR / "main.py").resolve()),
     )
-    return any(marker in command for marker in markers)
+    if "--server" in command and any(marker in command for marker in markers):
+        return True
+    main_path = str(Path(__file__).resolve().parents[1] / "main.py")
+    if main_path in command and "--host" in command and "--port" in command:
+        return True
+    project_python = str((PROJECT_DIR / ".venv" / "Scripts" / "python.exe").resolve()).replace("/", "\\")
+    return (
+        command_norm.lstrip().startswith((f'"{project_python}"', project_python))
+        and " main.py" in command_norm
+        and "--host" in command_norm
+        and "--port" in command_norm
+    )
 
 
 def _cleanup_pid_files() -> None:
@@ -1905,6 +2012,11 @@ def _cleanup_pid_files() -> None:
     for pid_file in WORKER_DIR.glob("*.pid"):
         try:
             pid_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+    for tmp_file in WORKER_DIR.glob("*.tmp"):
+        try:
+            tmp_file.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -2209,7 +2321,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in {"/api/run", "/api/run-status"} and args and str(args[1]) == "200":
             return
-        if path == "/api/node-frame" and args and str(args[1]) in {"200", "204"}:
+        if path in {"/api/node-frame", "/api/node-frame-stream"} and args and str(args[1]) in {"200", "204"}:
             return
         print("[lwrclpy_web_node_editor]", fmt % args)
 
@@ -2360,6 +2472,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._last_image_view_data_urls.clear()
                 self._last_image_view_raw_signatures.clear()
+                cleanup_framework_processes(force=True)
                 result = self.runner.start(payload)
             elif path == "/api/update-run-payload":
                 result = self.runner.update_payload(payload)
@@ -2519,7 +2632,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                     last_seq = int(stream_frame["seq"])
                     last_write_at = time.time()
-                elif time.time() - last_write_at > 2.0:
+                elif os.name != "nt" and time.time() - last_write_at > 2.0:
                     return
                 time.sleep(1.0 / max(1.0, GRAPH_RUN_HZ))
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -2696,14 +2809,15 @@ def main(argv: list[str] | None = None):
     except Exception as exc:
         print(f"Failed to configure local lwrclpy wheel: {exc}", file=sys.stderr)
         return 1
-    startup_cleanup = cleanup_framework_processes(force=True)
-    killed_count = len(startup_cleanup.get("killed", []))
-    if killed_count:
-        print(f"Cleaned up {killed_count} stale lwrclpy Web Node Editor worker process(es).")
-    server_cleanup = cleanup_server_processes(force=True)
-    server_killed_count = len(server_cleanup.get("killed", []))
+    startup_cleanup = cleanup_previous_runtime_processes(force=True)
+    server_killed_count = len(startup_cleanup.get("servers", {}).get("killed", []))
+    worker_killed_count = len(startup_cleanup.get("workers", {}).get("killed", []))
     if server_killed_count:
         print(f"Cleaned up {server_killed_count} stale lwrclpy Web Node Editor server process(es).")
+    if worker_killed_count:
+        print(f"Cleaned up {worker_killed_count} stale lwrclpy Web Node Editor worker process(es).")
+    if os.name == "nt":
+        install_kill_on_close_job()
     lock_path, lock_acquired = _acquire_server_lock(args.host, args.port)
     if not lock_acquired:
         print(

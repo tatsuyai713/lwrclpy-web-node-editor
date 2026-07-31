@@ -119,7 +119,7 @@ def topic_qos(data_type: str, depth: int = 1, reliable: bool = False, topic: str
     normalized = data_type.replace(".", "/")
     if normalized == "tf2_msgs/msg/TFMessage" and str(topic or "").rstrip("/") == "/tf_static":
         try:
-            qos = importlib.import_module("rclpy.qos")
+            qos = importlib.import_module("lwrclpy.qos")
             return qos.QoSProfile(
                 history=qos.HistoryPolicy.KEEP_LAST,
                 depth=1,
@@ -131,7 +131,7 @@ def topic_qos(data_type: str, depth: int = 1, reliable: bool = False, topic: str
     if normalized not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
         return 10
     try:
-        qos = importlib.import_module("rclpy.qos")
+        qos = importlib.import_module("lwrclpy.qos")
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
             depth=depth,
@@ -190,7 +190,7 @@ class LoopRate:
 
 class LwrclpyWorkerNode:
     def __init__(self, config: dict[str, Any]) -> None:
-        import rclpy
+        import lwrclpy as rclpy
 
         self.rclpy = rclpy
         self.config = config

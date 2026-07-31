@@ -45,6 +45,14 @@ To use a locally built `lwrclpy` wheel, pass it when starting the server. The sa
   --lwrclpy-wheel /Users/tatsuyai/repos/lwrclpy/dist/lwrclpy-0.5.1-cp313-cp313-macosx_26_0_arm64.whl
 ```
 
+When producing a Windows `lwrclpy` wheel for App Control / Code Integrity environments, repair the wheel before publishing it. This replaces `lwrclpy/_vendor/lib/libcrypto-3-x64.dll` and `libssl-3-x64.dll` with the signed DLLs from the official Python runtime and updates the wheel `RECORD`.
+
+```powershell
+python scripts\repair_lwrclpy_windows_wheel.py path\to\lwrclpy-...-win_amd64.whl -o path\to\lwrclpy-...-win_amd64.repaired.whl
+```
+
+The wheel still uses the bundled `lwrclpy` / FastDDS DLLs; only the OpenSSL DLLs that commonly trip App Control are replaced.
+
 Only one server can run in the same working context. If another server is already running, startup fails with:
 
 ```text

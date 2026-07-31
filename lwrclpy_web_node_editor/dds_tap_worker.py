@@ -16,6 +16,12 @@ from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 
+if os.name == "nt":
+    try:
+        from .atomic_file import write_bytes_atomic, write_json_atomic
+    except ImportError:
+        from atomic_file import write_bytes_atomic, write_json_atomic
+
 RUNNING = True
 DEFAULT_DISPLAY_HZ = 60.0
 PREVIEW_JPEG_QUALITY = 60
@@ -98,7 +104,7 @@ def _topic_qos(data_type: str, topic: str = "") -> Any:
     topic_name = str(topic or "").rstrip("/")
     if normalized == "tf2_msgs/msg/TFMessage" and topic_name == "/tf_static":
         try:
-            import rclpy.qos as qos
+            import lwrclpy.qos as qos
 
             return qos.QoSProfile(
                 history=qos.HistoryPolicy.KEEP_LAST,
@@ -111,7 +117,7 @@ def _topic_qos(data_type: str, topic: str = "") -> Any:
     if normalized not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage", "sensor_msgs/msg/PointCloud2"}:
         return 10
     try:
-        import rclpy.qos as qos
+        import lwrclpy.qos as qos
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
@@ -147,20 +153,24 @@ def _field(value: Any, key: str) -> Any:
     return field
 
 
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-    data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    try:
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            if written <= 0:
-                raise OSError("status write returned 0 bytes")
-            view = view[written:]
-    finally:
-        os.close(fd)
-    os.replace(tmp_path, path)
+if os.name == "nt":
+    def _write_json(path: Path, payload: dict[str, Any]) -> None:
+        write_json_atomic(path, payload)
+else:
+    def _write_json(path: Path, payload: dict[str, Any]) -> None:
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+        data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("status write returned 0 bytes")
+                view = view[written:]
+        finally:
+            os.close(fd)
+        os.replace(tmp_path, path)
 
 
 def _decimate_series(series: list[dict[str, float]], limit: int) -> list[dict[str, float]]:
@@ -173,10 +183,14 @@ def _decimate_series(series: list[dict[str, float]], limit: int) -> list[dict[st
     return sampled
 
 
-def _write_bytes(path: Path, payload: Any) -> None:
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-    tmp_path.write_bytes(payload)
-    tmp_path.replace(path)
+if os.name == "nt":
+    def _write_bytes(path: Path, payload: Any) -> None:
+        write_bytes_atomic(path, payload)
+else:
+    def _write_bytes(path: Path, payload: Any) -> None:
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+        tmp_path.write_bytes(payload)
+        tmp_path.replace(path)
 
 
 def _create_shared_memory(name: str, size: int) -> shared_memory.SharedMemory | None:
@@ -1101,7 +1115,7 @@ def main() -> int:
     tap = DdsTap(config)
     _write_json(tap.status_path, {"running": True, "mode": tap.mode, "topic": tap.topic, "dataType": tap.data_type, "hz": 0.0, "count": 0})
 
-    import rclpy
+    import lwrclpy as rclpy
     _disable_lwrclpy_side_channels(config)
 
     if not rclpy.ok():
@@ -1149,7 +1163,7 @@ def main() -> int:
     executor_thread = None
     if tap.transport != "polling":
         try:
-            from rclpy.executors import MultiThreadedExecutor
+            from lwrclpy.executors import MultiThreadedExecutor
 
             executor = MultiThreadedExecutor(num_threads=1)
             executor.add_node(node)

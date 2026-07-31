@@ -15,6 +15,12 @@ from array import array
 from pathlib import Path
 from typing import Any
 
+if os.name == "nt":
+    try:
+        from .atomic_file import write_json_atomic
+    except ImportError:
+        from atomic_file import write_json_atomic
+
 RUNNING = True
 EXTERNAL_FASTDDS_TRANSPORTS = os.environ.get(
     "LWRCLPY_WEB_FASTDDS_TRANSPORTS",
@@ -79,11 +85,16 @@ def _spin_executor(executor: Any, status_path: Path) -> None:
             return
 
 
-def _write_status(status_path: Path, **payload: Any) -> None:
-    payload.setdefault("time", time.time())
-    tmp_path = status_path.with_name(f"{status_path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
-    tmp_path.replace(status_path)
+if os.name == "nt":
+    def _write_status(status_path: Path, **payload: Any) -> None:
+        payload.setdefault("time", time.time())
+        write_json_atomic(status_path, payload)
+else:
+    def _write_status(status_path: Path, **payload: Any) -> None:
+        payload.setdefault("time", time.time())
+        tmp_path = status_path.with_name(f"{status_path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+        tmp_path.replace(status_path)
 
 
 def _import_type_class(type_name: str):
@@ -104,7 +115,7 @@ def _sanitize_node_name(name: str) -> str:
 def _record_qos(data_type: str, depth: int = 4096) -> Any:
     depth = max(1, int(depth or 4096))
     try:
-        import rclpy.qos as qos
+        import lwrclpy.qos as qos
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
@@ -638,9 +649,9 @@ def main() -> int:
         _write_status(status_path, running=True, phase="dependencies", status="starting: loading MCAP dependencies", recorded=0)
         _ensure_mcap_dependencies()
         from mcap_ros2.writer import Writer as McapWriter
-        import rclpy
+        import lwrclpy as rclpy
         _disable_lwrclpy_side_channels(config)
-        from rclpy.executors import MultiThreadedExecutor
+        from lwrclpy.executors import MultiThreadedExecutor
         try:
             from lwrclpy.message_utils import expose_callable_fields
         except Exception:

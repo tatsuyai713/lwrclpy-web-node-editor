@@ -14,6 +14,12 @@ from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 
+if os.name == "nt":
+    try:
+        from .atomic_file import write_json_atomic
+    except ImportError:
+        from atomic_file import write_json_atomic
+
 RUNNING = True
 DEFAULT_PREVIEW_HZ = 60.0
 STREAM_HEADER = struct.Struct("<4sI Q I I I I I I d")
@@ -103,7 +109,7 @@ def _topic_qos(data_type: str, external: bool = False) -> Any:
     if str(data_type).replace(".", "/") not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
         return 10
     try:
-        import rclpy.qos as qos
+        import lwrclpy.qos as qos
 
         return qos.QoSProfile(
             history=qos.HistoryPolicy.KEEP_LAST,
@@ -184,11 +190,16 @@ def _matched_subscriptions(publisher: Any) -> int:
         return 0
 
 
-def _write_status(path: Path, **values: Any) -> None:
-    payload = {"time": time.time(), **values}
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    tmp_path.replace(path)
+if os.name == "nt":
+    def _write_status(path: Path, **values: Any) -> None:
+        payload = {"time": time.time(), **values}
+        write_json_atomic(path, payload)
+else:
+    def _write_status(path: Path, **values: Any) -> None:
+        payload = {"time": time.time(), **values}
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(path)
 
 
 def _create_shared_memory(name: str, size: int) -> shared_memory.SharedMemory | None:
@@ -604,7 +615,7 @@ def main() -> int:
     publisher = None
     if enable_dds_publish:
         _write_status(status_path, running=True, phase="dds_init", error="", videoPath=str(video_path))
-        import rclpy as _rclpy
+        import lwrclpy as _rclpy
 
         rclpy = _rclpy
         _disable_lwrclpy_side_channels(config)
