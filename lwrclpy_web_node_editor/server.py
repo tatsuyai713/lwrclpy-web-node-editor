@@ -44,6 +44,7 @@ from .windows_job import install_kill_on_close_job
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PROJECT_DIR = Path.cwd()
 WORKER_DIR = PROJECT_DIR / ".node_workers"
+_WINDOWS_PROCESS_SNAPSHOT: tuple[float, list[tuple[int, int, str]]] = (0.0, [])
 APP_SETTINGS_DIR = PROJECT_DIR / ".app_settings"
 CUSTOM_NODE_DIR = APP_SETTINGS_DIR / "custom_nodes"
 SAMPLES_DIR = PROJECT_DIR / "samples"
@@ -1888,6 +1889,15 @@ def _windows_command_line_server_pids() -> set[int]:
 
 
 def _windows_process_commands() -> list[tuple[int, str]]:
+    return [(pid, command) for pid, _parent, command in _windows_process_rows() if command]
+
+
+def _windows_process_rows() -> list[tuple[int, int, str]]:
+    global _WINDOWS_PROCESS_SNAPSHOT
+    now = time.monotonic()
+    cached_at, cached_rows = _WINDOWS_PROCESS_SNAPSHOT
+    if now - cached_at < 1.0:
+        return cached_rows
     try:
         result = subprocess.run(
             [
@@ -1896,22 +1906,26 @@ def _windows_process_commands() -> list[tuple[int, str]]:
                 "-Command",
                 (
                     "Get-CimInstance Win32_Process | "
-                    "Where-Object { $_.CommandLine } | "
-                    "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress -Depth 2"
+                    "Select-Object ProcessId,ParentProcessId,CommandLine | "
+                    "ConvertTo-Json -Compress -Depth 2"
                 ),
             ],
             check=False,
             capture_output=True,
             text=True,
+            timeout=5,
         )
     except Exception:
+        _WINDOWS_PROCESS_SNAPSHOT = (now, [])
         return []
     text = result.stdout.strip()
     if not text:
+        _WINDOWS_PROCESS_SNAPSHOT = (now, [])
         return []
     try:
         payload = json.loads(text)
     except Exception:
+        _WINDOWS_PROCESS_SNAPSHOT = (now, [])
         return []
     if isinstance(payload, dict):
         rows = [payload]
@@ -1919,47 +1933,7 @@ def _windows_process_commands() -> list[tuple[int, str]]:
         rows = payload
     else:
         return []
-    processes: list[tuple[int, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            pid = int(row.get("ProcessId") or 0)
-        except Exception:
-            continue
-        command = str(row.get("CommandLine") or "")
-        if pid > 0 and command:
-            processes.append((pid, command))
-    return processes
-
-
-def _current_process_family_pids() -> set[int]:
-    if os.name != "nt":
-        return {os.getpid()}
-    try:
-        result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                (
-                    "Get-CimInstance Win32_Process | "
-                    "Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress -Depth 2"
-                ),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except Exception:
-        return {os.getpid()}
-    try:
-        payload = json.loads(result.stdout.strip() or "[]")
-    except Exception:
-        return {os.getpid()}
-    rows = [payload] if isinstance(payload, dict) else payload if isinstance(payload, list) else []
-    parents: dict[int, int] = {}
-    children: dict[int, list[int]] = {}
+    processes: list[tuple[int, int, str]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -1968,8 +1942,19 @@ def _current_process_family_pids() -> set[int]:
             parent = int(row.get("ParentProcessId") or 0)
         except Exception:
             continue
-        if pid <= 0:
-            continue
+        command = str(row.get("CommandLine") or "")
+        if pid > 0:
+            processes.append((pid, parent, command))
+    _WINDOWS_PROCESS_SNAPSHOT = (now, processes)
+    return processes
+
+
+def _current_process_family_pids() -> set[int]:
+    if os.name != "nt":
+        return {os.getpid()}
+    parents: dict[int, int] = {}
+    children: dict[int, list[int]] = {}
+    for pid, parent, _command in _windows_process_rows():
         parents[pid] = parent
         children.setdefault(parent, []).append(pid)
     current = os.getpid()
