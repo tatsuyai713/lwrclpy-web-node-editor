@@ -1,0 +1,349 @@
+{
+  "source": "lwrclpy/third_party/ros-data-types-for-fastdds/src/**/*.idl",
+  "types": {
+    "action_msgs": {
+      "msg": [
+        "GoalInfo",
+        "GoalStatus",
+        "GoalStatusArray"
+      ],
+      "srv": [
+        "CancelGoal"
+      ]
+    },
+    "builtin_interfaces": {
+      "msg": [
+        "Duration",
+        "Time"
+      ]
+    },
+    "diagnostic_msgs": {
+      "msg": [
+        "DiagnosticArray",
+        "DiagnosticStatus",
+        "KeyValue"
+      ],
+      "srv": [
+        "AddDiagnostics",
+        "SelfTest"
+      ]
+    },
+    "example_interfaces": {
+      "srv": [
+        "AddTwoInts"
+      ]
+    },
+    "fixedsized_msgs": {
+      "msg": [
+        "FixedHeader",
+        "FixedImageFullHdBgr8",
+        "FixedImageFullHdDepth16",
+        "FixedImageFullHdMono8",
+        "FixedImageFullHdRgb8",
+        "FixedImageHdBgr8",
+        "FixedImageHdDepth16",
+        "FixedImageHdMono8",
+        "FixedImageHdRgb8",
+        "FixedImageQhdBgr8",
+        "FixedImageQhdDepth16",
+        "FixedImageQhdMono8",
+        "FixedImageQhdRgb8",
+        "FixedImageUhd4kBgr8",
+        "FixedImageUhd4kDepth16",
+        "FixedImageUhd4kMono8",
+        "FixedImageUhd4kRgb8",
+        "FixedImageVgaBgr8",
+        "FixedImageVgaDepth16",
+        "FixedImageVgaMono8",
+        "FixedImageVgaRgb8",
+        "FixedPointXYZIRT",
+        "FixedString128",
+        "FixedString16",
+        "FixedString32",
+        "FixedString64",
+        "FixedTime",
+        "HesaiAt128PointCloud",
+        "HesaiAtxPointCloud",
+        "HesaiJt128PointCloud",
+        "HesaiQt128PointCloud",
+        "HesaiQt64PointCloud",
+        "OusterOs1PointCloud",
+        "OusterOs2PointCloud",
+        "VelodyneHdl64ePointCloud",
+        "VelodyneVlp16PointCloud",
+        "VelodyneVlp32cPointCloud",
+        "VelodyneVls128PointCloud"
+      ]
+    },
+    "gazebo_msgs": {
+      "msg": [
+        "ContactState",
+        "ContactsState",
+        "LinkState",
+        "LinkStates",
+        "ModelState",
+        "ModelStates",
+        "ODEJointProperties",
+        "ODEPhysics",
+        "WorldState"
+      ],
+      "srv": [
+        "ApplyBodyWrench",
+        "ApplyJointEffort",
+        "Body",
+        "Default",
+        "DeleteLight",
+        "DeleteModel",
+        "GetJointProperties",
+        "GetLightProperties",
+        "GetLinkProperties",
+        "GetLinkState",
+        "GetModelProperties",
+        "GetModelState",
+        "GetPhysicsProperties",
+        "GetWorldProperties",
+        "Joint",
+        "SetJointProperties",
+        "SetJointTrajectory",
+        "SetLightProperties",
+        "SetLinkProperties",
+        "SetLinkState",
+        "SetModelConfiguration",
+        "SetModelState",
+        "SetPhysicsProperties",
+        "SpawnModel"
+      ]
+    },
+    "geometry_msgs": {
+      "msg": [
+        "Accel",
+        "AccelStamped",
+        "AccelWithCovariance",
+        "AccelWithCovarianceStamped",
+        "Inertia",
+        "InertiaStamped",
+        "Point",
+        "Point32",
+        "PointStamped",
+        "Polygon",
+        "PolygonStamped",
+        "Pose",
+        "Pose2D",
+        "PoseArray",
+        "PoseStamped",
+        "PoseWithCovariance",
+        "PoseWithCovarianceStamped",
+        "Quaternion",
+        "QuaternionStamped",
+        "Transform",
+        "TransformStamped",
+        "Twist",
+        "TwistStamped",
+        "TwistWithCovariance",
+        "TwistWithCovarianceStamped",
+        "Vector3",
+        "Vector3Stamped",
+        "VelocityStamped",
+        "Wrench",
+        "WrenchStamped"
+      ]
+    },
+    "lifecycle_msgs": {
+      "msg": [
+        "State",
+        "Transition",
+        "TransitionDescription",
+        "TransitionEvent"
+      ],
+      "srv": [
+        "ChangeState",
+        "GetAvailableStates",
+        "GetAvailableTransitions",
+        "GetState"
+      ]
+    },
+    "lwrclpy_bench": {
+      "msg": [
+        "LargeFixedImage"
+      ]
+    },
+    "nav_msgs": {
+      "msg": [
+        "GridCells",
+        "MapMetaData",
+        "OccupancyGrid",
+        "Odometry",
+        "Path"
+      ],
+      "srv": [
+        "GetMap",
+        "GetPlan",
+        "SetMap"
+      ]
+    },
+    "pendulum_msgs": {
+      "msg": [
+        "JointCommand",
+        "JointState",
+        "RttestResults"
+      ]
+    },
+    "rcl_interfaces": {
+      "msg": [
+        "Parameter",
+        "ParameterEvent",
+        "ParameterValue",
+        "SetParametersResult"
+      ],
+      "srv": [
+        "GetParameterTypes",
+        "GetParameters",
+        "SetParameters",
+        "SetParametersAtomically"
+      ]
+    },
+    "sensor_msgs": {
+      "msg": [
+        "BatteryState",
+        "CameraInfo",
+        "ChannelFloat32",
+        "CompressedImage",
+        "FluidPressure",
+        "Illuminance",
+        "Image",
+        "Imu",
+        "JointState",
+        "Joy",
+        "JoyFeedback",
+        "JoyFeedbackArray",
+        "LaserEcho",
+        "LaserScan",
+        "MagneticField",
+        "MultiDOFJointState",
+        "MultiEchoLaserScan",
+        "NavSatFix",
+        "NavSatStatus",
+        "PointCloud",
+        "PointCloud2",
+        "PointField",
+        "Range",
+        "RegionOfInterest",
+        "RelativeHumidity",
+        "Temperature",
+        "TimeReference"
+      ],
+      "srv": [
+        "SetCameraInfo"
+      ]
+    },
+    "shape_msgs": {
+      "msg": [
+        "Mesh",
+        "MeshTriangle",
+        "Plane",
+        "SolidPrimitive"
+      ]
+    },
+    "std_msgs": {
+      "msg": [
+        "Bool",
+        "Byte",
+        "ByteMultiArray",
+        "Char",
+        "ColorRGBA",
+        "Empty",
+        "Float32",
+        "Float32MultiArray",
+        "Float64",
+        "Float64MultiArray",
+        "Header",
+        "Int16",
+        "Int16MultiArray",
+        "Int32",
+        "Int32MultiArray",
+        "Int64",
+        "Int64MultiArray",
+        "Int8",
+        "Int8MultiArray",
+        "MultiArrayDimension",
+        "MultiArrayLayout",
+        "String",
+        "UInt16",
+        "UInt16MultiArray",
+        "UInt32",
+        "UInt32MultiArray",
+        "UInt64",
+        "UInt64MultiArray",
+        "UInt8",
+        "UInt8MultiArray"
+      ]
+    },
+    "std_srvs": {
+      "srv": [
+        "Empty",
+        "SetBool",
+        "Trigger"
+      ]
+    },
+    "stereo_msgs": {
+      "msg": [
+        "DisparityImage"
+      ]
+    },
+    "test_msgs": {
+      "msg": [
+        "BoundedArrayNested",
+        "BoundedArrayPrimitives",
+        "Builtins",
+        "DynamicArrayNested",
+        "DynamicArrayPrimitives",
+        "DynamicArrayPrimitivesNested",
+        "Empty",
+        "Nested",
+        "Primitives",
+        "StaticArrayNested",
+        "StaticArrayPrimitives"
+      ],
+      "srv": [
+        "Empty",
+        "Primitives"
+      ]
+    },
+    "tf2_msgs": {
+      "msg": [
+        "TF2Error",
+        "TFMessage"
+      ],
+      "srv": [
+        "FrameGraph"
+      ]
+    },
+    "trajectory_msgs": {
+      "msg": [
+        "JointTrajectory",
+        "JointTrajectoryPoint",
+        "MultiDOFJointTrajectory",
+        "MultiDOFJointTrajectoryPoint"
+      ]
+    },
+    "unique_identifier_msgs": {
+      "msg": [
+        "UUID"
+      ]
+    },
+    "visualization_msgs": {
+      "msg": [
+        "ImageMarker",
+        "InteractiveMarker",
+        "InteractiveMarkerControl",
+        "InteractiveMarkerFeedback",
+        "InteractiveMarkerInit",
+        "InteractiveMarkerPose",
+        "InteractiveMarkerUpdate",
+        "Marker",
+        "MarkerArray",
+        "MenuEntry"
+      ]
+    }
+  }
+}

@@ -1368,7 +1368,12 @@ function renderPortConfigList(containerId, ports, labelPrefix) {
     container.appendChild(row);
   });
   container.querySelectorAll('input,select').forEach((input) => {
-    input.oninput = () => updateDraftPort(containerId.startsWith('input') ? 'inputs' : 'outputs', input);
+    const update = () => updateDraftPort(containerId.startsWith('input') ? 'inputs' : 'outputs', input);
+    if (input.tagName === 'SELECT') {
+      input.onchange = update;
+    } else {
+      input.oninput = update;
+    }
   });
 }
 

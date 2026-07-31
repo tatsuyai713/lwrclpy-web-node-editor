@@ -46,8 +46,34 @@ rclpy.spin(node)
 """
 
 
+def _bundled_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
+    manifest_path = Path(__file__).resolve().parent / "static" / "lwrclpy_message_types.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    types = payload.get("types")
+    return types if isinstance(types, dict) else {}
+
+
+def _merge_type_tree(
+    result: dict[str, dict[str, set[str]]],
+    source: dict[str, dict[str, list[str]]],
+) -> None:
+    for package, kinds in source.items():
+        if not isinstance(kinds, dict):
+            continue
+        for kind, names in kinds.items():
+            if kind not in {"msg", "srv"} or not isinstance(names, list):
+                continue
+            result.setdefault(package, {}).setdefault(kind, set()).update(
+                str(name) for name in names if name
+            )
+
+
 def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
-    result: dict[str, dict[str, list[str]]] = {}
+    result: dict[str, dict[str, set[str]]] = {}
+    _merge_type_tree(result, _bundled_lwrclpy_types())
     for module_info in pkgutil.iter_modules():
         package = module_info.name
         if not (package.endswith("_msgs") or package.endswith("_srvs")):
@@ -70,8 +96,14 @@ def discover_lwrclpy_types() -> dict[str, dict[str, list[str]]]:
                     if path.stem[:1].isupper() and path.stem.endswith(("_Request", "_Response"))
                 })
             if names:
-                result.setdefault(package, {})[kind] = names
-    return dict(sorted(result.items()))
+                result.setdefault(package, {}).setdefault(kind, set()).update(names)
+    return {
+        package: {
+            kind: sorted(names)
+            for kind, names in sorted(kinds.items())
+        }
+        for package, kinds in sorted(result.items())
+    }
 
 
 def _discover_message_names(kind_dir: Path) -> set[str]:
